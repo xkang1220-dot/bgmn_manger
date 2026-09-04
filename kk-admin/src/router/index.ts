@@ -51,7 +51,7 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
-  document.title = `${to.meta.title || 'KK'} - 公司管理系统`
+  document.title = `${to.meta.title || 'BGMN'} - BGMN`
   const userStore = useUserStore()
   if (to.meta.requiresAuth === false) {
     if (userStore.token && to.name === 'login') return '/dashboard'

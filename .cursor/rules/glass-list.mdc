@@ -1,0 +1,38 @@
+---
+description: 列表页与内容卡片统一使用首页确认过的毛玻璃样式
+alwaysApply: true
+---
+
+# 列表页毛玻璃
+
+首页工作台确认过的玻璃属性，列表页和内容卡片必须复用，不要另起一套白底实心卡。
+
+## 表面（`.page-card` / `.glass-panel`）
+
+- 背景 `rgba(255, 255, 255, 0.46)` → `--kk-glass-bg`
+- 描边 `rgba(255, 255, 255, 0.72)` → `--kk-glass-border`
+- 模糊 `saturate(180%) blur(22px)` → `--kk-glass-blur`
+- 阴影 `0 1px 2px rgba(0,0,0,.03), 0 10px 28px rgba(0,0,0,.04)` → `--kk-glass-shadow`
+- 圆角 `--kk-radius`（18px）
+- 内边距 `22px 24px`
+
+## 表格
+
+- 表体透明
+- 表头 `rgba(255, 255, 255, 0.28)` → `--kk-glass-table-header`
+- 行悬停 `rgba(255, 255, 255, 0.42)` → `--kk-glass-table-hover`
+
+## 弹层（`.el-dialog` / `.el-drawer` / `.el-message-box`）
+
+- 白色毛玻璃，要比卡片略实，但必须能隐约看到底下卡片轮廓
+- 背景 `--kk-glass-overlay-bg`（`rgba(255,255,255,0.42)`）
+- 模糊 `--kk-glass-overlay-blur`（`saturate(180%) blur(28px)`）
+- `.el-overlay` 必须透明；暗蒙版改用弹层 `box-shadow: 0 0 0 100vmax rgba(24,24,27,0.12)` 罩在周围，不要铺在玻璃背后（否则半透明白叠两层，底下透不出来还会发脏）
+- 圆角 `--kk-radius-lg`（24px）
+- 不要给弹层设 `overflow: hidden`，会裁掉外扩蒙版，也可能让 backdrop-filter 失效
+
+## 不要
+
+- 不要在侧栏、顶栏加毛玻璃，除非用户明确要求
+- 不要在页面背景铺大色块
+- 指标卡光晕保持淡色（opacity 约 0.22），图标本身不要降低透明度

@@ -1,0 +1,16 @@
+---
+description: 本项目只允许改前端，禁止改后端业务逻辑
+alwaysApply: true
+---
+
+# 前端 UI 重构范围
+
+只允许修改 `kk-admin/` 下的前端代码（Vue、样式、布局、组件表现）。
+
+禁止修改：
+- 后端模块：`kk-api`、`kk-common`、`kk-core`、`kk-infra`、`kk-starter`
+- SQL：`sql/`
+- 接口契约、请求/响应字段、鉴权与业务规则
+- 为了“好看”去改 API 入参、出参或页面数据语义
+
+UI 重构可以改样式、布局、交互表现，但必须复用现有 API 与页面逻辑。

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import KkLogoMark from '@/components/KkLogoMark.vue'
 import { ElMessage } from 'element-plus'
 import { authApi } from '@/api/auth'
 import { useUserStore } from '@/stores/user'
@@ -127,8 +128,8 @@ onMounted(() => {
 
     <div class="login-shell">
       <section class="login-brand">
-        <div class="brand-mark">K</div>
-        <h1>KK Manager</h1>
+        <div class="brand-mark"><KkLogoMark /></div>
+        <h1>BGMN</h1>
         <p>财务 · 项目分钱 · 人事档案 · 权限文件</p>
         <ul class="brand-list">
           <li>资金池统一管理</li>
@@ -205,7 +206,7 @@ onMounted(() => {
   padding: 24px;
   position: relative;
   overflow: hidden;
-  background: #0c1222;
+  background: #09090b;
 }
 
 .login-bg {
@@ -224,7 +225,7 @@ onMounted(() => {
 .orb-1 {
   width: 420px;
   height: 420px;
-  background: #4f46e5;
+  background: #18181b;
   top: -120px;
   left: -80px;
 }
@@ -232,7 +233,7 @@ onMounted(() => {
 .orb-2 {
   width: 360px;
   height: 360px;
-  background: #06b6d4;
+  background: #52525b;
   bottom: -100px;
   right: 10%;
 }
@@ -240,7 +241,7 @@ onMounted(() => {
 .orb-3 {
   width: 280px;
   height: 280px;
-  background: #7c3aed;
+  background: #a1a1aa;
   top: 40%;
   right: -60px;
 }
@@ -268,14 +269,10 @@ onMounted(() => {
   width: 52px;
   height: 52px;
   border-radius: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 24px;
-  font-weight: 800;
+  overflow: hidden;
   color: #fff;
-  background: linear-gradient(135deg, #6366f1, #4f46e5);
-  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.5);
+  background: #18181b;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   margin-bottom: 24px;
 }
 
@@ -315,7 +312,7 @@ onMounted(() => {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #6366f1;
+  background: #d4d4d8;
 }
 
 .login-panel {
@@ -344,7 +341,7 @@ onMounted(() => {
 
 .login-form :deep(.el-input__wrapper:hover),
 .login-form :deep(.el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 1px #c7d2fe inset;
+  box-shadow: 0 0 0 1px #d1d1d2 inset;
 }
 
 .login-btn {
@@ -387,8 +384,8 @@ onMounted(() => {
 }
 
 .totp-box:focus {
-  border-color: #6366f1;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+  border-color: #18181b;
+  box-shadow: 0 0 0 3px rgba(24, 24, 27, 0.15);
 }
 
 @media (max-width: 860px) {

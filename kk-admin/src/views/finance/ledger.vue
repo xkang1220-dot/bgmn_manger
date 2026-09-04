@@ -21,6 +21,8 @@ const channels = ref<any[]>([])
 const projects = ref<any[]>([])
 const dialog = ref(false)
 const uploading = ref(false)
+const listLoading = ref(false)
+const saving = ref(false)
 
 const form = reactive<any>({
   bizType: 'INCOME',
@@ -212,6 +214,7 @@ const pagedRows = computed(() => {
 })
 
 async function load() {
+  listLoading.value = true
   try {
     const dateRange = query.dateRange || []
     const res = await bizApi.ledgerPage({
@@ -245,6 +248,8 @@ async function load() {
     query.page = 1
   } catch {
     // 拦截器已提示；保留当前列表避免空白闪烁
+  } finally {
+    listLoading.value = false
   }
 }
 
@@ -329,35 +334,51 @@ async function save() {
     return
   }
   const typeLabel = form.bizType === 'INCOME' ? '入账' : '出账'
-  await workflowApi.submit({
-    type: 'LEDGER_REGISTER',
-    title: form.title || `总账${typeLabel}`,
-    amount: form.amount,
-    poolId: form.poolId,
-    projectId: form.projectId,
-    remark: form.remark,
-    voucherFileIds: form.voucherFileIds.length ? form.voucherFileIds : undefined,
-    payload: {
-      bizType: form.bizType,
-      accountType: 'POOL',
-      poolId: form.poolId,
-      channelId: form.bizType === 'INCOME' ? form.channelId : undefined,
-      projectId: form.projectId,
+  saving.value = true
+  try {
+    await workflowApi.submit({
+      type: 'LEDGER_REGISTER',
+      title: form.title || `总账${typeLabel}`,
       amount: form.amount,
-      feeMode: form.bizType === 'INCOME' && form.feeMode ? form.feeMode : undefined,
-      feeValue: form.bizType === 'INCOME' && form.feeMode ? form.feeValue : undefined,
-      title: form.title,
+      poolId: form.poolId,
+      projectId: form.projectId,
       remark: form.remark,
-      voucherFileIds: form.voucherFileIds.length ? [...form.voucherFileIds] : undefined,
-    },
-  })
-  ElMessage.success('已提交审批，通过后才会入账')
-  dialog.value = false
-  await Promise.all([load(), loadSummary()])
+      voucherFileIds: form.voucherFileIds.length ? form.voucherFileIds : undefined,
+      payload: {
+        bizType: form.bizType,
+        accountType: 'POOL',
+        poolId: form.poolId,
+        channelId: form.bizType === 'INCOME' ? form.channelId : undefined,
+        projectId: form.projectId,
+        amount: form.amount,
+        feeMode: form.bizType === 'INCOME' && form.feeMode ? form.feeMode : undefined,
+        feeValue: form.bizType === 'INCOME' && form.feeMode ? form.feeValue : undefined,
+        title: form.title,
+        remark: form.remark,
+        voucherFileIds: form.voucherFileIds.length ? [...form.voucherFileIds] : undefined,
+      },
+    })
+    ElMessage.success('已提交审批，通过后才会入账')
+    dialog.value = false
+    await Promise.all([load(), loadSummary()])
+  } finally {
+    saving.value = false
+  }
 }
 
 function onFilter() {
   query.page = 1
+  void load()
+}
+
+function resetFilter() {
+  query.page = 1
+  query.bizType = ''
+  query.channelId = undefined
+  query.keyword = ''
+  query.minAmount = undefined
+  query.maxAmount = undefined
+  query.dateRange = []
   void load()
 }
 
@@ -377,70 +398,120 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page-card">
-    <div class="page-header">
-      <div>
-        <h3 class="page-title">公司总账</h3>
-        <p class="page-desc">公司进出账流水。系统内资金 = 公司余额 + 项目余额 + 个人钱包；三者相加才是全部，公司余额只是还没拨出去的那一块</p>
+  <div class="page-stack">
+    <div class="page-top">
+      <div class="page-top__main">
+        <p class="page-desc">系统内资金 = 公司余额 + 项目余额 + 个人钱包；公司余额是尚未拨出的部分</p>
       </div>
-      <el-button type="primary" @click="openDialog">登记流水</el-button>
+      <div class="page-actions">
+        <el-button type="primary" @click="openDialog">登记流水</el-button>
+      </div>
     </div>
 
     <div class="summary-row">
-      <div class="summary-card main">
-        <div class="summary-label">系统内资金</div>
-        <div class="summary-value">{{ fmtMoney(summary.assetsTotal) }}</div>
-        <div class="summary-eq">
-          公司 {{ fmtMoney(summary.poolTotal) }}
-          + 项目 {{ fmtMoney(summary.projectTotal) }}
-          + 个人 {{ fmtMoney(summary.walletTotal) }}
+      <div class="summary-card summary-card--indigo">
+        <div class="summary-body">
+          <div class="summary-label">系统内资金</div>
+          <div class="summary-value">{{ fmtMoney(summary.assetsTotal) }}</div>
+          <div class="summary-eq">
+            公司 {{ fmtMoney(summary.poolTotal) }}
+            + 项目 {{ fmtMoney(summary.projectTotal) }}
+            + 个人 {{ fmtMoney(summary.walletTotal) }}
+          </div>
         </div>
+        <el-icon class="summary-glyph" :size="52"><Coin /></el-icon>
       </div>
-      <div class="summary-card">
-        <div class="summary-label">公司余额</div>
-        <div class="summary-value sm">{{ fmtMoney(summary.poolTotal) }}</div>
-        <div class="summary-hint">还在公司账上，可入账/出账/预支到项目</div>
+      <div class="summary-card summary-card--violet">
+        <div class="summary-body">
+          <div class="summary-label">公司余额</div>
+          <div class="summary-value sm">{{ fmtMoney(summary.poolTotal) }}</div>
+          <div class="summary-hint">还在公司账上，可入账 / 出账 / 预支到项目</div>
+        </div>
+        <el-icon class="summary-glyph" :size="52"><OfficeBuilding /></el-icon>
       </div>
-      <div class="summary-card">
-        <div class="summary-label">项目余额合计</div>
-        <div class="summary-value sm">{{ fmtMoney(summary.projectTotal) }}</div>
-        <div class="summary-hint">已预支到各项目、尚未花完/分完</div>
+      <div class="summary-card summary-card--amber">
+        <div class="summary-body">
+          <div class="summary-label">项目余额合计</div>
+          <div class="summary-value sm">{{ fmtMoney(summary.projectTotal) }}</div>
+          <div class="summary-hint">已预支到各项目、尚未花完或分完</div>
+        </div>
+        <el-icon class="summary-glyph" :size="52"><FolderOpened /></el-icon>
       </div>
-      <div class="summary-card">
-        <div class="summary-label">个人钱包合计</div>
-        <div class="summary-value sm">{{ fmtMoney(summary.walletTotal) }}</div>
-        <div class="summary-hint">已分到个人手里的钱，是系统内资金的一部分，不会超过系统内资金</div>
+      <div class="summary-card summary-card--cyan">
+        <div class="summary-body">
+          <div class="summary-label">个人钱包合计</div>
+          <div class="summary-value sm">{{ fmtMoney(summary.walletTotal) }}</div>
+          <div class="summary-hint">已分到个人，不会超过系统内资金</div>
+        </div>
+        <el-icon class="summary-glyph" :size="52"><Wallet /></el-icon>
       </div>
     </div>
 
-    <div class="toolbar">
-      <el-select v-model="query.bizType" clearable placeholder="类型" style="width: 130px" @change="onFilter">
-        <el-option label="入账" value="INCOME" />
-        <el-option label="出账" value="EXPENSE" />
-        <el-option label="手续费" value="FEE" />
-        <el-option label="项目分钱" value="SETTLE" />
-        <el-option label="项目预支" value="ADVANCE" />
-        <el-option label="回退" value="ROLLBACK" />
-      </el-select>
-      <el-select v-model="query.channelId" clearable placeholder="收款渠道" style="width: 160px" @change="onFilter">
-        <el-option v-for="c in channels" :key="c.id" :label="c.name" :value="c.id" />
-      </el-select>
-      <el-date-picker
-        v-model="query.dateRange"
-        type="daterange"
-        value-format="YYYY-MM-DD"
-        start-placeholder="开始"
-        end-placeholder="结束"
-        style="width: 250px"
-        @change="onFilter"
-      />
-      <el-input-number v-model="query.minAmount" :min="0" :precision="2" controls-position="right" placeholder="最小金额" style="width: 120px" />
-      <el-input-number v-model="query.maxAmount" :min="0" :precision="2" controls-position="right" placeholder="最大金额" style="width: 120px" />
-      <el-input v-model="query.keyword" clearable placeholder="编号/摘要" style="width: 140px" @keyup.enter="onFilter" />
-      <el-button type="primary" @click="onFilter">查询</el-button>
-    </div>
+    <div class="page-card">
+      <el-form class="filter-bar" @submit.prevent="onFilter">
+      <el-form-item label="类型">
+        <el-select v-model="query.bizType" clearable placeholder="全部" class="filter-select">
+          <el-option label="入账" value="INCOME" />
+          <el-option label="出账" value="EXPENSE" />
+          <el-option label="手续费" value="FEE" />
+          <el-option label="项目分钱" value="SETTLE" />
+          <el-option label="项目预支" value="ADVANCE" />
+          <el-option label="回退" value="ROLLBACK" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="收款渠道">
+        <el-select v-model="query.channelId" clearable placeholder="全部" class="filter-select--wide">
+          <el-option v-for="c in channels" :key="c.id" :label="c.name" :value="c.id" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="发生时间">
+        <el-date-picker
+          v-model="query.dateRange"
+          type="daterange"
+          unlink-panels
+          clearable
+          value-format="YYYY-MM-DD"
+          range-separator="至"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+          style="width: 220px"
+        />
+      </el-form-item>
+      <el-form-item label="金额">
+        <div class="amount-range">
+          <el-input-number
+            v-model="query.minAmount"
+            :controls="false"
+            :precision="2"
+            placeholder="最小"
+            class="amount-input"
+          />
+          <span class="amount-sep">至</span>
+          <el-input-number
+            v-model="query.maxAmount"
+            :controls="false"
+            :precision="2"
+            placeholder="最大"
+            class="amount-input"
+          />
+        </div>
+      </el-form-item>
+      <el-form-item label="关键词">
+        <el-input
+          v-model="query.keyword"
+          clearable
+          placeholder="编号 / 摘要"
+          class="filter-keyword"
+          @keyup.enter="onFilter"
+        />
+      </el-form-item>
+      <el-form-item class="filter-actions">
+        <el-button type="primary" native-type="submit" :loading="listLoading">查询</el-button>
+        <el-button @click="resetFilter">重置</el-button>
+      </el-form-item>
+    </el-form>
 
-    <el-table :data="pagedRows" row-key="key" class="ledger-table" stripe>
+    <el-table v-loading="listLoading" :data="pagedRows" row-key="key" class="ledger-table" stripe empty-text="暂无流水">
       <el-table-column label="时间" width="150">
         <template #default="{ row }">{{ fmtTime(row.occurTime) }}</template>
       </el-table-column>
@@ -481,16 +552,19 @@ onMounted(async () => {
       </el-table-column>
     </el-table>
 
-    <el-pagination
-      style="margin-top: 12px"
-      v-model:current-page="query.page"
-      v-model:page-size="query.pageSize"
-      :total="companyRows.length"
-      :page-sizes="[10, 20, 50]"
-      layout="total, sizes, prev, pager, next"
-    />
+    <div v-if="companyRows.length" class="page-footer">
+      <el-pagination
+        v-model:current-page="query.page"
+        v-model:page-size="query.pageSize"
+        :total="companyRows.length"
+        :page-sizes="[10, 20, 50]"
+        layout="total, sizes, prev, pager, next"
+      />
+    </div>
 
-    <el-drawer v-model="detailVisible" title="流水详细" size="520px">
+    </div>
+
+    <el-drawer v-model="detailVisible" title="流水详细" size="520px" append-to-body>
       <template v-if="detailRow">
         <el-descriptions :column="1" border>
           <el-descriptions-item label="时间">{{ fmtTime(detailRow.occurTime) }}</el-descriptions-item>
@@ -524,7 +598,7 @@ onMounted(async () => {
       </template>
     </el-drawer>
 
-    <el-dialog v-model="dialog" title="登记流水（需审批）" width="560px" @closed="emptyForm">
+    <el-dialog v-model="dialog" title="登记流水（需审批）" width="560px" :close-on-click-modal="false" @closed="emptyForm">
       <el-form label-width="100px">
         <el-form-item label="类型">
           <el-select v-model="form.bizType" style="width: 100%">
@@ -604,43 +678,78 @@ onMounted(async () => {
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
-        <el-button type="primary" @click="save">提交审批</el-button>
+        <el-button type="primary" :loading="saving" @click="save">提交审批</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <style scoped>
-.page-desc {
-  margin: 4px 0 0;
-  color: #64748b;
-  font-size: 13px;
-}
 .summary-row {
   display: grid;
   grid-template-columns: 1.4fr 1fr 1fr 1fr;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 16px;
 }
 .summary-card {
-  padding: 14px 16px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 108px;
+  padding: 18px 16px 18px 20px;
+  background: var(--kk-glass-bg);
+  border: 1px solid var(--kk-glass-border);
+  border-radius: var(--kk-radius);
+  box-shadow: var(--kk-glass-shadow);
+  backdrop-filter: var(--kk-glass-blur);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
 }
-.summary-card.main {
-  background: linear-gradient(135deg, #f8fafc, #eef2ff);
+.summary-card::before {
+  content: "";
+  position: absolute;
+  right: -24px;
+  top: 50%;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  transform: translateY(-50%);
+  filter: blur(32px);
+  opacity: 0.22;
+  pointer-events: none;
+}
+.summary-card--indigo::before { background: #d4d4d8; }
+.summary-card--cyan::before { background: #a5f3fc; }
+.summary-card--violet::before { background: #ddd6fe; }
+.summary-card--amber::before { background: #fde68a; }
+.summary-card--indigo .summary-glyph { color: var(--kk-primary); }
+.summary-card--cyan .summary-glyph { color: #0891b2; }
+.summary-card--violet .summary-glyph { color: #7c3aed; }
+.summary-card--amber .summary-glyph { color: #d97706; }
+.summary-body {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+.summary-glyph {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+  opacity: 1;
 }
 .summary-label {
-  font-size: 12px;
-  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--kk-text-secondary);
 }
 .summary-value {
-  margin-top: 6px;
-  font-size: 28px;
+  margin-top: 8px;
+  font-size: 24px;
   font-weight: 700;
-  color: #0f172a;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--kk-text);
 }
 .summary-value.sm {
   font-size: 22px;
@@ -648,13 +757,13 @@ onMounted(async () => {
 .summary-eq {
   margin-top: 8px;
   font-size: 12px;
-  color: #64748b;
+  color: var(--kk-text-secondary);
   line-height: 1.5;
 }
 .summary-hint {
   margin-top: 6px;
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--kk-text-muted);
   line-height: 1.4;
 }
 @media (max-width: 1100px) {
@@ -662,64 +771,60 @@ onMounted(async () => {
     grid-template-columns: 1fr 1fr;
   }
 }
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 12px;
-}
 .fee-hint {
   margin-top: 6px;
   font-size: 12px;
-  color: #64748b;
+  color: var(--kk-text-secondary);
   line-height: 1.5;
 }
 .biz-no {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
-  color: #475569;
+  color: var(--kk-text-secondary);
 }
 .amt-in {
-  color: #16a34a;
+  color: var(--kk-success);
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 .amt-out {
-  color: #dc2626;
+  color: var(--kk-danger);
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 .balance-text {
   font-weight: 600;
-  color: #334155;
+  font-variant-numeric: tabular-nums;
+  color: var(--kk-text);
 }
 .muted {
-  color: #94a3b8;
+  color: var(--kk-text-muted);
 }
 .voucher-count {
-  color: #2563eb;
+  color: var(--kk-primary);
   font-size: 13px;
 }
 .detail-sec {
   margin: 18px 0 10px;
   font-size: 14px;
-  color: #0f172a;
+  color: var(--kk-text);
 }
 .voucher-gallery {
   display: grid;
   gap: 12px;
 }
 .voucher-card {
-  border: 1px solid #e8edf4;
+  border: 1px solid var(--kk-glass-border);
   border-radius: 10px;
   padding: 10px;
-  background: #f8fafc;
+  background: rgba(255, 255, 255, 0.28);
 }
 .voucher-thumb {
   cursor: pointer;
   border-radius: 8px;
   overflow: hidden;
   background: #fff;
-  border: 1px solid #eef2f7;
+  border: 1px solid rgba(0, 0, 0, 0.04);
 }
 .voucher-thumb img {
   display: block;
@@ -733,7 +838,7 @@ onMounted(async () => {
   border-radius: 8px;
   background: #fff;
   border: 1px dashed #cbd5e1;
-  color: #334155;
+  color: var(--kk-text);
   font-size: 13px;
   word-break: break-all;
 }
@@ -744,9 +849,9 @@ onMounted(async () => {
 .empty-voucher {
   padding: 20px;
   text-align: center;
-  color: #94a3b8;
+  color: var(--kk-text-muted);
   font-size: 13px;
-  background: #f8fafc;
+  background: rgba(255, 255, 255, 0.28);
   border-radius: 8px;
 }
 .voucher-box {
@@ -761,11 +866,18 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 8px;
   padding: 6px 0;
-  border-bottom: 1px dashed #e2e8f0;
+  border-bottom: 1px dashed var(--kk-hairline);
 }
 @media (max-width: 960px) {
   .summary-row {
     grid-template-columns: 1fr;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .summary-card {
+    background: #fff;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 }
 </style>

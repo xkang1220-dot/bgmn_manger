@@ -164,6 +164,22 @@ function pct(n?: number | string | null) {
   return `${Number(n).toFixed(2)}%`
 }
 
+function onFilter() {
+  query.page = 1
+  load()
+}
+
+function resetFilter() {
+  query.type = ''
+  query.status = ''
+  query.keyword = ''
+  query.minAmount = undefined
+  query.maxAmount = undefined
+  query.dateRange = []
+  query.page = 1
+  load()
+}
+
 onMounted(load)
 </script>
 
@@ -176,46 +192,84 @@ onMounted(load)
       </div>
     </div>
 
-    <div class="toolbar">
-      <el-radio-group v-model="scope" @change="() => { query.page = 1; load() }">
-        <el-radio-button value="todo">待我处理</el-radio-button>
-        <el-radio-button value="mine">我发起的</el-radio-button>
-        <el-radio-button value="all">全部</el-radio-button>
-      </el-radio-group>
-      <el-select v-model="query.type" clearable placeholder="类型" style="width: 150px" @change="() => { query.page = 1; load() }">
-        <el-option label="创建项目" value="PROJECT_CREATE" />
-        <el-option label="删除项目" value="PROJECT_DELETE" />
-        <el-option label="个人报销" value="REIMBURSE_PERSONAL" />
-        <el-option label="项目报销" value="REIMBURSE_PROJECT" />
-        <el-option label="项目预支" value="PROJECT_ADVANCE" />
-        <el-option label="分成配置" value="SHARE_CONFIG" />
-        <el-option label="项目分钱" value="PROJECT_SETTLE" />
-        <el-option label="工资申请" value="SALARY_APPLY" />
-        <el-option label="预留回公司" value="RESERVE_RETURN" />
-        <el-option label="总账登记" value="LEDGER_REGISTER" />
-        <el-option label="月度核验" value="MONTHLY_VERIFY" />
-        <el-option label="资金回退" value="ROLLBACK" />
-      </el-select>
-      <el-select v-model="query.status" clearable placeholder="状态" style="width: 120px" @change="() => { query.page = 1; load() }">
-        <el-option label="待审批" value="PENDING" />
-        <el-option label="已通过" value="APPROVED" />
-        <el-option label="已拒绝" value="REJECTED" />
-        <el-option label="已撤回" value="WITHDRAWN" />
-      </el-select>
-      <el-date-picker
-        v-model="query.dateRange"
-        type="daterange"
-        value-format="YYYY-MM-DD"
-        start-placeholder="开始日期"
-        end-placeholder="结束日期"
-        style="width: 260px"
-        @change="() => { query.page = 1; load() }"
-      />
-      <el-input-number v-model="query.minAmount" :min="0" :precision="2" placeholder="最小金额" controls-position="right" style="width: 130px" />
-      <el-input-number v-model="query.maxAmount" :min="0" :precision="2" placeholder="最大金额" controls-position="right" style="width: 130px" />
-      <el-input v-model="query.keyword" clearable placeholder="单号/标题" style="width: 160px" @keyup.enter="() => { query.page = 1; load() }" />
-      <el-button type="primary" @click="() => { query.page = 1; load() }">查询</el-button>
-    </div>
+    <el-form class="filter-bar" @submit.prevent="onFilter">
+      <el-form-item label="范围">
+        <el-radio-group v-model="scope" @change="onFilter">
+          <el-radio-button value="todo">待我处理</el-radio-button>
+          <el-radio-button value="mine">我发起的</el-radio-button>
+          <el-radio-button value="all">全部</el-radio-button>
+        </el-radio-group>
+      </el-form-item>
+      <el-form-item label="类型">
+        <el-select v-model="query.type" clearable placeholder="全部" class="filter-select--wide">
+          <el-option label="创建项目" value="PROJECT_CREATE" />
+          <el-option label="删除项目" value="PROJECT_DELETE" />
+          <el-option label="个人报销" value="REIMBURSE_PERSONAL" />
+          <el-option label="项目报销" value="REIMBURSE_PROJECT" />
+          <el-option label="项目预支" value="PROJECT_ADVANCE" />
+          <el-option label="分成配置" value="SHARE_CONFIG" />
+          <el-option label="项目分钱" value="PROJECT_SETTLE" />
+          <el-option label="工资申请" value="SALARY_APPLY" />
+          <el-option label="预留回公司" value="RESERVE_RETURN" />
+          <el-option label="总账登记" value="LEDGER_REGISTER" />
+          <el-option label="月度核验" value="MONTHLY_VERIFY" />
+          <el-option label="资金回退" value="ROLLBACK" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="状态">
+        <el-select v-model="query.status" clearable placeholder="全部" class="filter-select">
+          <el-option label="待审批" value="PENDING" />
+          <el-option label="已通过" value="APPROVED" />
+          <el-option label="已拒绝" value="REJECTED" />
+          <el-option label="已撤回" value="WITHDRAWN" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="申请时间">
+        <el-date-picker
+          v-model="query.dateRange"
+          type="daterange"
+          unlink-panels
+          clearable
+          value-format="YYYY-MM-DD"
+          range-separator="至"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+          style="width: 240px"
+        />
+      </el-form-item>
+      <el-form-item label="金额">
+        <div class="amount-range">
+          <el-input-number
+            v-model="query.minAmount"
+            :controls="false"
+            :precision="2"
+            placeholder="最小"
+            class="amount-input"
+          />
+          <span class="amount-sep">至</span>
+          <el-input-number
+            v-model="query.maxAmount"
+            :controls="false"
+            :precision="2"
+            placeholder="最大"
+            class="amount-input"
+          />
+        </div>
+      </el-form-item>
+      <el-form-item label="关键词">
+        <el-input
+          v-model="query.keyword"
+          clearable
+          placeholder="单号 / 标题"
+          class="filter-keyword"
+          @keyup.enter="onFilter"
+        />
+      </el-form-item>
+      <el-form-item class="filter-actions">
+        <el-button type="primary" native-type="submit">查询</el-button>
+        <el-button @click="resetFilter">重置</el-button>
+      </el-form-item>
+    </el-form>
 
     <el-table :data="list" stripe @row-click="openDetail" class="clickable">
       <el-table-column prop="bizNo" label="单号" width="180" />
@@ -243,7 +297,7 @@ onMounted(load)
       @current-change="load"
     />
 
-    <el-drawer v-model="drawer" title="审批详情" size="560px">
+    <el-drawer v-model="drawer" title="审批详情" size="560px" append-to-body>
       <template v-if="detail">
         <el-descriptions :column="1" border>
           <el-descriptions-item label="单号">{{ detail.bizNo }}</el-descriptions-item>
@@ -441,7 +495,6 @@ onMounted(load)
 
 <style scoped>
 .page-desc { margin: 4px 0 0; color: #64748b; font-size: 13px; }
-.toolbar { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
 .clickable :deep(tbody tr) { cursor: pointer; }
 .sec { margin: 18px 0 8px; font-size: 14px; color: #0f172a; }
 .task-row { display: flex; gap: 10px; padding: 6px 0; font-size: 13px; align-items: center; }
@@ -505,7 +558,7 @@ onMounted(load)
   display: block;
   padding: 10px 8px;
   font-size: 12px;
-  color: #1d4ed8;
+  color: var(--kk-primary);
   word-break: break-all;
 }
 </style>

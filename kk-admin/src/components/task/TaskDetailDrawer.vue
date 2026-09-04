@@ -369,6 +369,7 @@ function canDeleteComment(c: any) {
     :title="isNew ? '新建任务' : editing ? '编辑任务' : '任务详情'"
     size="520px"
     destroy-on-close
+    append-to-body
   >
     <div v-loading="loading" class="task-detail">
       <!-- 查看模式 -->

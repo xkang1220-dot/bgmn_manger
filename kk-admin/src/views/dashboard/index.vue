@@ -42,9 +42,6 @@ onMounted(async () => {
         class="stat-card"
         :class="`stat-card--${card.tone}`"
       >
-        <div class="stat-icon">
-          <el-icon :size="22"><component :is="card.icon" /></el-icon>
-        </div>
         <div class="stat-body">
           <div class="stat-label">{{ card.label }}</div>
           <div class="stat-value">
@@ -52,15 +49,16 @@ onMounted(async () => {
             <template v-else>{{ summary[card.key] ?? 0 }}</template>
           </div>
         </div>
+        <el-icon class="stat-glyph" :size="64"><component :is="card.icon" /></el-icon>
       </div>
     </div>
 
-    <div class="page-card">
+    <div class="glass-panel">
       <div class="section-head">
         <h3 class="page-title">资金池一览</h3>
         <span class="section-tip">公司资金统一存放于此</span>
       </div>
-      <el-table :data="summary.pools || []" stripe>
+      <el-table :data="summary.pools || []">
         <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column label="余额" width="160" align="right">
           <template #default="{ row }">
@@ -86,10 +84,14 @@ onMounted(async () => {
   gap: 20px;
 }
 
+.dashboard > .glass-panel {
+  flex: 1 0 auto;
+}
+
 .welcome-title {
   margin: 0;
   font-size: 24px;
-  font-weight: 800;
+  font-weight: 600;
   letter-spacing: -0.03em;
   color: var(--kk-text);
 }
@@ -107,60 +109,83 @@ onMounted(async () => {
 }
 
 .stat-card {
+  border-radius: var(--kk-radius);
+  background: var(--kk-glass-bg);
+  border: 1px solid var(--kk-glass-border);
+  box-shadow: var(--kk-glass-shadow);
+  backdrop-filter: var(--kk-glass-blur);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 20px;
-  border-radius: var(--kk-radius);
-  border: 1px solid var(--kk-card-border);
-  background: #fff;
-  box-shadow: var(--kk-card-shadow);
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 108px;
+  padding: 22px 18px 22px 22px;
+  transition: transform 0.2s var(--kk-ease), box-shadow 0.2s var(--kk-ease);
+}
+
+.stat-card::before {
+  content: "";
+  position: absolute;
+  right: -24px;
+  top: 50%;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  transform: translateY(-50%);
+  filter: blur(32px);
+  opacity: 0.22;
+  pointer-events: none;
 }
 
 .stat-card:hover {
   transform: translateY(-2px);
-  box-shadow: var(--kk-card-shadow-hover);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08);
 }
 
-.stat-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.stat-card--indigo::before { background: #d4d4d8; }
+.stat-card--cyan::before { background: #a5f3fc; }
+.stat-card--violet::before { background: #ddd6fe; }
+.stat-card--amber::before { background: #fde68a; }
+
+.stat-card--indigo .stat-glyph { color: var(--kk-primary); }
+.stat-card--cyan .stat-glyph { color: #0891b2; }
+.stat-card--violet .stat-glyph { color: #7c3aed; }
+.stat-card--amber .stat-glyph { color: #d97706; }
+
+.stat-body {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+
+.stat-glyph {
+  position: relative;
+  z-index: 1;
   flex-shrink: 0;
-}
-
-.stat-card--indigo .stat-icon {
-  background: linear-gradient(135deg, #eef2ff, #e0e7ff);
-  color: #4f46e5;
-}
-.stat-card--cyan .stat-icon {
-  background: linear-gradient(135deg, #ecfeff, #cffafe);
-  color: #0891b2;
-}
-.stat-card--violet .stat-icon {
-  background: linear-gradient(135deg, #f5f3ff, #ede9fe);
-  color: #7c3aed;
-}
-.stat-card--amber .stat-icon {
-  background: linear-gradient(135deg, #fffbeb, #fef3c7);
-  color: #d97706;
+  margin-right: -6px;
+  opacity: 1;
 }
 
 .stat-label {
   font-size: 13px;
+  font-weight: 500;
   color: var(--kk-text-secondary);
 }
 
 .stat-value {
-  margin-top: 6px;
-  font-size: 26px;
-  font-weight: 800;
+  margin-top: 8px;
+  font-size: 24px;
+  font-weight: 700;
   letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
   color: var(--kk-text);
+}
+
+.glass-panel {
+  padding: 22px 24px;
 }
 
 .section-head {
@@ -177,8 +202,9 @@ onMounted(async () => {
 }
 
 .money {
-  font-weight: 700;
-  color: var(--kk-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--kk-text);
 }
 
 @media (max-width: 1100px) {
@@ -190,6 +216,23 @@ onMounted(async () => {
 @media (max-width: 640px) {
   .stat-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .stat-card {
+    background: #fff;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stat-card {
+    transition: none;
+  }
+  .stat-card:hover {
+    transform: none;
   }
 }
 </style>

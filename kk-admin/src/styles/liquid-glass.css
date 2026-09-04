@@ -1,0 +1,45 @@
+/* @wxperia/liquid-glass-vue 依赖 Tailwind 工具类；本项目未引入 Tailwind，在此补齐。 */
+.relative { position: relative; }
+.cursor-pointer { cursor: pointer; }
+.bg-black { background-color: #000; }
+.transition-all { transition-property: all; }
+.duration-150 { transition-duration: 150ms; }
+.ease-in-out { transition-timing-function: ease-in-out; }
+.pointer-events-none { pointer-events: none; }
+.mix-blend-overlay { mix-blend-mode: overlay; }
+.opacity-0 { opacity: 0; }
+.opacity-20 { opacity: 0.2; }
+.opacity-100 { opacity: 1; }
+.text-white { color: #fff; }
+
+/* 库给内容写死了 20px system-ui，恢复为页面字体 */
+.glass > div {
+  font: inherit !important;
+  line-height: inherit !important;
+  color: inherit;
+}
+
+.kk-glass-anchor {
+  position: relative;
+}
+
+.kk-glass-anchor.kk-glass-fill {
+  width: 100%;
+  height: 100%;
+}
+
+.kk-glass-anchor.kk-glass-fill .glass {
+  display: flex !important;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.kk-glass-anchor.kk-glass-fill .glass > div {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}

@@ -104,6 +104,18 @@ function bizLabel(v?: string) {
   } as any)[v || ''] || v || '—'
 }
 
+function bizTagType(v?: string) {
+  return ({
+    ADVANCE: 'success',
+    EXPENSE: 'danger',
+    SETTLE: 'primary',
+    RESERVE: 'info',
+    ROLLBACK: 'danger',
+    REIMBURSE: 'warning',
+    SALARY: 'warning',
+  } as Record<string, string>)[v || ''] || 'info'
+}
+
 async function loadList() {
   list.value = await bizApi.projectAccountList()
 }
@@ -393,41 +405,51 @@ onMounted(loadList)
 <template>
   <div class="page-stack">
     <template v-if="!activeId">
-      <div class="page-card">
-        <div class="page-header">
-          <div>
-            <h3 class="page-title">项目账款</h3>
-            <p class="page-desc">分成与预留合计 100%；工资/报销直接从项目结余扣，不用再配支出比例</p>
-          </div>
+      <div class="page-top">
+        <div class="page-top__main">
+          <p class="page-desc">分成与预留合计 100%；工资 / 报销直接从项目结余扣，不用再配支出比例</p>
         </div>
-        <div class="grid">
-          <article v-for="row in list" :key="row.projectId" class="card" @click="enter(row)">
-            <h4>{{ row.projectName || `项目#${row.projectId}` }}</h4>
-            <div class="meta">负责人 {{ row.ownerName || '—' }}</div>
-            <div class="stats">
-              <div class="stat-main">
-                <span>项目结余</span>
-                <b>¥ {{ fmt(row.balance) }}</b>
-              </div>
-              <div><span>公司已转入</span><b>¥ {{ fmt(row.advanceAmount) }}</b></div>
-              <div><span>已报销/发工资</span><b>¥ {{ fmt(row.expenseAmount) }}</b></div>
-              <div><span>已分给个人</span><b>¥ {{ fmt(row.settleAmount) }}</b></div>
-            </div>
-          </article>
-        </div>
-        <el-empty v-if="!list.length" description="暂无项目账款" />
       </div>
+      <div v-if="list.length" class="acc-grid">
+        <article
+          v-for="row in list"
+          :key="row.projectId"
+          class="acc-card"
+          role="button"
+          tabindex="0"
+          @click="enter(row)"
+          @keyup.enter="enter(row)"
+        >
+          <div class="acc-card__head">
+            <h4>{{ row.projectName || `项目#${row.projectId}` }}</h4>
+            <p>负责人 {{ row.ownerName || '—' }}</p>
+          </div>
+          <div class="acc-card__balance">
+            <div>
+              <span>项目结余</span>
+              <b>¥ {{ fmt(row.balance) }}</b>
+            </div>
+            <el-icon class="acc-card__icon" :size="44"><Wallet /></el-icon>
+          </div>
+          <div class="acc-card__meta">
+            <div><span>公司已转入</span><b>¥ {{ fmt(row.advanceAmount) }}</b></div>
+            <div><span>已报销/发工资</span><b>¥ {{ fmt(row.expenseAmount) }}</b></div>
+            <div><span>已分给个人</span><b>¥ {{ fmt(row.settleAmount) }}</b></div>
+          </div>
+        </article>
+      </div>
+      <el-empty v-else description="暂无项目账款" />
     </template>
 
     <template v-else>
-      <div class="page-card" v-if="account">
-        <div class="page-header">
-          <div>
-            <el-button link type="primary" @click="back">← 返回列表</el-button>
-            <h3 class="page-title">{{ account.projectName }}</h3>
+      <template v-if="account">
+        <div class="page-top">
+          <div class="page-top__main">
+            <el-button @click="back">返回列表</el-button>
+            <h2 class="detail-name">{{ account.projectName }}</h2>
             <p class="page-desc">负责人 {{ account.ownerName || shareDetail?.ownerName || '—' }}</p>
           </div>
-          <div class="actions">
+          <div class="page-actions">
             <el-button type="primary" @click="() => { form.amount = 0; form.remark = ''; advanceDialog = true }">从公司转入</el-button>
             <el-button @click="openPayDialog('reimburse')">申请报销</el-button>
             <el-button @click="openPayDialog('salary')">申请发工资</el-button>
@@ -435,51 +457,62 @@ onMounted(loadList)
           </div>
         </div>
 
-        <div class="explain">
-          <div class="explain-title">项目钱怎么分？（配置规则）</div>
-          <ol class="steps">
-            <li><b>分成</b>：规划给个人的一块，再按人员比例拆开分出去（可配）。</li>
-            <li><b>预留</b>：项目结束时，结余回公司总账（可配）；与分成合计 100%。</li>
-            <li><b>支出</b>：工资 / 报销不占比例，审批确认后直接从项目结余扣除。</li>
-          </ol>
-          <p class="formula">
-            实账结余 = 已转入 ¥{{ fmt(account.advanceAmount) }}
-            − 已支出 ¥{{ fmt(account.expenseAmount) }}
-            − 已分成 ¥{{ fmt(account.settleAmount) }}
-            ＝ <b>¥{{ fmt(account.balance) }}</b>
-            <span class="hint">（改配置不会改已分成/已支出）</span>
-          </p>
+        <div class="metric-grid">
+          <div class="metric-card metric-card--indigo">
+            <div class="metric-body">
+              <div class="metric-label">项目结余</div>
+              <div class="metric-value">¥ {{ fmt(account.balance) }}</div>
+            </div>
+            <el-icon class="metric-glyph" :size="48"><Wallet /></el-icon>
+          </div>
+          <div class="metric-card metric-card--violet">
+            <div class="metric-body">
+              <div class="metric-label">公司已转入</div>
+              <div class="metric-value sm">¥ {{ fmt(account.advanceAmount) }}</div>
+            </div>
+            <el-icon class="metric-glyph" :size="48"><OfficeBuilding /></el-icon>
+          </div>
+          <div class="metric-card metric-card--amber">
+            <div class="metric-body">
+              <div class="metric-label">已支出 · 工资/报销</div>
+              <div class="metric-value sm">¥ {{ fmt(account.expenseAmount) }}</div>
+            </div>
+            <el-icon class="metric-glyph" :size="48"><Ticket /></el-icon>
+          </div>
+          <div class="metric-card metric-card--cyan">
+            <div class="metric-body">
+              <div class="metric-label">分成（{{ shareForm.settlePercent }}%）</div>
+              <div class="metric-value sm">¥ {{ fmt(account.settleAmount) }}</div>
+              <div class="metric-hint">额度 ¥{{ fmt(settleQuota) }}</div>
+            </div>
+            <el-icon class="metric-glyph" :size="48"><Coin /></el-icon>
+          </div>
+          <div class="metric-card metric-card--slate">
+            <div class="metric-body">
+              <div class="metric-label">预留（{{ shareForm.reservePercent }}%）</div>
+              <div class="metric-value sm">¥ {{ fmt(reserveQuota) }}</div>
+              <div class="metric-hint">结束回公司</div>
+            </div>
+            <el-icon class="metric-glyph" :size="48"><Box /></el-icon>
+          </div>
         </div>
 
-        <div class="metric">
-          <div class="metric-main">
-            <span>项目结余</span>
-            <b>¥ {{ fmt(account.balance) }}</b>
-          </div>
-          <div><span>公司已转入</span><b>¥ {{ fmt(account.advanceAmount) }}</b></div>
-          <div>
-            <span>已支出 · 工资/报销</span>
-            <b>¥ {{ fmt(account.expenseAmount) }}（从结余扣）</b>
-          </div>
-          <div>
-            <span>分成（{{ shareForm.settlePercent }}%）</span>
-            <b>已分 ¥{{ fmt(account.settleAmount) }} / 额度 ¥{{ fmt(settleQuota) }}</b>
-          </div>
-          <div>
-            <span>预留（{{ shareForm.reservePercent }}%）</span>
-            <b>规划 ¥{{ fmt(reserveQuota) }} · 结束回公司</b>
-          </div>
-        </div>
+        <p class="rule-tip">
+          实账结余 = 已转入 − 已支出 − 已分成。工资 / 报销从结余扣；分成与预留合计须 100%。改配置不会改已分、已花。
+        </p>
 
+        <div class="page-card">
         <el-tabs v-model="tab" class="tabs">
           <el-tab-pane label="项目流水" name="overview">
-            <el-table :data="ledgers" stripe>
+            <el-table :data="ledgers" stripe empty-text="暂无流水">
               <el-table-column label="时间" width="150">
                 <template #default="{ row }">{{ fmtTime(row.occurTime) }}</template>
               </el-table-column>
               <el-table-column label="编号" prop="bizNo" width="170" show-overflow-tooltip />
               <el-table-column label="类型" width="100">
-                <template #default="{ row }">{{ bizLabel(row.bizType) }}</template>
+                <template #default="{ row }">
+                  <el-tag :type="bizTagType(row.bizType)" size="small">{{ bizLabel(row.bizType) }}</el-tag>
+                </template>
               </el-table-column>
               <el-table-column prop="title" label="摘要" min-width="160" show-overflow-tooltip />
               <el-table-column label="金额" width="120" align="right">
@@ -500,14 +533,15 @@ onMounted(loadList)
                 </template>
               </el-table-column>
             </el-table>
-            <el-pagination
-              style="margin-top: 12px"
-              v-model:current-page="ledgerQuery.page"
-              :page-size="ledgerQuery.pageSize"
-              :total="ledgerTotal"
-              layout="total, prev, pager, next"
-              @current-change="loadDetail"
-            />
+            <div v-if="ledgerTotal > ledgerQuery.pageSize" class="page-footer">
+              <el-pagination
+                v-model:current-page="ledgerQuery.page"
+                :page-size="ledgerQuery.pageSize"
+                :total="ledgerTotal"
+                layout="total, prev, pager, next"
+                @current-change="loadDetail"
+              />
+            </div>
           </el-tab-pane>
 
           <el-tab-pane label="分成与分钱" name="share">
@@ -624,9 +658,10 @@ onMounted(loadList)
           </el-tab-pane>
         </el-tabs>
       </div>
+      </template>
     </template>
 
-    <el-drawer v-model="ledgerDetailVisible" title="流水详情" size="480px">
+    <el-drawer v-model="ledgerDetailVisible" title="流水详情" size="480px" append-to-body>
       <template v-if="ledgerDetail">
         <el-descriptions :column="1" border>
           <el-descriptions-item label="时间">{{ fmtTime(ledgerDetail.occurTime) }}</el-descriptions-item>
@@ -680,7 +715,7 @@ onMounted(loadList)
       </template>
     </el-drawer>
 
-    <el-dialog v-model="advanceDialog" title="从公司转入本项目" width="480px">
+    <el-dialog v-model="advanceDialog" title="从公司转入本项目" width="480px" :close-on-click-modal="false">
       <div class="dialog-box">
         <p>把公司总账的钱拨到这个项目里，之后才能报销、发工资、分钱。</p>
         <ul>
@@ -700,7 +735,7 @@ onMounted(loadList)
       </template>
     </el-dialog>
 
-    <el-dialog v-model="reimburseDialog" title="申请项目报销" width="480px">
+    <el-dialog v-model="reimburseDialog" title="申请项目报销" width="480px" :close-on-click-modal="false">
       <div class="dialog-box">
         <p>用本项目的钱报销项目开支（如采购、差旅）。</p>
         <ul>
@@ -731,7 +766,7 @@ onMounted(loadList)
       </template>
     </el-dialog>
 
-    <el-dialog v-model="salaryDialog" title="申请发工资" width="480px">
+    <el-dialog v-model="salaryDialog" title="申请发工资" width="480px" :close-on-click-modal="false">
       <div class="dialog-box">
         <p>用本项目的钱发项目相关工资/劳务。</p>
         <ul>
@@ -765,49 +800,161 @@ onMounted(loadList)
 </template>
 
 <style scoped>
-.page-desc { margin: 4px 0 0; color: #64748b; font-size: 13px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
-.card {
-  border: 1px solid #e8edf4; border-radius: 12px; padding: 16px; cursor: pointer; background: #fff;
+.detail-name {
+  margin: 10px 0 4px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  color: var(--kk-text);
 }
-.card:hover { box-shadow: 0 6px 18px rgba(15,23,42,.06); }
-.card h4 { margin: 0 0 6px; }
-.meta { color: #94a3b8; font-size: 12px; margin-bottom: 12px; }
-.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; color: #64748b; }
-.stats b { display: block; color: #0f172a; margin-top: 2px; font-size: 14px; }
-.stat-main { grid-column: 1 / -1; padding: 8px 10px; background: #f8fafc; border-radius: 8px; }
-.stat-main b { font-size: 20px; color: #1d4ed8; }
-.explain {
-  margin: 8px 0 14px;
-  padding: 12px 14px;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
-  border-radius: 10px;
-  color: #78716c;
+.acc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+.acc-card {
+  position: relative;
+  overflow: hidden;
+  padding: 20px;
+  cursor: pointer;
+  background: var(--kk-glass-bg);
+  border: 1px solid var(--kk-glass-border);
+  border-radius: var(--kk-radius);
+  box-shadow: var(--kk-glass-shadow);
+  backdrop-filter: var(--kk-glass-blur);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
+}
+.acc-card:hover { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08); }
+.acc-card:focus-visible {
+  outline: 2px solid var(--kk-primary);
+  outline-offset: 2px;
+}
+.acc-card__head h4 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--kk-text);
+}
+.acc-card__head p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--kk-text-muted);
+}
+.acc-card__balance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 16px 0 14px;
+}
+.acc-card__balance span {
+  display: block;
   font-size: 13px;
-  line-height: 1.7;
+  color: var(--kk-text-secondary);
 }
-.explain-title { font-weight: 600; color: #92400e; margin-bottom: 6px; }
-.explain p { margin: 0 0 6px; }
-.steps {
-  margin: 0 0 8px;
-  padding-left: 18px;
-  color: #78716c;
+.acc-card__balance b {
+  display: block;
+  margin-top: 4px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--kk-text);
 }
-.steps li { margin: 4px 0; }
+.acc-card__icon { color: var(--kk-primary); flex-shrink: 0; }
+.acc-card__meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  font-size: 12px;
+  color: var(--kk-text-secondary);
+}
+.acc-card__meta b {
+  display: block;
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--kk-text);
+}
+.metric-grid {
+  display: grid;
+  grid-template-columns: 1.25fr repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+.metric-card {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 96px;
+  padding: 16px 14px 16px 18px;
+  background: var(--kk-glass-bg);
+  border: 1px solid var(--kk-glass-border);
+  border-radius: var(--kk-radius);
+  box-shadow: var(--kk-glass-shadow);
+  backdrop-filter: var(--kk-glass-blur);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
+}
+.metric-card::before {
+  content: "";
+  position: absolute;
+  right: -24px;
+  top: 50%;
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  transform: translateY(-50%);
+  filter: blur(32px);
+  opacity: 0.22;
+  pointer-events: none;
+}
+.metric-card--indigo::before { background: #d4d4d8; }
+.metric-card--cyan::before { background: #a5f3fc; }
+.metric-card--violet::before { background: #ddd6fe; }
+.metric-card--amber::before { background: #fde68a; }
+.metric-card--slate::before { background: #e2e8f0; }
+.metric-card--indigo .metric-glyph { color: var(--kk-primary); }
+.metric-card--cyan .metric-glyph { color: #0891b2; }
+.metric-card--violet .metric-glyph { color: #7c3aed; }
+.metric-card--amber .metric-glyph { color: #d97706; }
+.metric-card--slate .metric-glyph { color: #64748b; }
+.metric-body { position: relative; z-index: 1; min-width: 0; }
+.metric-glyph { position: relative; z-index: 1; flex-shrink: 0; opacity: 1; }
+.metric-label { font-size: 12px; font-weight: 500; color: var(--kk-text-secondary); }
+.metric-value {
+  margin-top: 6px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--kk-text);
+}
+.metric-value.sm { font-size: 18px; }
+.metric-hint { margin-top: 4px; font-size: 12px; color: var(--kk-text-muted); }
+.rule-tip {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--kk-text-secondary);
+}
 .dialog-box {
   margin: 0 0 14px;
   padding: 12px 14px;
-  background: #f8fafc;
-  border-radius: 8px;
-  color: #475569;
+  background: rgba(255, 255, 255, 0.45);
+  border-radius: var(--kk-radius-sm);
+  color: var(--kk-text-secondary);
   font-size: 13px;
   line-height: 1.6;
 }
 .dialog-box p { margin: 0 0 8px; }
 .dialog-box ul { margin: 0; padding-left: 18px; }
 .dialog-box li { margin: 4px 0; }
-.dialog-box b { color: #0f172a; }
+.dialog-box b { color: var(--kk-text); }
 .voucher-box { width: 100%; }
 .voucher-item {
   display: flex;
@@ -816,32 +963,17 @@ onMounted(loadList)
   gap: 8px;
   margin-top: 6px;
   padding: 6px 8px;
-  background: #f8fafc;
-  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.45);
+  border-radius: 8px;
   font-size: 13px;
 }
-.voucher-item a { color: #1d4ed8; word-break: break-all; }
-.formula { color: #57534e; }
-.formula b { color: #1d4ed8; font-size: 15px; }
-.metric {
-  display: grid; grid-template-columns: 1.3fr repeat(4, 1fr); gap: 10px;
-  background: #f8fafc; border-radius: 10px; padding: 14px; margin-bottom: 8px;
-}
-.metric span { display: block; font-size: 12px; color: #94a3b8; }
-.metric b { font-size: 15px; color: #0f172a; }
-.metric-main b { color: #1d4ed8; font-size: 22px; }
-.share-fields {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
-  color: #475569; font-size: 13px;
-}
-.share-fields label { display: inline-flex; align-items: center; }
-.actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.tabs { margin-top: 8px; }
-.hint { color: #94a3b8; font-size: 12px; }
+.voucher-item a { color: var(--kk-primary); word-break: break-all; }
+.tabs { margin-top: 0; }
+.hint { color: var(--kk-text-muted); font-size: 12px; }
 .field-label {
   display: block;
   font-size: 13px;
-  color: #334155;
+  color: var(--kk-text);
   font-weight: 500;
   margin-bottom: 6px;
 }
@@ -852,9 +984,12 @@ onMounted(loadList)
   align-items: start;
 }
 .share-panel {
-  background: #fff;
-  border: 1px solid #e8edf4;
-  border-radius: 12px;
+  background: var(--kk-glass-bg);
+  border: 1px solid var(--kk-glass-border);
+  border-radius: var(--kk-radius);
+  box-shadow: var(--kk-glass-shadow);
+  backdrop-filter: var(--kk-glass-blur);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
   padding: 16px 18px 14px;
 }
 .share-panel-head {
@@ -898,8 +1033,8 @@ onMounted(loadList)
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  background: #f8fafc;
-  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: var(--kk-radius-sm);
 }
 .percent-item .field-label { margin-bottom: 0; }
 .percent-item :deep(.el-input-number) { width: 100%; }
@@ -999,8 +1134,8 @@ onMounted(loadList)
   background: #f8fafc;
   border-radius: 8px;
 }
-.in { color: #16a34a; font-weight: 600; }
-.out { color: #dc2626; font-weight: 600; }
+.in { color: var(--kk-success); font-weight: 600; font-variant-numeric: tabular-nums; }
+.out { color: var(--kk-danger); font-weight: 600; font-variant-numeric: tabular-nums; }
 .related-block { margin-top: 20px; }
 .related-title { margin: 0 0 6px; font-size: 15px; color: #0f172a; }
 .related-tip { margin: 0 0 10px; font-size: 12px; color: #94a3b8; line-height: 1.5; }
@@ -1029,10 +1164,26 @@ onMounted(loadList)
   background: #f8fafc;
   border-radius: 8px;
 }
+@media (max-width: 1280px) {
+  .metric-grid { grid-template-columns: 1fr 1fr; }
+  .acc-card__meta { grid-template-columns: 1fr 1fr; }
+}
 @media (max-width: 1100px) {
-  .metric { grid-template-columns: 1fr 1fr; }
   .share-layout { grid-template-columns: 1fr; }
   .settle-panel { position: static; }
   .percent-row { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .metric-grid,
+  .acc-grid { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .acc-card,
+  .metric-card,
+  .share-panel {
+    background: #fff;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 }
 </style>

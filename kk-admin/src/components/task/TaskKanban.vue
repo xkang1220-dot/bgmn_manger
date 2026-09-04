@@ -26,6 +26,38 @@ const columns = [
 ]
 
 const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
+const AVATAR_TONES = ['indigo', 'cyan', 'violet', 'amber'] as const
+
+function initial(name?: string) {
+  const s = String(name || '').replace(/\s/g, '')
+  return s.slice(0, 1) || '?'
+}
+
+function avatarTone(name?: string) {
+  const s = String(name || '')
+  let hash = 0
+  for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) >>> 0
+  return AVATAR_TONES[hash % AVATAR_TONES.length]
+}
+
+function progressOf(task: any) {
+  if (Number(task.status) === 2) return 100
+  const n = Number(task.progress)
+  return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0
+}
+
+function showProgress(task: any) {
+  return Number(task.status) === 1 || Number(task.status) === 2 || progressOf(task) > 0
+}
+
+function others(task: any) {
+  const assignee = String(task.assigneeName || '')
+  return (task.participantNames || []).filter((n: string) => n && n !== assignee)
+}
+
+function extraPeople(task: any) {
+  return Math.max(0, others(task).length - 3)
+}
 
 const grouped = computed(() => {
   const map: Record<number, any[]> = { 0: [], 1: [], 2: [] }
@@ -141,6 +173,7 @@ defineExpose({ load })
         @drop="onDrop($event, col.status)"
       >
         <div class="kanban-col__head">
+          <span class="kanban-col__mark" />
           <span class="kanban-col__title">{{ col.label }}</span>
           <span class="kanban-col__count">{{ grouped[col.status].length }}</span>
         </div>
@@ -155,14 +188,33 @@ defineExpose({ load })
             @dragend="onDragEnd"
             @click="onCardClick(task)"
           >
-            <div class="kanban-card__title">{{ task.title }}</div>
-            <div class="kanban-card__meta">
+            <div class="kanban-card__top">
               <span class="prio" :class="`prio--${task.priority}`">{{ priorityMap[task.priority] || '中' }}</span>
-              <span class="assignee">{{ task.assigneeName || '未分配' }}</span>
-              <span v-if="task.dueDate" class="due" :class="{ overdue: task.overdue }">{{ task.dueDate }}</span>
+              <span v-if="task.overdue" class="overdue-flag">逾期</span>
             </div>
-            <div v-if="task.participantNames?.length" class="kanban-card__people">
-              {{ task.participantNames.join('、') }}
+            <div class="kanban-card__title">{{ task.title }}</div>
+            <div v-if="showProgress(task)" class="kanban-card__progress" :class="{ done: Number(task.status) === 2 }">
+              <span :style="{ width: progressOf(task) + '%' }" />
+            </div>
+            <div class="kanban-card__foot">
+              <span class="who">
+                <span class="avatar" :class="'avatar--' + avatarTone(task.assigneeName)">{{ initial(task.assigneeName) }}</span>
+                <em>{{ task.assigneeName || '未分配' }}</em>
+                <span v-if="others(task).length" class="faces">
+                  <span
+                    v-for="(name, i) in others(task).slice(0, 3)"
+                    :key="name + i"
+                    class="face"
+                    :class="'avatar--' + avatarTone(name)"
+                    :title="name"
+                  >{{ initial(name) }}</span>
+                  <span v-if="extraPeople(task)" class="face face--more">+{{ extraPeople(task) }}</span>
+                </span>
+              </span>
+              <span v-if="task.dueDate" class="due" :class="{ overdue: task.overdue }">
+                <el-icon :size="13"><Calendar /></el-icon>
+                {{ task.dueDate }}
+              </span>
             </div>
           </div>
           <div v-if="!grouped[col.status].length" class="kanban-empty">暂无任务</div>
@@ -182,7 +234,7 @@ defineExpose({ load })
 
 .kanban-hint {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--kk-text-muted);
 }
 
 .kanban-board {
@@ -195,126 +247,240 @@ defineExpose({ load })
 .kanban-col {
   display: flex;
   flex-direction: column;
-  background: #f8fafc;
-  border: 1px solid #e8edf4;
-  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: var(--kk-radius-sm);
   min-height: 420px;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
 }
 
 .kanban-col.is-over {
-  border-color: #a5b4fc;
-  background: #f5f7ff;
+  border-color: rgba(24, 24, 27, 0.22);
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(24, 24, 27, 0.06);
 }
 
 .kanban-col__head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   padding: 12px 14px;
-  border-bottom: 1px solid #eef2f7;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
+
+.kanban-col__mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #a1a1aa;
+}
+
+.kanban-col--doing .kanban-col__mark { background: #d97706; }
+.kanban-col--done .kanban-col__mark { background: #059669; }
 
 .kanban-col__title {
   font-size: 13px;
   font-weight: 600;
-  color: #334155;
+  color: var(--kk-text);
 }
 
 .kanban-col__count {
+  margin-left: auto;
   min-width: 22px;
   height: 22px;
   padding: 0 6px;
   border-radius: 999px;
-  background: #fff;
-  border: 1px solid #e2e8f0;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(0, 0, 0, 0.06);
   font-size: 12px;
-  color: #64748b;
+  color: var(--kk-text-secondary);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-variant-numeric: tabular-nums;
 }
 
-.kanban-col--todo .kanban-col__title { color: #64748b; }
-.kanban-col--doing .kanban-col__title { color: #b45309; }
-.kanban-col--done .kanban-col__title { color: #047857; }
-
 .kanban-col__body {
   flex: 1;
   padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   overflow-y: auto;
 }
 
 .kanban-card {
-  background: #fff;
-  border: 1px solid #e8edf4;
-  border-radius: 10px;
-  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--kk-glass-bg);
+  border: 1px solid var(--kk-glass-border);
+  border-radius: 12px;
+  padding: 14px;
   cursor: grab;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-  transition: box-shadow 0.15s, transform 0.15s, opacity 0.15s;
+  box-shadow: var(--kk-glass-shadow);
+  backdrop-filter: var(--kk-glass-blur);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
+  transition: box-shadow 0.18s var(--kk-ease), transform 0.18s var(--kk-ease), opacity 0.15s;
 }
 
 .kanban-card:hover {
-  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
 }
 
 .kanban-card.dragging {
   opacity: 0.55;
+  transform: none;
+}
+
+.kanban-card__top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .kanban-card__title {
   font-size: 14px;
   font-weight: 600;
-  color: #0f172a;
+  letter-spacing: -0.02em;
+  color: var(--kk-text);
   line-height: 1.4;
-  margin-bottom: 8px;
 }
 
-.kanban-card__meta {
+.kanban-card__progress {
+  height: 3px;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+}
+
+.kanban-card__progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--kk-primary);
+}
+
+.kanban-card__progress.done span {
+  background: #059669;
+}
+
+.kanban-card__foot {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.who,
+.due {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   font-size: 12px;
-  color: #64748b;
+  color: var(--kk-text-secondary);
 }
 
-.prio {
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 500;
+.who {
+  min-width: 0;
+  overflow: hidden;
 }
 
-.prio--1 { background: #fee2e2; color: #b91c1c; }
-.prio--2 { background: #fef3c7; color: #b45309; }
-.prio--3 { background: #f1f5f9; color: #64748b; }
-
-.due.overdue,
-.kanban-card.overdue .due {
-  color: #ef4444;
-  font-weight: 500;
-}
-
-.kanban-card__people {
-  margin-top: 6px;
-  font-size: 11px;
-  color: #94a3b8;
+.who em {
+  font-style: normal;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.faces {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+}
+
+.due.overdue,
+.kanban-card.overdue .due {
+  color: var(--kk-danger);
+  font-weight: 500;
+}
+
+.prio,
+.overdue-flag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.prio--1 { background: #fee2e2; color: #b91c1c; }
+.prio--2 { background: #fef3c7; color: #b45309; }
+.prio--3 { background: #f4f4f5; color: #71717a; }
+
+.overdue-flag {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.avatar,
+.face {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.avatar--indigo { background: #f4f4f5; color: #18181b; }
+.avatar--cyan { background: #ecfeff; color: #0891b2; }
+.avatar--violet { background: #f5f3ff; color: #7c3aed; }
+.avatar--amber { background: #fffbeb; color: #d97706; }
+
+.face {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
+}
+
+.face + .face {
+  margin-left: -6px;
+}
+
+.face--more {
+  background: #f4f4f5;
+  color: var(--kk-text-secondary);
+  font-size: 9px;
+  font-weight: 600;
+}
+
 .kanban-empty {
-  padding: 24px 8px;
+  padding: 36px 8px;
   text-align: center;
   font-size: 12px;
-  color: #cbd5e1;
+  color: var(--kk-text-muted);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .kanban-card {
+    background: #fff;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kanban-card,
+  .kanban-card:hover {
+    transform: none;
+  }
 }
 
 @media (max-width: 900px) {

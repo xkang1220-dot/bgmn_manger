@@ -232,6 +232,6 @@ onMounted(load)
   border-radius: 6px;
   font-size: 13px;
 }
-.voucher-item a { color: #1d4ed8; word-break: break-all; }
+.voucher-item a { color: var(--kk-primary); word-break: break-all; }
 .voucher-empty { margin-top: 6px; font-size: 12px; color: #94a3b8; }
 </style>

@@ -70,6 +70,21 @@ const statusFilters = [
 ]
 
 const inDetail = computed(() => activeProjectId.value != null && detail.value != null)
+const saving = ref(false)
+const filteredEmpty = computed(() => !list.value.length && (!!query.name.trim() || query.status !== undefined))
+
+const statusKey = computed({
+  get: () => (query.status === undefined ? 'all' : String(query.status)),
+  set: (v: string) => {
+    query.status = v === 'all' ? undefined : Number(v)
+    query.page = 1
+    load()
+  },
+})
+
+function statusTone(status?: number) {
+  return ({ 0: 'slate', 1: 'amber', 2: 'cyan', 3: 'slate' } as Record<number, string>)[status ?? 0] || 'slate'
+}
 
 async function load() {
   const res = await bizApi.projectPage(query)
@@ -77,8 +92,14 @@ async function load() {
   total.value = res.total
 }
 
-function filterStatus(status?: number) {
-  query.status = status
+function onSearch() {
+  query.page = 1
+  load()
+}
+
+function resetFilter() {
+  query.name = ''
+  query.status = undefined
   query.page = 1
   load()
 }
@@ -170,17 +191,22 @@ async function save() {
     ElMessage.warning('请填写项目名称')
     return
   }
-  if (isEdit.value) {
-    await bizApi.saveProject(form, true)
-    ElMessage.success('保存成功')
-  } else {
-    await bizApi.saveProject(form, false)
-    ElMessage.success('已提交创建审批，需全体股东通过（3天未操作自动通过）')
-  }
-  dialog.value = false
-  await load()
-  if (activeProjectId.value) {
-    await loadDetail(activeProjectId.value)
+  saving.value = true
+  try {
+    if (isEdit.value) {
+      await bizApi.saveProject(form, true)
+      ElMessage.success('保存成功')
+    } else {
+      await bizApi.saveProject(form, false)
+      ElMessage.success('已提交创建审批，需全体股东通过（3天未操作自动通过）')
+    }
+    dialog.value = false
+    await load()
+    if (activeProjectId.value) {
+      await loadDetail(activeProjectId.value)
+    }
+  } finally {
+    saving.value = false
   }
 }
 
@@ -245,78 +271,94 @@ onMounted(async () => {
     <template v-if="!inDetail">
       <div class="page-top">
         <div class="page-top__main">
-          <p class="page-desc">以项目卡片浏览；点进卡片查看看板与任务。分层分钱请到「财务 → 项目分层」</p>
+          <p class="page-desc">以项目卡片浏览；点进卡片查看看板与任务。分成请到「财务 → 项目账款」</p>
         </div>
         <div class="page-actions">
           <el-button type="primary" :icon="Plus" @click="open()">新建项目</el-button>
         </div>
       </div>
 
-      <div class="page-card">
-        <div class="toolbar">
-          <div class="toolbar__left">
-            <div class="status-tags">
-              <button
-                v-for="item in statusFilters"
-                :key="String(item.value)"
-                class="status-tag"
-                :class="{ active: query.status === item.value }"
-                @click="filterStatus(item.value)"
-              >
-                {{ item.label }}
-              </button>
-            </div>
-            <el-input
-              v-model="query.name"
-              placeholder="搜索项目名称"
-              clearable
-              style="width: 220px"
-              @keyup.enter="load"
-              @clear="load"
-            />
-          </div>
-          <div class="toolbar__right">
-            <el-button type="primary" @click="load">查询</el-button>
-          </div>
-        </div>
-
-        <div v-if="list.length" class="project-grid">
-          <article
-            v-for="row in list"
-            :key="row.id"
-            class="project-card"
-            @click="enterProject(row)"
-          >
-            <div class="project-card__accent" :class="`project-card__accent--${row.status}`" />
-            <div class="project-card__inner">
-              <div class="project-card__head">
-                <span class="status-pill status-pill--sm" :class="`status-pill--${row.status}`">
-                  {{ statusMap[row.status] || '—' }}
-                </span>
-                <span class="project-code">{{ row.code || '未编号' }}</span>
-              </div>
-              <h3 class="project-card__title">{{ row.name }}</h3>
-              <div class="project-card__meta">
-                <span>负责人 {{ row.ownerName || '未指定' }}</span>
-              </div>
-              <div class="project-card__actions" @click.stop>
-                <el-button link type="primary" size="small" @click="open(row)">编辑</el-button>
-                <el-button link type="danger" size="small" @click="remove(row.id)">删除</el-button>
-              </div>
-            </div>
-          </article>
-        </div>
-        <el-empty v-else description="暂无项目，点击右上角新建" />
-
-        <div v-if="total > query.pageSize" class="page-footer">
-          <el-pagination
-            v-model:current-page="query.page"
-            :page-size="query.pageSize"
-            :total="total"
-            layout="total, prev, pager, next"
-            @current-change="load"
+      <el-form class="filter-bar" @submit.prevent="onSearch">
+        <el-form-item label="状态">
+          <el-radio-group v-model="statusKey">
+            <el-radio-button v-for="item in statusFilters" :key="String(item.value)" :value="item.value === undefined ? 'all' : String(item.value)">
+              {{ item.label }}
+            </el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="名称">
+          <el-input
+            v-model="query.name"
+            placeholder="搜索项目名称"
+            clearable
+            class="filter-keyword--wide"
+            @keyup.enter="onSearch"
+            @clear="onSearch"
           />
-        </div>
+        </el-form-item>
+        <el-form-item class="filter-actions">
+          <el-button type="primary" native-type="submit">查询</el-button>
+          <el-button @click="resetFilter">重置</el-button>
+        </el-form-item>
+      </el-form>
+
+      <div v-if="list.length" class="project-grid">
+        <article
+          v-for="row in list"
+          :key="row.id"
+          class="project-card"
+          :class="'project-card--' + statusTone(row.status)"
+          role="button"
+          tabindex="0"
+          @click="enterProject(row)"
+          @keyup.enter="enterProject(row)"
+        >
+          <div class="project-card__head">
+            <span class="status-pill status-pill--sm" :class="`status-pill--${row.status}`">
+              {{ statusMap[row.status] || '—' }}
+            </span>
+            <span class="project-code">{{ row.code || '未编号' }}</span>
+          </div>
+          <div class="project-card__main">
+            <div>
+              <h3 class="project-card__title">{{ row.name }}</h3>
+              <div class="project-card__meta">负责人 {{ row.ownerName || '未指定' }}</div>
+            </div>
+            <el-icon class="project-card__icon" :size="40"><FolderOpened /></el-icon>
+          </div>
+          <div class="project-card__actions" @click.stop>
+            <el-button
+              class="icon-btn"
+              text
+              aria-label="编辑"
+              title="编辑"
+              @click="open(row)"
+            >
+              <el-icon :size="16"><EditPen /></el-icon>
+            </el-button>
+            <el-button
+              class="icon-btn is-danger"
+              text
+              aria-label="删除"
+              title="删除"
+              @click="remove(row.id)"
+            >
+              <el-icon :size="16"><Delete /></el-icon>
+            </el-button>
+            <span class="project-card__go">进入看板</span>
+          </div>
+        </article>
+      </div>
+      <el-empty v-else :description="filteredEmpty ? '没有匹配的项目' : '暂无项目'" />
+
+      <div v-if="total > query.pageSize" class="page-footer">
+        <el-pagination
+          v-model:current-page="query.page"
+          :page-size="query.pageSize"
+          :total="total"
+          layout="total, prev, pager, next"
+          @current-change="load"
+        />
       </div>
     </template>
 
@@ -327,10 +369,6 @@ onMounted(async () => {
             <el-icon><ArrowLeft /></el-icon>
             返回项目墙
           </button>
-          <div class="project-hero__actions">
-            <el-button size="small" @click="open(detail)">编辑</el-button>
-            <el-button size="small" type="danger" plain @click="remove(detail.id)">删除</el-button>
-          </div>
         </div>
 
         <div class="project-hero__body">
@@ -342,41 +380,75 @@ onMounted(async () => {
             </div>
             <div class="meta-chips">
               <span class="meta-chip">
-                <em>负责人</em>{{ detail.ownerName || '未指定' }}
+                <el-icon :size="14"><User /></el-icon>
+                {{ detail.ownerName || '未指定' }}
               </span>
               <span v-if="detail.startDate || detail.endDate" class="meta-chip">
-                <em>周期</em>{{ detail.startDate || '—' }} ~ {{ detail.endDate || '—' }}
+                <el-icon :size="14"><Calendar /></el-icon>
+                {{ detail.startDate || '—' }} ~ {{ detail.endDate || '—' }}
               </span>
             </div>
           </div>
 
           <div class="metric-bar">
             <div class="metric-item">
-              <span class="metric-label">任务总数</span>
-              <span class="metric-value">{{ taskSummary.total ?? 0 }}</span>
+              <el-icon class="metric-icon" :size="18"><Tickets /></el-icon>
+              <div class="metric-copy">
+                <span class="metric-label">任务总数</span>
+                <span class="metric-value">{{ taskSummary.total ?? 0 }}</span>
+              </div>
             </div>
-            <div class="metric-divider" />
             <div class="metric-item">
-              <span class="metric-label">待办</span>
-              <span class="metric-value">{{ taskSummary.todo ?? 0 }}</span>
+              <el-icon class="metric-icon is-todo" :size="18"><Clock /></el-icon>
+              <div class="metric-copy">
+                <span class="metric-label">待办</span>
+                <span class="metric-value">{{ taskSummary.todo ?? 0 }}</span>
+              </div>
             </div>
-            <div class="metric-divider" />
             <div class="metric-item">
-              <span class="metric-label">进行中</span>
-              <span class="metric-value">{{ taskSummary.doing ?? 0 }}</span>
+              <el-icon class="metric-icon is-doing" :size="18"><Flag /></el-icon>
+              <div class="metric-copy">
+                <span class="metric-label">进行中</span>
+                <span class="metric-value">{{ taskSummary.doing ?? 0 }}</span>
+              </div>
             </div>
-            <div class="metric-divider" />
             <div class="metric-item">
-              <span class="metric-label">已完成</span>
-              <span class="metric-value">{{ taskSummary.done ?? 0 }}</span>
+              <el-icon class="metric-icon is-done" :size="18"><CircleCheck /></el-icon>
+              <div class="metric-copy">
+                <span class="metric-label">已完成</span>
+                <span class="metric-value">{{ taskSummary.done ?? 0 }}</span>
+              </div>
             </div>
-            <div class="metric-divider" />
             <div class="metric-item">
-              <span class="metric-label">逾期</span>
-              <span class="metric-value" :class="{ overdue: (taskSummary.overdue ?? 0) > 0 }">
-                {{ taskSummary.overdue ?? 0 }}
-              </span>
+              <el-icon class="metric-icon is-overdue" :size="18"><Warning /></el-icon>
+              <div class="metric-copy">
+                <span class="metric-label">逾期</span>
+                <span class="metric-value" :class="{ overdue: (taskSummary.overdue ?? 0) > 0 }">
+                  {{ taskSummary.overdue ?? 0 }}
+                </span>
+              </div>
             </div>
+          </div>
+
+          <div class="project-hero__ops">
+            <el-button
+              class="icon-btn"
+              text
+              aria-label="编辑"
+              title="编辑"
+              @click="open(detail)"
+            >
+              <el-icon :size="16"><EditPen /></el-icon>
+            </el-button>
+            <el-button
+              class="icon-btn is-danger"
+              text
+              aria-label="删除"
+              title="删除"
+              @click="remove(detail.id)"
+            >
+              <el-icon :size="16"><Delete /></el-icon>
+            </el-button>
           </div>
         </div>
       </section>
@@ -491,7 +563,7 @@ onMounted(async () => {
       </section>
     </template>
 
-    <el-dialog v-model="dialog" :title="isEdit ? '编辑项目' : '新建项目'" width="560px">
+    <el-dialog v-model="dialog" :title="isEdit ? '编辑项目' : '新建项目'" width="560px" :close-on-click-modal="false">
       <el-form label-width="90px">
         <el-form-item label="名称" required><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="编号"><el-input v-model="form.code" /></el-form-item>
@@ -524,7 +596,7 @@ onMounted(async () => {
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
-        <el-button type="primary" @click="save">保存</el-button>
+        <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
 
@@ -539,109 +611,141 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.status-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.status-tag {
-  border: none;
-  background: #fff;
-  color: #64748b;
-  border-radius: 8px;
-  padding: 7px 14px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-  box-shadow: inset 0 0 0 1px #e2e8f0;
-}
-
-.status-tag:hover {
-  color: #4f46e5;
-  box-shadow: inset 0 0 0 1px #c7d2fe;
-}
-
-.status-tag.active {
-  background: #4f46e5;
-  color: #fff;
-  box-shadow: none;
-  font-weight: 500;
+.filter-keyword--wide {
+  width: 220px;
 }
 
 .project-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
 }
 
 .project-card {
   position: relative;
-  border-radius: 12px;
-  background: #fff;
-  cursor: pointer;
   overflow: hidden;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-  transition: box-shadow 0.2s ease, transform 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  min-height: 176px;
+  padding: 18px 18px 14px;
+  cursor: pointer;
+  background: var(--kk-glass-bg);
+  border: 1px solid var(--kk-glass-border);
+  border-radius: var(--kk-radius);
+  box-shadow: var(--kk-glass-shadow);
+  backdrop-filter: var(--kk-glass-blur);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
+  transition: box-shadow 0.15s var(--kk-ease);
 }
 
-.project-card:hover {
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-  transform: translateY(-1px);
+.project-card::before {
+  content: "";
+  position: absolute;
+  right: -24px;
+  bottom: -36px;
+  width: 130px;
+  height: 130px;
+  border-radius: 50%;
+  filter: blur(28px);
+  opacity: 0.22;
+  pointer-events: none;
 }
 
-.project-card__accent {
-  height: 3px;
-  background: #94a3b8;
-}
+.project-card--amber::before { background: #fde68a; }
+.project-card--cyan::before { background: #a5f3fc; }
+.project-card--slate::before { background: #e2e8f0; }
+.project-card--amber .project-card__icon { color: #d97706; }
+.project-card--cyan .project-card__icon { color: #0891b2; }
+.project-card--slate .project-card__icon { color: #64748b; }
 
-.project-card__accent--0 { background: #94a3b8; }
-.project-card__accent--1 { background: #f59e0b; }
-.project-card__accent--2 { background: #10b981; }
-.project-card__accent--3 { background: #64748b; }
-
-.project-card__inner {
-  padding: 16px 18px 14px;
+.project-card:hover { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08); }
+.project-card:focus-visible {
+  outline: 2px solid var(--kk-primary);
+  outline-offset: 2px;
 }
 
 .project-card__head {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+  gap: 8px;
 }
 
 .project-code {
   font-size: 12px;
-  color: #94a3b8;
-  font-family: ui-monospace, monospace;
+  color: var(--kk-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.project-card__main {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 14px 0 12px;
 }
 
 .project-card__title {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   font-size: 16px;
   font-weight: 600;
   line-height: 1.4;
-  color: #0f172a;
+  color: var(--kk-text);
 }
 
 .project-card__meta {
   font-size: 12px;
-  color: #94a3b8;
-  margin-bottom: 12px;
+  color: var(--kk-text-muted);
+}
+
+.project-card__icon {
+  flex-shrink: 0;
+  opacity: 1;
 }
 
 .project-card__actions {
+  position: relative;
+  z-index: 1;
   display: flex;
+  align-items: center;
   gap: 2px;
-  padding-top: 10px;
-  border-top: 1px solid #f1f5f9;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.project-card__actions .icon-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--kk-text-secondary);
+}
+
+.project-card__actions .icon-btn:hover {
+  color: var(--kk-primary);
+}
+
+.project-card__actions .icon-btn.is-danger:hover {
+  color: var(--kk-danger);
+}
+
+.project-card__go {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--kk-text-muted);
 }
 
 .project-hero {
-  background: #fff;
-  border: 1px solid #e8edf4;
-  border-radius: 14px;
+  background: var(--kk-glass-bg);
+  border: 1px solid var(--kk-glass-border);
+  border-radius: var(--kk-radius);
+  box-shadow: var(--kk-glass-shadow);
+  backdrop-filter: var(--kk-glass-blur);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
   overflow: hidden;
 }
 
@@ -650,8 +754,7 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   padding: 12px 20px;
-  border-bottom: 1px solid #f1f5f9;
-  background: #fafbfc;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
 
 .back-btn {
@@ -667,16 +770,35 @@ onMounted(async () => {
 }
 
 .back-btn:hover {
-  color: #4f46e5;
-}
-
-.project-hero__actions {
-  display: flex;
-  gap: 8px;
+  color: var(--kk-primary);
 }
 
 .project-hero__body {
-  padding: 20px 24px 22px;
+  padding: 20px 24px 16px;
+}
+
+.project-hero__ops {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.project-hero__ops .icon-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--kk-text-secondary);
+}
+
+.project-hero__ops .icon-btn:hover {
+  color: var(--kk-primary);
+}
+
+.project-hero__ops .icon-btn.is-danger:hover {
+  color: var(--kk-danger);
 }
 
 .project-hero__title-row {
@@ -717,7 +839,7 @@ onMounted(async () => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 
 .meta-chip {
@@ -725,58 +847,77 @@ onMounted(async () => {
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
-  background: #f8fafc;
-  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 999px;
   font-size: 13px;
-  color: #334155;
+  color: var(--kk-text);
 }
 
-.meta-chip em {
-  font-style: normal;
-  color: #94a3b8;
-  font-size: 12px;
+.meta-chip .el-icon {
+  color: var(--kk-text-muted);
 }
 
 .metric-bar {
-  display: flex;
-  align-items: stretch;
-  padding: 16px 20px;
-  background: #f8fafc;
-  border-radius: 10px;
-  border: 1px solid #eef2f7;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .metric-item {
-  flex: 1;
-  min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 14px;
+  transition: transform 0.18s var(--kk-ease), box-shadow 0.18s var(--kk-ease);
 }
 
-.metric-divider {
-  width: 1px;
-  background: #e2e8f0;
-  margin: 0 16px;
+.metric-item:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.05);
+}
+
+.metric-icon {
   flex-shrink: 0;
+  color: var(--kk-primary);
+}
+
+.metric-icon.is-todo { color: #71717a; }
+.metric-icon.is-doing { color: #d97706; }
+.metric-icon.is-done { color: #059669; }
+.metric-icon.is-overdue { color: var(--kk-danger); }
+
+.metric-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .metric-label {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--kk-text-muted);
 }
 
 .metric-value {
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  color: #0f172a;
+  letter-spacing: -0.03em;
+  color: var(--kk-text);
 }
 
 .project-panel {
-  background: #fff;
-  border: 1px solid #e8edf4;
-  border-radius: 14px;
+  background: var(--kk-glass-bg);
+  border: 1px solid var(--kk-glass-border);
+  border-radius: var(--kk-radius);
+  box-shadow: var(--kk-glass-shadow);
+  backdrop-filter: var(--kk-glass-blur);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
   padding: 0 4px 4px;
 }
 
@@ -798,12 +939,12 @@ onMounted(async () => {
 }
 
 .project-tabs :deep(.el-tabs__item.is-active) {
-  color: #4f46e5;
+  color: var(--kk-primary);
   font-weight: 600;
 }
 
 .project-tabs :deep(.el-tabs__active-bar) {
-  background: #4f46e5;
+  background: var(--kk-primary);
   height: 2px;
 }
 
@@ -841,7 +982,7 @@ onMounted(async () => {
 }
 
 .filter-pill.active {
-  background: #4f46e5;
+  background: var(--kk-primary);
   color: #fff;
 }
 
@@ -889,16 +1030,22 @@ onMounted(async () => {
   font-weight: 500;
 }
 
+@media (prefers-reduced-transparency: reduce) {
+  .project-card,
+  .project-hero,
+  .project-panel {
+    background: #fff;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
 @media (max-width: 960px) {
   .metric-bar {
-    flex-wrap: wrap;
-    gap: 16px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .metric-divider {
-    display: none;
-  }
-  .metric-item {
-    flex: 1 1 40%;
+  .metric-item:last-child {
+    grid-column: 1 / -1;
   }
   .info-grid {
     grid-template-columns: 1fr;
