@@ -17,11 +17,14 @@ import com.kk.biz.service.HrWalletService;
 import com.kk.biz.support.BizNoGenerator;
 import com.kk.common.exception.BusinessException;
 import com.kk.system.entity.SysUser;
+import com.kk.system.service.DataScopeService;
 import com.kk.system.service.SysUserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+
+import cn.dev33.satoken.stp.StpUtil;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -43,6 +46,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     private final HrWalletService walletService;
     private final SysUserService userService;
     private final BizNoGenerator bizNoGenerator;
+    private final DataScopeService dataScopeService;
 
     @Override
     public FinProjectAccount getOrCreate(Long projectId) {
@@ -65,12 +69,18 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         account.setReserveAmount(project.getReserveAmount() == null ? BigDecimal.ZERO : project.getReserveAmount());
         account.setReserveHeld(BigDecimal.ZERO);
         account.setStatus(1);
+        account.setCompanyId(project.getCompanyId());
         save(account);
         return account;
     }
 
     @Override
     public FinProjectAccount getByProjectId(Long projectId) {
+        PmProject project = projectMapper.selectById(projectId);
+        if (project == null) {
+            throw new BusinessException("项目不存在");
+        }
+        assertProjectVisible(project);
         FinProjectAccount account = getOrCreate(projectId);
         fillExtra(List.of(account));
         assertBalancedQuiet(account);
@@ -79,14 +89,37 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
 
     @Override
     public List<FinProjectAccount> listAccounts() {
-        List<FinProjectAccount> list = list(new LambdaQueryWrapper<FinProjectAccount>()
-                .orderByDesc(FinProjectAccount::getId));
+        LambdaQueryWrapper<FinProjectAccount> wrapper = new LambdaQueryWrapper<FinProjectAccount>()
+                .orderByDesc(FinProjectAccount::getId);
+        long loginId = StpUtil.getLoginIdAsLong();
+        if (!dataScopeService.isGlobalAdmin(loginId)) {
+            Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
+            if (companies.isEmpty()) {
+                return List.of();
+            }
+            wrapper.in(FinProjectAccount::getCompanyId, companies);
+        }
+        List<FinProjectAccount> list = list(wrapper);
         fillExtra(list);
         return list;
     }
 
     @Override
     public Page<FinLedger> pageProjectLedgers(long page, long pageSize, Long projectId, String bizType) {
+        if (projectId == null) {
+            throw new BusinessException("缺少项目 ID");
+        }
+        PmProject project = projectMapper.selectById(projectId);
+        if (project == null) {
+            throw new BusinessException("项目不存在");
+        }
+        long loginId = StpUtil.getLoginIdAsLong();
+        if (!dataScopeService.isGlobalAdmin(loginId)) {
+            Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
+            if (project.getCompanyId() == null || !companies.contains(project.getCompanyId())) {
+                throw new BusinessException("无权查看该项目流水");
+            }
+        }
         Page<FinLedger> result = ledgerMapper.selectPage(new Page<>(page, pageSize), new LambdaQueryWrapper<FinLedger>()
                 .eq(FinLedger::getProjectId, projectId)
                 .eq(StringUtils.hasText(bizType), FinLedger::getBizType, bizType)
@@ -100,7 +133,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Transactional(rollbackFor = Exception.class)
     public void advanceFromCompany(Long projectId, Long poolId, BigDecimal amount, Long approvalId, String remark) {
         requirePositive(amount);
-        FinPool pool = requirePool(poolId);
+        FinPool pool = requirePool(poolId, projectId);
         FinProjectAccount account = getOrCreate(projectId);
         BigDecimal poolBefore = pool.getBalance();
         debitPool(pool, amount);
@@ -147,7 +180,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         if (nz(account.getAdvanceAmount()).compareTo(amount) < 0) {
             throw new BusinessException("回退金额超过累计预支");
         }
-        FinPool pool = requirePool(poolId);
+        FinPool pool = requirePool(poolId, projectId);
         BigDecimal projectBefore = account.getBalance();
         account.setBalance(projectBefore.subtract(amount));
         account.setAdvanceAmount(nz(account.getAdvanceAmount()).subtract(amount));
@@ -185,6 +218,38 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public void expenseToWallet(Long projectId, Long userId, BigDecimal amount, Long approvalId,
+                                String bizType, String title, String remark) {
+        requirePositive(amount);
+        if (userId == null) {
+            throw new BusinessException("缺少收款人，无法转入个人钱包");
+        }
+        String type = StringUtils.hasText(bizType) ? bizType : "EXPENSE";
+        FinProjectAccount account = getOrCreate(projectId);
+        if (nz(account.getBalance()).compareTo(amount) < 0) {
+            throw new BusinessException("项目可用余额不足");
+        }
+        BigDecimal projectBefore = account.getBalance();
+        account.setBalance(projectBefore.subtract(amount));
+        account.setExpenseAmount(nz(account.getExpenseAmount()).add(amount));
+        updateById(account);
+
+        Long batchId = writeLedger(type, "PROJECT", null, null, null, amount.negate(),
+                projectBefore, account.getBalance(), projectId, null, approvalId,
+                StringUtils.hasText(title) ? title : "项目支出", remark);
+
+        HrWallet walletBefore = walletService.getOrCreate(userId);
+        BigDecimal wb = walletBefore.getBalance();
+        walletService.changeBalance(userId, amount);
+        HrWallet walletAfter = walletService.getOrCreate(userId);
+        writeLedger(type, "WALLET", null, userId, null, amount,
+                wb, walletAfter.getBalance(), projectId, batchId, approvalId,
+                StringUtils.hasText(title) ? (title + "入钱包") : "项目支出入钱包", remark);
+        assertBalanced(projectId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public void settleToWallets(Long projectId, Long poolId, Map<Long, BigDecimal> shares, Long approvalId, String remark) {
         if (shares == null || shares.isEmpty()) {
             throw new BusinessException("分成明细不能为空");
@@ -200,9 +265,16 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         account.setSettleAmount(nz(account.getSettleAmount()).add(total));
         updateById(account);
 
+        PmProject project = projectMapper.selectById(projectId);
+        String projectLabel = project != null && StringUtils.hasText(project.getName())
+                ? project.getName().trim()
+                : ("#" + projectId);
+        String debitTitle = "项目分成扣款 · " + projectLabel;
+        String creditTitle = "项目分成入账 · " + projectLabel;
+
         Long batchId = writeLedger("SETTLE", "PROJECT", poolId, null, null, total.negate(),
                 before, account.getBalance(), projectId, null, approvalId,
-                "项目分成扣款", remark);
+                debitTitle, remark);
 
         for (Map.Entry<Long, BigDecimal> e : shares.entrySet()) {
             if (e.getValue() == null || e.getValue().compareTo(BigDecimal.ZERO) <= 0) {
@@ -214,10 +286,9 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
             HrWallet walletAfter = walletService.getOrCreate(e.getKey());
             writeLedger("SETTLE", "WALLET", poolId, e.getKey(), null, e.getValue(),
                     wb, walletAfter.getBalance(), projectId, batchId, approvalId,
-                    "项目分成入账", remark);
+                    creditTitle, remark);
         }
 
-        PmProject project = projectMapper.selectById(projectId);
         if (project != null) {
             project.setSettledAmount(nz(project.getSettledAmount()).add(total));
             projectMapper.updateById(project);
@@ -266,7 +337,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         if (total.compareTo(BigDecimal.ZERO) <= 0) {
             throw new BusinessException("项目没有可回公司的结余");
         }
-        FinPool pool = requirePool(poolId);
+        FinPool pool = requirePool(poolId, projectId);
         BigDecimal projectBefore = account.getBalance();
         // 结余 = 当前余额 + 若有历史预留占用一并退回公司
         account.setBalance(BigDecimal.ZERO);
@@ -326,6 +397,18 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         ledger.setTitle(title);
         ledger.setRemark(remark);
         ledger.setOccurTime(LocalDateTime.now());
+        if (projectId != null) {
+            PmProject project = projectMapper.selectById(projectId);
+            if (project != null) {
+                ledger.setCompanyId(project.getCompanyId());
+            }
+        }
+        if (ledger.getCompanyId() == null && poolId != null) {
+            FinPool pool = poolMapper.selectById(poolId);
+            if (pool != null) {
+                ledger.setCompanyId(pool.getCompanyId());
+            }
+        }
         ledgerMapper.insert(ledger);
         if (relatedId == null) {
             FinLedger link = new FinLedger();
@@ -336,11 +419,30 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         return ledger.getId();
     }
 
-    private FinPool requirePool(Long poolId) {
-        FinPool pool = poolId != null ? poolMapper.selectById(poolId)
-                : poolMapper.selectOne(new LambdaQueryWrapper<FinPool>().eq(FinPool::getIsDefault, 1).last("LIMIT 1"));
-        if (pool == null) {
-            pool = poolMapper.selectOne(new LambdaQueryWrapper<FinPool>().last("LIMIT 1"));
+    private FinPool requirePool(Long poolId, Long projectId) {
+        Long companyId = null;
+        if (projectId != null) {
+            PmProject project = projectMapper.selectById(projectId);
+            if (project != null) {
+                companyId = project.getCompanyId();
+            }
+        }
+        FinPool pool;
+        if (poolId != null) {
+            pool = poolMapper.selectById(poolId);
+        } else if (companyId != null) {
+            pool = poolMapper.selectOne(new LambdaQueryWrapper<FinPool>()
+                    .eq(FinPool::getIsDefault, 1)
+                    .eq(FinPool::getCompanyId, companyId)
+                    .last("LIMIT 1"));
+            if (pool == null) {
+                pool = poolMapper.selectOne(new LambdaQueryWrapper<FinPool>()
+                        .eq(FinPool::getCompanyId, companyId)
+                        .orderByAsc(FinPool::getId)
+                        .last("LIMIT 1"));
+            }
+        } else {
+            throw new BusinessException("无法确定资金池所属公司");
         }
         if (pool == null) {
             throw new BusinessException("公司账户不存在");
@@ -348,7 +450,21 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         if (pool.getStatus() != null && pool.getStatus() == 0) {
             throw new BusinessException("公司账户已禁用");
         }
+        if (companyId != null && pool.getCompanyId() != null && !companyId.equals(pool.getCompanyId())) {
+            throw new BusinessException("资金池与项目不属于同一公司");
+        }
         return pool;
+    }
+
+    private void assertProjectVisible(PmProject project) {
+        long loginId = StpUtil.getLoginIdAsLong();
+        if (dataScopeService.isGlobalAdmin(loginId)) {
+            return;
+        }
+        Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
+        if (project.getCompanyId() == null || !companies.contains(project.getCompanyId())) {
+            throw new BusinessException("无权查看该项目账户");
+        }
     }
 
     private void debitPool(FinPool pool, BigDecimal amount) {

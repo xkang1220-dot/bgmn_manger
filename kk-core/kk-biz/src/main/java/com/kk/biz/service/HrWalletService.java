@@ -13,4 +13,10 @@ public interface HrWalletService extends IService<HrWallet> {
     HrWallet getOrCreate(Long userId);
 
     HrWallet changeBalance(Long userId, BigDecimal delta);
+
+    /** 冻结：不改 balance，要求可用余额充足 */
+    HrWallet freeze(Long userId, BigDecimal amount);
+
+    /** 解冻：扣减 frozen */
+    HrWallet unfreeze(Long userId, BigDecimal amount);
 }

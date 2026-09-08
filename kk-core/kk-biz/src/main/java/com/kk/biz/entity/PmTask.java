@@ -19,13 +19,16 @@ public class PmTask extends BaseEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    /** 所属公司（顶层部门 id） */
+    private Long companyId;
+
     private Long projectId;
 
     private String title;
 
     private String content;
 
-    /** 0待办 1进行中 2已完成 3已取消 */
+    /** 0待办 1进行中 2已完成 3已关闭 */
     private Integer status;
 
     /** 1高 2中 3低 */
@@ -43,8 +46,13 @@ public class PmTask extends BaseEntity {
     @TableField(exist = false)
     private String projectName;
 
+    /** 兼容旧字段：持有人已停用，VO 恒为 null */
     @TableField(exist = false)
     private String assigneeName;
+
+    /** 当前登录人是否可移交（参与人 / 项目负责人 / 全局管理员） */
+    @TableField(exist = false)
+    private Boolean canTransfer;
 
     /** 参与人员用户 ID */
     @TableField(exist = false)

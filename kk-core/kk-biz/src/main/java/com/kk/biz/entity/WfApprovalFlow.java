@@ -18,6 +18,9 @@ public class WfApprovalFlow extends BaseEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    /** 所属公司（顶层部门 id） */
+    private Long companyId;
+
     /** 审批类型编码，见 ApprovalTypes */
     private String type;
 
@@ -41,6 +44,9 @@ public class WfApprovalFlow extends BaseEntity {
     private Integer sort;
 
     private String remark;
+
+    @TableField(exist = false)
+    private String companyName;
 
     @TableField(exist = false)
     private List<Long> userIdList;

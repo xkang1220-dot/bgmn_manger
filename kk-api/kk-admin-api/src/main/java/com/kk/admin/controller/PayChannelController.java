@@ -2,6 +2,7 @@ package com.kk.admin.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.dev33.satoken.annotation.SaMode;
+import cn.dev33.satoken.stp.StpUtil;
 import com.kk.biz.entity.FinMonthVerify;
 import com.kk.biz.entity.FinPayChannel;
 import com.kk.biz.mapper.FinMonthVerifyMapper;
@@ -9,6 +10,7 @@ import com.kk.biz.service.FinPayChannelService;
 import com.kk.biz.service.SysFileService;
 import com.kk.common.result.Result;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.kk.system.service.DataScopeService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
@@ -27,6 +29,7 @@ public class PayChannelController {
     private final FinPayChannelService payChannelService;
     private final FinMonthVerifyMapper monthVerifyMapper;
     private final SysFileService fileService;
+    private final DataScopeService dataScopeService;
 
     @GetMapping("/pay-channel/list")
     @SaCheckPermission(value = {"finance:channel:list", "finance:ledger:list", "finance:ledger:add"}, mode = SaMode.OR)
@@ -53,11 +56,20 @@ public class PayChannelController {
     @SaCheckPermission("finance:verify:list")
     public Result<List<FinMonthVerify>> verifyList(@RequestParam(required = false) String verifyMonth,
                                                    @RequestParam(required = false) Long channelId) {
-        List<FinMonthVerify> list = monthVerifyMapper.selectList(new LambdaQueryWrapper<FinMonthVerify>()
+        LambdaQueryWrapper<FinMonthVerify> wrapper = new LambdaQueryWrapper<FinMonthVerify>()
                 .eq(StringUtils.hasText(verifyMonth), FinMonthVerify::getVerifyMonth, verifyMonth)
                 .eq(channelId != null, FinMonthVerify::getChannelId, channelId)
                 .orderByDesc(FinMonthVerify::getVerifyMonth)
-                .orderByDesc(FinMonthVerify::getId));
+                .orderByDesc(FinMonthVerify::getId);
+        long loginId = StpUtil.getLoginIdAsLong();
+        if (!dataScopeService.isGlobalAdmin(loginId)) {
+            Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
+            if (companies.isEmpty()) {
+                return Result.ok(List.of());
+            }
+            wrapper.in(FinMonthVerify::getCompanyId, companies);
+        }
+        List<FinMonthVerify> list = monthVerifyMapper.selectList(wrapper);
         fillVerify(list);
         return Result.ok(list);
     }

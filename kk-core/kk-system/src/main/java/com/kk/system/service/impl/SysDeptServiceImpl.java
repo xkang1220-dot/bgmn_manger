@@ -70,6 +70,28 @@ public class SysDeptServiceImpl extends ServiceImpl<SysDeptMapper, SysDept> impl
         return ids;
     }
 
+    @Override
+    public Long resolveCompanyId(Long deptId) {
+        if (deptId == null) {
+            return null;
+        }
+        SysDept current = getById(deptId);
+        int guard = 0;
+        while (current != null && current.getParentId() != null && current.getParentId() != 0L && guard++ < 32) {
+            current = getById(current.getParentId());
+        }
+        return current == null ? null : current.getId();
+    }
+
+    @Override
+    public List<SysDept> listCompanies() {
+        return list(new LambdaQueryWrapper<SysDept>()
+                .and(w -> w.isNull(SysDept::getParentId).or().eq(SysDept::getParentId, 0))
+                .eq(SysDept::getStatus, 1)
+                .orderByAsc(SysDept::getSort)
+                .orderByAsc(SysDept::getId));
+    }
+
     private void collect(List<SysDept> all, Long parentId, List<Long> ids) {
         for (SysDept dept : all) {
             if (parentId.equals(dept.getParentId())) {

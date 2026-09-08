@@ -11,6 +11,7 @@ import router from './router'
 import './style.css'
 import './styles/liquid-glass.css'
 import { bindGlassLight } from './glass-light'
+import { setupPermissionDirective } from './directives/permission'
 
 const app = createApp(App)
 const pinia = createPinia()
@@ -19,6 +20,7 @@ app.use(pinia)
 app.use(router)
 app.use(LiquidGlass)
 app.use(ElementPlus, { locale: zhCn })
+setupPermissionDirective(app)
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
   app.component(key, component)
 }

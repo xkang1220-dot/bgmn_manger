@@ -3,9 +3,11 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { bizApi } from '@/api/biz'
+import { sysApi } from '@/api/system'
 
 const router = useRouter()
 const list = ref<any[]>([])
+const companies = ref<any[]>([])
 const dialog = ref(false)
 const isEdit = ref(false)
 const form = reactive<any>({
@@ -14,6 +16,8 @@ const form = reactive<any>({
   isDefault: 0,
   status: 1,
   remark: '',
+  companyId: undefined as number | undefined,
+  companyName: '',
 })
 
 async function load() {
@@ -22,6 +26,7 @@ async function load() {
 
 function open(row?: any) {
   isEdit.value = !!row
+  const only = companies.value.length === 1 ? companies.value[0].id : undefined
   Object.assign(form, row || {
     id: undefined,
     name: '',
@@ -29,6 +34,8 @@ function open(row?: any) {
     isDefault: 0,
     status: 1,
     remark: '',
+    companyId: only,
+    companyName: '',
   })
   dialog.value = true
 }
@@ -36,6 +43,10 @@ function open(row?: any) {
 async function save() {
   if (!form.name?.trim()) {
     ElMessage.warning('请填写资金池名称')
+    return
+  }
+  if (!isEdit.value && !form.companyId) {
+    ElMessage.warning('请选择所属公司')
     return
   }
   const payload = isEdit.value
@@ -52,6 +63,7 @@ async function save() {
         isDefault: form.isDefault,
         status: form.status,
         remark: form.remark,
+        companyId: form.companyId,
       }
   await bizApi.savePool(payload, isEdit.value)
   ElMessage.success('保存成功')
@@ -68,7 +80,10 @@ function formatMoney(v: number | string | undefined) {
   return n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-onMounted(load)
+onMounted(async () => {
+  companies.value = await sysApi.myCompanies()
+  await load()
+})
 </script>
 
 <template>
@@ -79,7 +94,7 @@ onMounted(load)
       </div>
       <div class="page-actions">
         <el-button @click="goLedger()">去进出账</el-button>
-        <el-button type="primary" @click="open()">新增资金池</el-button>
+        <el-button v-permission="'finance:pool:edit'" type="primary" @click="open()">新增资金池</el-button>
       </div>
     </div>
 
@@ -87,6 +102,7 @@ onMounted(load)
       <div class="table-wrap">
         <el-table :data="list">
           <el-table-column prop="name" label="名称" min-width="140" />
+          <el-table-column prop="companyName" label="所属公司" min-width="120" />
           <el-table-column label="余额" width="160" align="right">
             <template #default="{ row }">
               <span class="money">¥ {{ formatMoney(row.balance) }}</span>
@@ -109,7 +125,7 @@ onMounted(load)
           <el-table-column prop="remark" label="备注" min-width="160" show-overflow-tooltip />
           <el-table-column label="操作" width="180" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" @click="open(row)">编辑</el-button>
+              <el-button v-permission="'finance:pool:edit'" link type="primary" @click="open(row)">编辑</el-button>
               <el-button link type="primary" @click="goLedger(row.id)">进出账</el-button>
             </template>
           </el-table-column>
@@ -119,6 +135,18 @@ onMounted(load)
 
     <el-dialog v-model="dialog" :title="isEdit ? '编辑资金池' : '新增资金池'" width="480px">
       <el-form label-width="90px">
+        <el-form-item label="所属公司" required>
+          <el-select
+            v-if="!isEdit"
+            v-model="form.companyId"
+            filterable
+            placeholder="选择公司"
+            style="width: 100%"
+          >
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+          <span v-else>{{ form.companyName || '—' }}</span>
+        </el-form-item>
         <el-form-item label="名称" required>
           <el-input v-model="form.name" placeholder="如：公司主资金池" />
         </el-form-item>
@@ -160,6 +188,5 @@ onMounted(load)
   display: flex;
   align-items: center;
   gap: 12px;
-  width: 100%;
 }
 </style>

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
@@ -15,7 +14,7 @@ const query = reactive({
   projectId: undefined as number | undefined,
   status: undefined as number | undefined,
   priority: undefined as number | undefined,
-  assigneeId: undefined as number | undefined,
+  participantId: undefined as number | undefined,
   overdue: undefined as boolean | undefined,
 })
 
@@ -28,7 +27,7 @@ const taskDrawer = ref(false)
 const activeTaskId = ref<number | null>(null)
 const listLoading = ref(false)
 
-const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已取消' }
+const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭' }
 const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
 const statusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'> = {
   0: 'info',
@@ -98,7 +97,7 @@ function resetQuery() {
     projectId: undefined,
     status: undefined,
     priority: undefined,
-    assigneeId: undefined,
+    participantId: undefined,
     overdue: undefined,
   })
   load()
@@ -123,13 +122,6 @@ function open(row?: any) {
   taskDrawer.value = true
 }
 
-async function remove(id: number) {
-  await ElMessageBox.confirm('确认删除该任务？')
-  await bizApi.deleteTask(id)
-  ElMessage.success('已删除')
-  await load()
-}
-
 function progressStatus(row: any) {
   if (row.status === 2) return 'success'
   if (row.overdue) return 'exception'
@@ -146,6 +138,11 @@ onMounted(async () => {
     if (!Number.isNaN(num)) query.projectId = num
   }
   await load()
+  const tid = route.query.taskId
+  if (tid) {
+    const num = Number(tid)
+    if (!Number.isNaN(num)) open({ id: num })
+  }
 })
 </script>
 
@@ -156,7 +153,7 @@ onMounted(async () => {
         <p class="page-desc">全局任务列表；项目内请用「看板」拖拽改状态、点卡片看详情与评论</p>
       </div>
       <div class="page-actions">
-        <el-button type="primary" @click="open()">新建任务</el-button>
+        <el-button v-permission="'project:task:add'" type="primary" @click="open()">新建任务</el-button>
       </div>
     </div>
 
@@ -202,8 +199,8 @@ onMounted(async () => {
           <el-option v-for="(label, value) in priorityMap" :key="value" :label="label" :value="Number(value)" />
         </el-select>
       </el-form-item>
-      <el-form-item label="负责人">
-        <el-select v-model="query.assigneeId" clearable filterable placeholder="全部" class="filter-select--wide">
+      <el-form-item label="参与人">
+        <el-select v-model="query.participantId" clearable filterable placeholder="全部" class="filter-select--wide">
           <el-option v-for="u in users" :key="u.id" :label="u.nickname || u.username" :value="u.id" />
         </el-select>
       </el-form-item>
@@ -229,8 +226,7 @@ onMounted(async () => {
             <el-tag :type="priorityType[row.priority] || 'info'" size="small">{{ priorityMap[row.priority] || '中' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="assigneeName" label="负责人" width="100" show-overflow-tooltip />
-        <el-table-column label="参与人员" min-width="140" show-overflow-tooltip>
+        <el-table-column label="参与人员" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.participantNames?.length ? row.participantNames.join('、') : '—' }}
           </template>
@@ -254,10 +250,9 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="140" fixed="right" align="center">
+        <el-table-column label="操作" width="100" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" @click="open(row)">详情</el-button>
-            <el-button link type="danger" @click="remove(row.id)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>

@@ -21,6 +21,7 @@ public class AccountController {
         SysUser user = userService.getById(StpUtil.getLoginIdAsLong());
         if (user != null) {
             user.setPassword(null);
+            user.setTotpSecretKey(null);
         }
         return Result.ok(user);
     }
@@ -36,6 +37,11 @@ public class AccountController {
         update.setAvatar(body.getAvatar());
         userService.updateById(update);
         return Result.ok();
+    }
+
+    @PostMapping("/task-query-code")
+    public Result<String> generateTaskQueryCode() {
+        return Result.ok(userService.generateTaskQueryCode(StpUtil.getLoginIdAsLong()));
     }
 
     @PutMapping("/password")

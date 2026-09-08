@@ -8,19 +8,28 @@ import com.kk.common.exception.BusinessException;
 import com.kk.system.entity.SysNotification;
 import com.kk.system.mapper.SysNotificationMapper;
 import com.kk.system.service.SysNotificationService;
+import com.kk.system.ws.NotificationWsSessionHub;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
 @Service
+@RequiredArgsConstructor
 public class SysNotificationServiceImpl extends ServiceImpl<SysNotificationMapper, SysNotification>
         implements SysNotificationService {
 
     private static final String DEFAULT_LINK = "/workflow/center";
+
+    private final NotificationWsSessionHub sessionHub;
 
     @Override
     public void notifyUser(Long userId, String title, String content, String bizType, Long bizId, String link) {
@@ -36,6 +45,7 @@ public class SysNotificationServiceImpl extends ServiceImpl<SysNotificationMappe
         n.setLink(StringUtils.hasText(link) ? link : DEFAULT_LINK);
         n.setReadFlag(0);
         save(n);
+        pushRealtime(n);
     }
 
     @Override
@@ -95,6 +105,30 @@ public class SysNotificationServiceImpl extends ServiceImpl<SysNotificationMappe
                 .eq(SysNotification::getUserId, userId)
                 .eq(SysNotification::getReadFlag, 0)
                 .set(SysNotification::getReadFlag, 1));
+    }
+
+    private void pushRealtime(SysNotification n) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("type", "notification");
+        payload.put("id", n.getId());
+        payload.put("title", n.getTitle());
+        payload.put("content", n.getContent());
+        payload.put("bizType", n.getBizType());
+        payload.put("bizId", n.getBizId());
+        payload.put("link", n.getLink());
+        payload.put("readFlag", n.getReadFlag());
+        Long userId = n.getUserId();
+        Runnable push = () -> sessionHub.pushToUser(userId, payload);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    push.run();
+                }
+            });
+        } else {
+            push.run();
+        }
     }
 
     private Long requireLogin() {

@@ -40,13 +40,25 @@ export const workflowApi = {
   rollback(data: { approvalId: number; mode: string; amount?: number; reason?: string }) {
     return request<any>({ url: '/workflow/approval/rollback', method: 'post', data })
   },
-  flowList() {
-    return request<any[]>({ url: '/workflow/flow/list', method: 'get' })
+  flowList(companyId: number) {
+    return request<any[]>({ url: '/workflow/flow/list', method: 'get', params: { companyId } })
+  },
+  /** 提交前预览该公司该类型的审批配置提示 */
+  flowDescribe(type: string, companyId: number) {
+    return request<{
+      tip: string
+      passModeLabel: string
+      timeoutLabel: string
+      assigneeCount: number
+    }>({ url: '/workflow/flow/describe', method: 'get', params: { type, companyId } })
   },
   saveFlow(data: any) {
     return request<void>({ url: '/workflow/flow', method: 'put', data })
   },
   deleteFlow(id: number) {
     return request<void>({ url: `/workflow/flow/${id}`, method: 'delete' })
+  },
+  copyFlows(data: { fromCompanyId: number; toCompanyId: number }) {
+    return request<number>({ url: '/workflow/flow/copy', method: 'post', data })
   },
 }

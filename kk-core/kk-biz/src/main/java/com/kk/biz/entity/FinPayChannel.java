@@ -18,6 +18,8 @@ public class FinPayChannel extends BaseEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    private Long companyId;
+
     private Long poolId;
 
     /** ALIPAY / WECHAT / BANK / CASH / OTHER */

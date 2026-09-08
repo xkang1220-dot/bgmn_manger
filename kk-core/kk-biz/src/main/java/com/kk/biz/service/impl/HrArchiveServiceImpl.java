@@ -4,7 +4,9 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.kk.biz.entity.HrArchive;
+import com.kk.biz.entity.HrPayMethod;
 import com.kk.biz.mapper.HrArchiveMapper;
+import com.kk.biz.mapper.HrPayMethodMapper;
 import com.kk.biz.service.HrArchiveService;
 import com.kk.biz.service.HrWalletService;
 import com.kk.common.exception.BusinessException;
@@ -17,13 +19,21 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+
 @Service
 @RequiredArgsConstructor
 public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive> implements HrArchiveService {
 
+    private static final Set<String> METHOD_TYPES = Set.of("BANK", "ALIPAY");
+
     private final SysUserService userService;
     private final SysDeptService deptService;
     private final HrWalletService walletService;
+    private final HrPayMethodMapper payMethodMapper;
 
     @Override
     public Page<HrArchive> pageArchives(long page, long pageSize, String realName, String employeeNo) {
@@ -42,6 +52,7 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
             throw new BusinessException("档案不存在");
         }
         fillUser(archive);
+        archive.setPayMethods(listMethods(id));
         return archive;
     }
 
@@ -56,21 +67,167 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
         }
         save(archive);
         walletService.getOrCreate(archive.getUserId());
+        syncPayMethods(archive.getId(), archive.getPayMethods());
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void updateArchive(HrArchive archive) {
+        if (archive.getId() == null) {
+            throw new BusinessException("档案 ID 不能为空");
+        }
+        if (getById(archive.getId()) == null) {
+            throw new BusinessException("档案不存在");
+        }
         updateById(archive);
+        if (archive.getPayMethods() != null) {
+            syncPayMethods(archive.getId(), archive.getPayMethods());
+        }
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void deleteArchive(Long id) {
         removeById(id);
+        payMethodMapper.delete(new LambdaQueryWrapper<HrPayMethod>().eq(HrPayMethod::getArchiveId, id));
     }
 
     @Override
     public HrArchive getByUserId(Long userId) {
         return getOne(new LambdaQueryWrapper<HrArchive>().eq(HrArchive::getUserId, userId).last("LIMIT 1"));
+    }
+
+    @Override
+    public List<HrPayMethod> listMyPayMethods(Long userId) {
+        if (userId == null) {
+            return List.of();
+        }
+        HrArchive archive = getByUserId(userId);
+        if (archive == null) {
+            return List.of();
+        }
+        return listMethods(archive.getId());
+    }
+
+    @Override
+    public HrPayMethod getOwnedMethod(Long userId, Long methodId) {
+        if (userId == null || methodId == null) {
+            return null;
+        }
+        HrArchive archive = getByUserId(userId);
+        if (archive == null) {
+            return null;
+        }
+        HrPayMethod method = payMethodMapper.selectById(methodId);
+        if (method == null || !Objects.equals(method.getArchiveId(), archive.getId())) {
+            return null;
+        }
+        fillMethodLabel(method);
+        return method;
+    }
+
+    private List<HrPayMethod> listMethods(Long archiveId) {
+        List<HrPayMethod> list = payMethodMapper.selectList(new LambdaQueryWrapper<HrPayMethod>()
+                .eq(HrPayMethod::getArchiveId, archiveId)
+                .orderByDesc(HrPayMethod::getIsDefault)
+                .orderByAsc(HrPayMethod::getSort)
+                .orderByAsc(HrPayMethod::getId));
+        list.forEach(this::fillMethodLabel);
+        return list;
+    }
+
+    private void syncPayMethods(Long archiveId, List<HrPayMethod> methods) {
+        if (archiveId == null) {
+            return;
+        }
+        List<HrPayMethod> incoming = methods == null ? List.of() : methods;
+        validateMethods(incoming);
+
+        List<HrPayMethod> existing = payMethodMapper.selectList(new LambdaQueryWrapper<HrPayMethod>()
+                .eq(HrPayMethod::getArchiveId, archiveId));
+        Set<Long> keepIds = new HashSet<>();
+        int sort = 0;
+        boolean defaultSeen = false;
+        for (HrPayMethod item : incoming) {
+            String type = item.getMethodType().trim().toUpperCase();
+            item.setMethodType(type);
+            item.setArchiveId(archiveId);
+            item.setSort(item.getSort() == null ? sort : item.getSort());
+            sort++;
+            if (!"BANK".equals(type)) {
+                // 避免银行卡改支付宝/微信后开户行残留（updateById 默认忽略 null）
+                item.setBankName("");
+            }
+            if (isDefaultFlag(item.getIsDefault()) && !defaultSeen) {
+                defaultSeen = true;
+                item.setIsDefault(1);
+            } else {
+                item.setIsDefault(0);
+            }
+            if (item.getId() != null && existing.stream().anyMatch(e -> Objects.equals(e.getId(), item.getId()))) {
+                payMethodMapper.updateById(item);
+                keepIds.add(item.getId());
+            } else {
+                item.setId(null);
+                payMethodMapper.insert(item);
+                keepIds.add(item.getId());
+            }
+        }
+        for (HrPayMethod old : existing) {
+            if (!keepIds.contains(old.getId())) {
+                payMethodMapper.deleteById(old.getId());
+            }
+        }
+        if (!incoming.isEmpty() && !defaultSeen) {
+            List<HrPayMethod> ordered = listMethods(archiveId);
+            if (!ordered.isEmpty()) {
+                HrPayMethod prefer = ordered.get(0);
+                prefer.setIsDefault(1);
+                payMethodMapper.updateById(prefer);
+            }
+        }
+    }
+
+    private void validateMethods(List<HrPayMethod> methods) {
+        int defaults = 0;
+        for (HrPayMethod item : methods) {
+            if (item == null) {
+                throw new BusinessException("收款方式无效");
+            }
+            if (!StringUtils.hasText(item.getMethodType())
+                    || !METHOD_TYPES.contains(item.getMethodType().trim().toUpperCase())) {
+                throw new BusinessException("收款方式类型仅支持银行卡/支付宝");
+            }
+            if (!StringUtils.hasText(item.getAccountNo())) {
+                throw new BusinessException("请填写收款账号");
+            }
+            String type = item.getMethodType().trim().toUpperCase();
+            if ("BANK".equals(type) && !StringUtils.hasText(item.getBankName())) {
+                throw new BusinessException("银行卡请填写开户行");
+            }
+            if (isDefaultFlag(item.getIsDefault())) {
+                defaults++;
+            }
+        }
+        if (defaults > 1) {
+            throw new BusinessException("默认收款方式只能有一条");
+        }
+    }
+
+    private static boolean isDefaultFlag(Integer value) {
+        return Objects.equals(value, 1);
+    }
+
+    private void fillMethodLabel(HrPayMethod method) {
+        if (method == null) {
+            return;
+        }
+        method.setMethodTypeLabel(switch (String.valueOf(method.getMethodType())) {
+            case "BANK" -> "银行卡";
+            case "ALIPAY" -> "支付宝";
+            case "WECHAT" -> "微信";
+            default -> method.getMethodType();
+        });
     }
 
     private void fillUser(HrArchive archive) {

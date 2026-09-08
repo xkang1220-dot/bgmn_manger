@@ -32,8 +32,14 @@ public class WorkflowController {
 
     @GetMapping("/flow/list")
     @SaCheckPermission(value = {"workflow:flow:edit", "workflow:list"}, mode = SaMode.OR)
-    public Result<List<WfApprovalFlow>> flowList() {
-        return Result.ok(approvalFlowService.listAll());
+    public Result<List<WfApprovalFlow>> flowList(@RequestParam Long companyId) {
+        return Result.ok(approvalFlowService.listByCompany(companyId));
+    }
+
+    /** 提交前按公司+类型预览当前审批配置文案 */
+    @GetMapping("/flow/describe")
+    public Result<Map<String, Object>> flowDescribe(@RequestParam String type, @RequestParam Long companyId) {
+        return Result.ok(approvalFlowService.describeEnabled(type, companyId));
     }
 
     @PutMapping("/flow")
@@ -46,8 +52,16 @@ public class WorkflowController {
     @DeleteMapping("/flow/{id}")
     @SaCheckPermission("workflow:flow:edit")
     public Result<Void> deleteFlow(@PathVariable Long id) {
-        approvalFlowService.removeById(id);
+        approvalFlowService.deleteFlow(id);
         return Result.ok();
+    }
+
+    @PostMapping("/flow/copy")
+    @SaCheckPermission("workflow:flow:edit")
+    public Result<Integer> copyFlows(@RequestBody Map<String, Long> body) {
+        Long fromCompanyId = body == null ? null : body.get("fromCompanyId");
+        Long toCompanyId = body == null ? null : body.get("toCompanyId");
+        return Result.ok(approvalFlowService.copyFlows(fromCompanyId, toCompanyId));
     }
 
     @PostMapping("/approval")
@@ -98,14 +112,14 @@ public class WorkflowController {
     }
 
     @PostMapping("/approval/{id}/approve")
-    @SaCheckPermission(value = {"workflow:handle", "workflow:list"}, mode = SaMode.OR)
+    @SaCheckPermission("workflow:handle")
     public Result<Void> approve(@PathVariable Long id, @RequestBody(required = false) ApprovalActionRequest request) {
         approvalService.approve(id, request == null ? null : request.getComment());
         return Result.ok();
     }
 
     @PostMapping("/approval/{id}/reject")
-    @SaCheckPermission(value = {"workflow:handle", "workflow:list"}, mode = SaMode.OR)
+    @SaCheckPermission("workflow:handle")
     public Result<Void> reject(@PathVariable Long id, @RequestBody(required = false) ApprovalActionRequest request) {
         approvalService.reject(id, request == null ? null : request.getComment());
         return Result.ok();

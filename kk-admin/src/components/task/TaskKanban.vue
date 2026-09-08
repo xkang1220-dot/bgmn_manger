@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bizApi } from '@/api/biz'
+import { useUserStore } from '@/stores/user'
 
 const props = defineProps<{
   projectId: number
@@ -12,6 +13,10 @@ const emit = defineEmits<{
   createTask: []
   changed: []
 }>()
+
+const userStore = useUserStore()
+const canCreateTask = computed(() => userStore.hasPermission('project:task:add'))
+const canEditTask = computed(() => userStore.hasPermission('project:task:edit'))
 
 const loading = ref(false)
 const boardTasks = ref<any[]>([])
@@ -51,12 +56,15 @@ function showProgress(task: any) {
 }
 
 function others(task: any) {
-  const assignee = String(task.assigneeName || '')
-  return (task.participantNames || []).filter((n: string) => n && n !== assignee)
+  return (task.participantNames || []).filter((n: string) => !!n)
+}
+
+function primaryPerson(task: any) {
+  return others(task)[0] || ''
 }
 
 function extraPeople(task: any) {
-  return Math.max(0, others(task).length - 3)
+  return Math.max(0, others(task).length - 1 - 3)
 }
 
 const grouped = computed(() => {
@@ -113,6 +121,11 @@ async function onDrop(e: DragEvent, status: number) {
   setTimeout(() => {
     suppressClick.value = false
   }, 150)
+  if (!canEditTask.value) {
+    ElMessage.warning('无任务编辑权限')
+    draggingId.value = null
+    return
+  }
   const id = Number(e.dataTransfer?.getData('text/plain') || draggingId.value)
   draggingId.value = null
   if (Number.isNaN(id)) return
@@ -160,7 +173,7 @@ defineExpose({ load })
   <div v-loading="loading" class="kanban">
     <div class="kanban-toolbar">
       <span class="kanban-hint">拖拽卡片切换状态，松开后需确认才会生效</span>
-      <el-button type="primary" size="small" @click="emit('createTask')">新建任务</el-button>
+      <el-button v-if="canCreateTask" type="primary" size="small" @click="emit('createTask')">新建任务</el-button>
     </div>
     <div class="kanban-board">
       <div
@@ -183,7 +196,7 @@ defineExpose({ load })
             :key="task.id"
             class="kanban-card"
             :class="{ dragging: draggingId === task.id, overdue: task.overdue }"
-            draggable="true"
+            :draggable="canEditTask"
             @dragstart="onDragStart($event, task)"
             @dragend="onDragEnd"
             @click="onCardClick(task)"
@@ -198,11 +211,11 @@ defineExpose({ load })
             </div>
             <div class="kanban-card__foot">
               <span class="who">
-                <span class="avatar" :class="'avatar--' + avatarTone(task.assigneeName)">{{ initial(task.assigneeName) }}</span>
-                <em>{{ task.assigneeName || '未分配' }}</em>
-                <span v-if="others(task).length" class="faces">
+                <span class="avatar" :class="'avatar--' + avatarTone(primaryPerson(task))">{{ initial(primaryPerson(task)) }}</span>
+                <em>{{ primaryPerson(task) || '无参与人' }}</em>
+                <span v-if="others(task).length > 1" class="faces">
                   <span
-                    v-for="(name, i) in others(task).slice(0, 3)"
+                    v-for="(name, i) in others(task).slice(1, 4)"
                     :key="name + i"
                     class="face"
                     :class="'avatar--' + avatarTone(name)"

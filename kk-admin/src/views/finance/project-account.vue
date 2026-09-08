@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
+import { approvalFlowTip } from '@/utils/approvalTip'
 
 const list = ref<any[]>([])
 const activeId = ref<number | null>(null)
@@ -25,9 +26,10 @@ const ledgerDetail = ref<any>(null)
 const ledgerRelated = ref<any[]>([])
 const ledgerDetailLoading = ref(false)
 
-const form = reactive({ amount: 0, remark: '' })
+const form = reactive({ amount: 0, remark: '', payMethodId: undefined as number | undefined })
 const voucherFiles = ref<any[]>([])
 const uploadingVoucher = ref(false)
+const myPayMethods = ref<any[]>([])
 const settleForm = reactive({ amount: 0, remark: '' })
 const shareForm = reactive({
   budget: 0,
@@ -187,7 +189,7 @@ async function saveShare() {
   }
   savingShare.value = true
   try {
-    await workflowApi.submit({
+    const approval = await workflowApi.submit({
       type: 'SHARE_CONFIG',
       title: `资金配置 · ${account.value?.projectName || ''}`,
       projectId: activeId.value,
@@ -202,7 +204,7 @@ async function saveShare() {
       },
       remark: '项目资金配置：分成/预留合计 100%；支出直接从项目结余扣（只改规则）',
     })
-    ElMessage.success('已提交资金配置审批（全体股东会签）')
+    ElMessage.success(approvalFlowTip(approval, '已提交资金配置审批'))
     await loadDetail()
   } finally {
     savingShare.value = false
@@ -237,7 +239,7 @@ async function settleByPreset() {
       }
       return { userId: m.userId, amount: share, layer: m.layer }
     }).filter((x) => x.amount > 0)
-    await workflowApi.submit({
+    const approval = await workflowApi.submit({
       type: 'PROJECT_SETTLE',
       title: `项目分钱 · ${account.value?.projectName || ''}`,
       projectId: activeId.value,
@@ -246,7 +248,7 @@ async function settleByPreset() {
       remark: settleForm.remark,
       payload: { items },
     })
-    ElMessage.success('已提交分钱审批')
+    ElMessage.success(approvalFlowTip(approval, '已提交分钱审批'))
     settleForm.amount = 0
     settleForm.remark = ''
     await loadDetail()
@@ -262,7 +264,7 @@ async function returnRemainder() {
     ElMessage.warning('当前没有可回公司的预留/结余')
     return
   }
-  await workflowApi.submit({
+  const approval = await workflowApi.submit({
     type: 'RESERVE_RETURN',
     title: `预留回公司 · ${account.value?.projectName || ''}`,
     projectId: activeId.value,
@@ -270,7 +272,7 @@ async function returnRemainder() {
     amount: bal,
     remark: '项目结束，预留/结余退回公司总账',
   })
-  ElMessage.success('已提交预留回公司审批')
+  ElMessage.success(approvalFlowTip(approval, '已提交预留回公司审批'))
   await loadDetail()
 }
 
@@ -287,11 +289,11 @@ async function loadRelatedLedgers(row: any) {
     ? ledgers.value
     : ((await bizApi.projectAccountLedger(activeId.value, { page: 1, pageSize: 200 })).list || [])
 
-  // 项目分成扣款 → 找个人入账；个人入账 → 找同批其他个人 + 项目扣款
-  if (row.bizType === 'SETTLE' && row.accountType === 'PROJECT') {
+  // 项目分成 / 工资 / 报销：项目扣款 → 个人入账；个人入账 → 同批项目扣款
+  if (['SETTLE', 'SALARY', 'REIMBURSE'].includes(row.bizType) && row.accountType === 'PROJECT') {
     return all.filter((x: any) => x.relatedId === row.id && x.accountType === 'WALLET')
   }
-  if (row.bizType === 'SETTLE' && row.accountType === 'WALLET' && row.relatedId) {
+  if (['SETTLE', 'SALARY', 'REIMBURSE'].includes(row.bizType) && row.accountType === 'WALLET' && row.relatedId) {
     return all.filter((x: any) =>
       (x.id === row.relatedId && x.accountType === 'PROJECT')
       || (x.relatedId === row.relatedId && x.accountType === 'WALLET' && x.id !== row.id),
@@ -320,23 +322,45 @@ async function submitAdvance() {
     ElMessage.warning('请填写金额')
     return
   }
-  await workflowApi.submit({
+  const approval = await workflowApi.submit({
     type: 'PROJECT_ADVANCE',
     title: `项目预支 · ${account.value?.projectName || ''}`,
     projectId: activeId.value,
     amount: form.amount,
     remark: form.remark,
   })
-  ElMessage.success('已提交：等审批通过后，钱从公司转到本项目')
+  ElMessage.success(approvalFlowTip(approval, '已提交：等审批通过后，钱从公司转到本项目'))
   advanceDialog.value = false
   form.amount = 0
   form.remark = ''
 }
 
+function payMethodLabel(m: any) {
+  const type = m.methodTypeLabel || ({ BANK: '银行卡', ALIPAY: '支付宝', WECHAT: '微信' } as any)[m.methodType] || m.methodType
+  const name = m.accountName ? `${m.accountName} · ` : ''
+  const bank = m.methodType === 'BANK' && m.bankName ? `（${m.bankName}）` : ''
+  return `${type} · ${name}${m.accountNo || ''}${bank}`
+}
+
+async function loadMyPayMethods() {
+  try {
+    myPayMethods.value = (await bizApi.myPayMethods()) || []
+  } catch {
+    myPayMethods.value = []
+  }
+}
+
 async function openPayDialog(kind: 'reimburse' | 'salary') {
   form.amount = 0
   form.remark = ''
+  form.payMethodId = undefined
   voucherFiles.value = []
+  await loadMyPayMethods()
+  const def = myPayMethods.value.find((m) => Number(m.isDefault) === 1) || myPayMethods.value[0]
+  form.payMethodId = def?.id
+  if (!myPayMethods.value.length) {
+    ElMessage.warning('未配置个人收款方式，可在员工档案中添加；仍可提交申请')
+  }
   if (kind === 'reimburse') reimburseDialog.value = true
   else salaryDialog.value = true
 }
@@ -369,7 +393,7 @@ async function submitPay(type: 'REIMBURSE_PROJECT' | 'SALARY_APPLY') {
     ElMessage.warning('请填写金额')
     return
   }
-  if (!voucherFiles.value.length) {
+  if (type === 'REIMBURSE_PROJECT' && !voucherFiles.value.length) {
     ElMessage.warning('请上传发票/凭证')
     return
   }
@@ -381,21 +405,24 @@ async function submitPay(type: 'REIMBURSE_PROJECT' | 'SALARY_APPLY') {
     ElMessage.warning(`不能超过项目余额 ¥${fmt(account.value?.balance)}`)
     return
   }
-  await workflowApi.submit({
+  const approval = await workflowApi.submit({
     type,
     title: `${type === 'SALARY_APPLY' ? '发工资' : '项目报销'} · ${account.value?.projectName || ''}`,
     projectId: activeId.value,
     amount: form.amount,
     remark: form.remark,
-    voucherFileIds: voucherFiles.value.map((f) => f.id),
+    voucherFileIds: voucherFiles.value.length ? voucherFiles.value.map((f) => f.id) : undefined,
+    payload: form.payMethodId ? { payMethodId: form.payMethodId } : {},
   })
-  ElMessage.success(type === 'SALARY_APPLY'
-    ? '已提交发工资：审批通过并确认到账后，从本项目余额扣除'
-    : '已提交报销：审批通过并确认到账后，从本项目余额扣除')
+  const moneyHint = type === 'SALARY_APPLY'
+    ? '审批通过并确认到账后：项目结余转入你的个人钱包，公司总账不变'
+    : '审批通过并确认到账后：项目结余转入你的个人钱包，公司总账不变'
+  ElMessage.success(`${approvalFlowTip(approval)}。${moneyHint}`)
   reimburseDialog.value = false
   salaryDialog.value = false
   form.amount = 0
   form.remark = ''
+  form.payMethodId = undefined
   voucherFiles.value = []
 }
 
@@ -407,7 +434,7 @@ onMounted(loadList)
     <template v-if="!activeId">
       <div class="page-top">
         <div class="page-top__main">
-          <p class="page-desc">分成与预留合计 100%；工资 / 报销直接从项目结余扣，不用再配支出比例</p>
+          <p class="page-desc">分成与预留合计 100%；工资 / 报销确认到账后从项目结余转入个人钱包，不扣公司总账</p>
         </div>
       </div>
       <div v-if="list.length" class="acc-grid">
@@ -498,7 +525,7 @@ onMounted(loadList)
         </div>
 
         <p class="rule-tip">
-          实账结余 = 已转入 − 已支出 − 已分成。工资 / 报销从结余扣；分成与预留合计须 100%。改配置不会改已分、已花。
+          实账结余 = 已转入 − 已支出 − 已分成。工资 / 报销确认到账后从结余转入个人钱包（公司总账不变）；分成与预留合计须 100%。改配置不会改已分、已花。
         </p>
 
         <div class="page-card">
@@ -549,7 +576,7 @@ onMounted(loadList)
               <section class="share-panel">
                 <header class="share-panel-head">
                   <h4>① 资金配置</h4>
-                  <p>只配「分成」和「预留」（合计 100%）。工资/报销不占比例，直接从项目结余扣。只改规则，已分/已花不变。</p>
+                  <p>只配「分成」和「预留」（合计 100%）。工资/报销不占比例，确认到账后从项目结余转入个人钱包。只改规则，已分/已花不变。</p>
                 </header>
 
                 <div class="budget-line">
@@ -689,11 +716,11 @@ onMounted(loadList)
         <div v-loading="ledgerDetailLoading" class="related-block">
           <h4 class="related-title">关联流水</h4>
           <p class="related-tip">
-            <template v-if="ledgerDetail.bizType === 'SETTLE' && ledgerDetail.accountType === 'PROJECT'">
-              本笔从项目扣出后，分到以下个人钱包：
+            <template v-if="['SETTLE', 'SALARY', 'REIMBURSE'].includes(ledgerDetail.bizType) && ledgerDetail.accountType === 'PROJECT'">
+              本笔从项目扣出后，进入以下个人钱包：
             </template>
-            <template v-else-if="ledgerDetail.bizType === 'SETTLE' && ledgerDetail.accountType === 'WALLET'">
-              同一次分钱的其它流水：
+            <template v-else-if="['SETTLE', 'SALARY', 'REIMBURSE'].includes(ledgerDetail.bizType) && ledgerDetail.accountType === 'WALLET'">
+              同一次动账的其它流水：
             </template>
             <template v-else>
               与本笔成对的进出账：
@@ -740,12 +767,17 @@ onMounted(loadList)
         <p>用本项目的钱报销项目开支（如采购、差旅）。</p>
         <ul>
           <li>项目余额：<b>¥{{ fmt(account?.balance) }}</b></li>
-          <li>流程：上传发票提交 → 审批 → 财务回执 → 你确认到账 → <b>从项目结余扣款</b>（无支出比例限制）</li>
+          <li>流程：上传发票提交 → 审批 → 财务回执 → 你确认到账 → <b>项目结余转入个人钱包</b>（公司总账不变）</li>
         </ul>
       </div>
       <el-form label-width="90px">
         <el-form-item label="报销金额" required>
           <el-input-number v-model="form.amount" :min="0.01" :precision="2" :max="Number(account?.balance || 0) || undefined" style="width: 200px" />
+        </el-form-item>
+        <el-form-item label="收款方式">
+          <el-select v-model="form.payMethodId" clearable filterable placeholder="未配置时可空" style="width: 100%">
+            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="m.id" />
+          </el-select>
         </el-form-item>
         <el-form-item label="发票" required>
           <div class="voucher-box">
@@ -771,23 +803,17 @@ onMounted(loadList)
         <p>用本项目的钱发项目相关工资/劳务。</p>
         <ul>
           <li>项目余额：<b>¥{{ fmt(account?.balance) }}</b></li>
-          <li>流程：上传凭证提交 → 审批 → 财务回执 → 确认到账 → <b>从项目结余扣款</b>（无支出比例限制）</li>
+          <li>流程：提交审批 → 财务回执 → 确认到账 → <b>项目结余转入个人钱包</b>（公司总账不变）</li>
         </ul>
       </div>
       <el-form label-width="90px">
         <el-form-item label="工资金额" required>
           <el-input-number v-model="form.amount" :min="0.01" :precision="2" :max="Number(account?.balance || 0) || undefined" style="width: 200px" />
         </el-form-item>
-        <el-form-item label="凭证" required>
-          <div class="voucher-box">
-            <el-upload :show-file-list="false" :http-request="onUploadPayVoucher" accept="image/*,.pdf">
-              <el-button :loading="uploadingVoucher" size="small">上传凭证</el-button>
-            </el-upload>
-            <div v-for="(file, index) in voucherFiles" :key="file.id" class="voucher-item">
-              <a :href="fileUrl(file)" target="_blank" rel="noopener">{{ file.originalName || `文件#${file.id}` }}</a>
-              <el-button link type="danger" @click="removePayVoucher(index)">移除</el-button>
-            </div>
-          </div>
+        <el-form-item label="收款方式">
+          <el-select v-model="form.payMethodId" clearable filterable placeholder="未配置时可空" style="width: 100%">
+            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="m.id" />
+          </el-select>
         </el-form-item>
         <el-form-item label="说明"><el-input v-model="form.remark" placeholder="例如：3 月外包劳务" /></el-form-item>
       </el-form>

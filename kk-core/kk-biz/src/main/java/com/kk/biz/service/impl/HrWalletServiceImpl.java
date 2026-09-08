@@ -67,17 +67,62 @@ public class HrWalletServiceImpl extends ServiceImpl<HrWalletMapper, HrWallet> i
             BigDecimal abs = delta.abs();
             boolean ok = lambdaUpdate()
                     .eq(HrWallet::getUserId, userId)
-                    .ge(HrWallet::getBalance, abs)
+                    .apply("balance - IFNULL(frozen,0) >= {0}", abs)
                     .setSql("balance = balance - " + abs.toPlainString())
                     .update();
             if (!ok) {
-                throw new BusinessException("钱包余额不足");
+                throw new BusinessException("钱包可用余额不足");
             }
         } else if (delta.compareTo(BigDecimal.ZERO) > 0) {
             lambdaUpdate()
                     .eq(HrWallet::getUserId, userId)
                     .setSql("balance = balance + " + delta.toPlainString())
                     .update();
+        }
+        return getOrCreate(userId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public HrWallet freeze(Long userId, BigDecimal amount) {
+        if (userId == null) {
+            throw new BusinessException("缺少用户");
+        }
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("冻结金额无效");
+        }
+        HrWallet wallet = getOrCreate(userId);
+        if (wallet.getStatus() != null && wallet.getStatus() == 0) {
+            throw new BusinessException("该人员钱包已禁用");
+        }
+        boolean ok = lambdaUpdate()
+                .eq(HrWallet::getUserId, userId)
+                .apply("balance - IFNULL(frozen,0) >= {0}", amount)
+                .setSql("frozen = IFNULL(frozen,0) + " + amount.toPlainString())
+                .update();
+        if (!ok) {
+            throw new BusinessException("钱包可用余额不足，无法冻结");
+        }
+        return getOrCreate(userId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public HrWallet unfreeze(Long userId, BigDecimal amount) {
+        if (userId == null) {
+            throw new BusinessException("缺少用户");
+        }
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("解冻金额无效");
+        }
+        getOrCreate(userId);
+        boolean ok = lambdaUpdate()
+                .eq(HrWallet::getUserId, userId)
+                .apply("IFNULL(frozen,0) >= {0}", amount)
+                .setSql("frozen = IFNULL(frozen,0) - " + amount.toPlainString())
+                .update();
+        if (!ok) {
+            throw new BusinessException("钱包冻结金额不足，无法解冻");
         }
         return getOrCreate(userId);
     }
@@ -112,6 +157,9 @@ public class HrWalletServiceImpl extends ServiceImpl<HrWalletMapper, HrWallet> i
             if (archive != null) {
                 wallet.setRealName(archive.getRealName());
             }
+            BigDecimal balance = wallet.getBalance() == null ? BigDecimal.ZERO : wallet.getBalance();
+            BigDecimal frozen = wallet.getFrozen() == null ? BigDecimal.ZERO : wallet.getFrozen();
+            wallet.setAvailable(balance.subtract(frozen));
         }
     }
 }

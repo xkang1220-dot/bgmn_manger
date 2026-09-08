@@ -25,7 +25,50 @@ const form = reactive<any>({
   emergencyContact: '',
   emergencyPhone: '',
   remark: '',
+  payMethods: [] as any[],
 })
+
+const METHOD_TYPES = [
+  { value: 'BANK', label: '银行卡' },
+  { value: 'ALIPAY', label: '支付宝' },
+]
+
+function methodLabel(type?: string) {
+  if (type === 'WECHAT') return '微信'
+  return METHOD_TYPES.find((x) => x.value === type)?.label || type || '—'
+}
+
+function emptyPayMethod() {
+  return {
+    id: undefined,
+    methodType: 'BANK',
+    accountName: '',
+    accountNo: '',
+    bankName: '',
+    isDefault: 0,
+    remark: '',
+  }
+}
+
+function addPayMethod() {
+  if (!form.payMethods) form.payMethods = []
+  const row = emptyPayMethod()
+  if (!form.payMethods.length) row.isDefault = 1
+  form.payMethods.push(row)
+}
+
+function removePayMethod(index: number) {
+  form.payMethods.splice(index, 1)
+  if (form.payMethods.length && !form.payMethods.some((m: any) => Number(m.isDefault) === 1)) {
+    form.payMethods[0].isDefault = 1
+  }
+}
+
+function setDefaultPayMethod(index: number) {
+  form.payMethods.forEach((m: any, i: number) => {
+    m.isDefault = i === index ? 1 : 0
+  })
+}
 
 const AVATAR_TONES = ['indigo', 'cyan', 'violet', 'amber'] as const
 
@@ -45,6 +88,7 @@ function emptyForm() {
     emergencyContact: '',
     emergencyPhone: '',
     remark: '',
+    payMethods: [] as any[],
   }
 }
 
@@ -78,9 +122,17 @@ function resetFilter() {
   load()
 }
 
-function open(row?: any) {
+async function open(row?: any) {
   isEdit.value = !!row
-  Object.assign(form, row ? { ...row } : emptyForm())
+  if (row?.id) {
+    const full = await bizApi.archiveDetail(row.id)
+    Object.assign(form, {
+      ...full,
+      payMethods: (full.payMethods || []).map((m: any) => ({ ...m })),
+    })
+  } else {
+    Object.assign(form, emptyForm())
+  }
   dialog.value = true
 }
 
@@ -98,9 +150,26 @@ async function save() {
     ElMessage.warning('请填写姓名')
     return
   }
+  for (const m of form.payMethods || []) {
+    if (!m.accountNo?.trim()) {
+      ElMessage.warning('请填写收款账号')
+      return
+    }
+    if (m.methodType === 'BANK' && !m.bankName?.trim()) {
+      ElMessage.warning('银行卡请填写开户行')
+      return
+    }
+  }
   saving.value = true
   try {
-    await bizApi.saveArchive(form, isEdit.value)
+    await bizApi.saveArchive({
+      ...form,
+      payMethods: (form.payMethods || []).map((m: any, i: number) => ({
+        ...m,
+        sort: i,
+        isDefault: Number(m.isDefault) === 1 ? 1 : 0,
+      })),
+    }, isEdit.value)
     ElMessage.success('保存成功')
     dialog.value = false
     await load()
@@ -127,7 +196,7 @@ onMounted(async () => {
     <div class="page-top">
       <div class="page-top__main" />
       <div class="page-actions">
-        <el-button type="primary" @click="open()">新建档案</el-button>
+        <el-button v-permission="'hr:archive:add'" type="primary" @click="open()">新建档案</el-button>
       </div>
     </div>
 
@@ -181,6 +250,7 @@ onMounted(async () => {
         </div>
         <div class="person-ops" @click.stop>
           <el-button
+            v-permission="'hr:archive:edit'"
             class="icon-btn"
             text
             aria-label="编辑"
@@ -190,6 +260,7 @@ onMounted(async () => {
             <el-icon :size="16"><EditPen /></el-icon>
           </el-button>
           <el-button
+            v-permission="'hr:archive:remove'"
             class="icon-btn is-danger"
             text
             aria-label="删除"
@@ -216,7 +287,7 @@ onMounted(async () => {
     <el-dialog
       v-model="dialog"
       :title="isEdit ? '编辑档案' : '新建档案'"
-      width="640px"
+      width="720px"
       :close-on-click-modal="false"
     >
       <el-form label-width="100px">
@@ -235,6 +306,25 @@ onMounted(async () => {
         <el-form-item label="紧急联系人"><el-input v-model="form.emergencyContact" /></el-form-item>
         <el-form-item label="紧急电话"><el-input v-model="form.emergencyPhone" /></el-form-item>
         <el-form-item label="备注"><el-input v-model="form.remark" type="textarea" :rows="2" /></el-form-item>
+        <el-form-item label="收款方式">
+          <div class="pay-box">
+            <div v-for="(m, index) in form.payMethods" :key="index" class="pay-row">
+              <el-select v-model="m.methodType" style="width: 110px">
+                <el-option v-for="t in METHOD_TYPES" :key="t.value" :label="t.label" :value="t.value" />
+              </el-select>
+              <el-input v-model="m.accountName" placeholder="户名" style="width: 110px" />
+              <el-input v-model="m.accountNo" placeholder="账号/卡号" style="flex: 1" />
+              <el-input v-if="m.methodType === 'BANK'" v-model="m.bankName" placeholder="开户行" style="width: 140px" />
+              <el-checkbox
+                :model-value="Number(m.isDefault) === 1"
+                @change="(checked: boolean | string | number) => { if (checked) setDefaultPayMethod(Number(index)) }"
+              >默认</el-checkbox>
+              <el-button link type="danger" @click="removePayMethod(Number(index))">删除</el-button>
+            </div>
+            <el-button type="primary" link @click="addPayMethod">添加收款方式</el-button>
+            <div class="pay-tip">支持银行卡 / 支付宝，可多条；默认用于发工资与报销申请</div>
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
@@ -258,9 +348,20 @@ onMounted(async () => {
           <el-descriptions-item label="紧急联系人">{{ detail.emergencyContact || '—' }}</el-descriptions-item>
           <el-descriptions-item label="紧急电话">{{ detail.emergencyPhone || '—' }}</el-descriptions-item>
           <el-descriptions-item label="备注">{{ detail.remark || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="收款方式">
+            <div v-if="detail.payMethods?.length" class="pay-detail">
+              <div v-for="m in detail.payMethods" :key="m.id" class="pay-detail-row">
+                <el-tag size="small" effect="plain">{{ m.methodTypeLabel || methodLabel(m.methodType) }}</el-tag>
+                <span>{{ m.accountName || '—' }} · {{ m.accountNo }}</span>
+                <span v-if="m.methodType === 'BANK' && m.bankName" class="muted">（{{ m.bankName }}）</span>
+                <el-tag v-if="Number(m.isDefault) === 1" size="small" type="success">默认</el-tag>
+              </div>
+            </div>
+            <span v-else>—</span>
+          </el-descriptions-item>
         </el-descriptions>
         <div class="drawer-actions">
-          <el-button type="primary" @click="open(detail); detailDrawer = false">编辑档案</el-button>
+          <el-button v-permission="'hr:archive:edit'" type="primary" @click="open(detail); detailDrawer = false">编辑档案</el-button>
         </div>
       </template>
     </el-drawer>
@@ -387,6 +488,37 @@ onMounted(async () => {
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+.pay-box {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pay-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.pay-tip {
+  font-size: 12px;
+  color: var(--kk-text-muted);
+}
+.pay-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pay-detail-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.pay-detail-row .muted {
+  color: var(--kk-text-muted);
+  font-size: 12px;
 }
 
 @media (prefers-reduced-transparency: reduce) {

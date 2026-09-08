@@ -20,7 +20,16 @@ export const useUserStore = defineStore(
       const res = await authApi.login(data)
       token.value = res.token
       user.value = res.user
-      await getInfo()
+      try {
+        await getInfo()
+      } catch (e) {
+        token.value = null
+        user.value = null
+        roles.value = []
+        permissions.value = []
+        menus.value = []
+        throw e
+      }
     }
 
     async function getInfo() {

@@ -21,6 +21,8 @@ public class WfApproval extends BaseEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    private Long companyId;
+
     private String bizNo;
 
     /** PROJECT_CREATE / PROJECT_DELETE / REIMBURSE_PERSONAL / REIMBURSE_PROJECT /
@@ -65,6 +67,9 @@ public class WfApproval extends BaseEntity {
     private String projectName;
 
     @TableField(exist = false)
+    private String companyName;
+
+    @TableField(exist = false)
     private String typeLabel;
 
     @TableField(exist = false)
@@ -101,4 +106,12 @@ public class WfApproval extends BaseEntity {
     /** 财务上传的回执 */
     @TableField(exist = false)
     private List<SysFile> receiptFiles;
+
+    /** 提交时快照文案：会签/或签 */
+    @TableField(exist = false)
+    private String passModeLabel;
+
+    /** 根据当前审批配置生成的提交提示（会签/或签、超时、审批人） */
+    @TableField(exist = false)
+    private String flowTip;
 }

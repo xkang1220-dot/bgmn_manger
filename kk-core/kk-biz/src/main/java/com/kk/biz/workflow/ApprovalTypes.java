@@ -16,12 +16,18 @@ public final class ApprovalTypes {
     public static final String SHARE_CONFIG = "SHARE_CONFIG";
     public static final String PROJECT_SETTLE = "PROJECT_SETTLE";
     public static final String SALARY_APPLY = "SALARY_APPLY";
+    /** 月度工资（配置汇总，一人一单，通过即入账） */
+    public static final String SALARY_MONTHLY = "SALARY_MONTHLY";
     public static final String RESERVE_RETURN = "RESERVE_RETURN";
     /** 公司总账登记：入账 / 出账 */
     public static final String LEDGER_REGISTER = "LEDGER_REGISTER";
     public static final String ROLLBACK = "ROLLBACK";
     /** 渠道月度核验（账户截图 + 流水凭证） */
     public static final String MONTHLY_VERIFY = "MONTHLY_VERIFY";
+    /** 固定资产领用 */
+    public static final String ASSET_BORROW = "ASSET_BORROW";
+    /** 固定资产归还 */
+    public static final String ASSET_RETURN = "ASSET_RETURN";
 
     public static String label(String type) {
         if (type == null) {
@@ -36,10 +42,13 @@ public final class ApprovalTypes {
             case SHARE_CONFIG -> "分成配置";
             case PROJECT_SETTLE -> "项目分钱";
             case SALARY_APPLY -> "工资申请";
+            case SALARY_MONTHLY -> "月度工资";
             case RESERVE_RETURN -> "预留回公司";
             case LEDGER_REGISTER -> "总账登记";
             case ROLLBACK -> "资金回退";
             case MONTHLY_VERIFY -> "月度核验";
+            case ASSET_BORROW -> "资产领用";
+            case ASSET_RETURN -> "资产归还";
             default -> type;
         };
     }
@@ -51,11 +60,10 @@ public final class ApprovalTypes {
                 || SALARY_APPLY.equals(type);
     }
 
-    /** 是否全体股东会签 */
+    /** @deprecated 审批人与会签/或签已由 wf_approval_flow 按公司配置，勿再按类型写死 */
+    @Deprecated
     public static boolean needAllShareholders(String type) {
-        return PROJECT_CREATE.equals(type)
-                || PROJECT_DELETE.equals(type)
-                || SHARE_CONFIG.equals(type);
+        return false;
     }
 
     /** 是否真正动过账、允许发起资金回退（配置/建删项目等无金额审批不可回退） */
@@ -65,6 +73,7 @@ public final class ApprovalTypes {
                 || REIMBURSE_PROJECT.equals(type)
                 || REIMBURSE_PERSONAL.equals(type)
                 || SALARY_APPLY.equals(type)
+                || SALARY_MONTHLY.equals(type)
                 || LEDGER_REGISTER.equals(type)
                 || RESERVE_RETURN.equals(type);
     }

@@ -12,9 +12,13 @@ public interface WfApprovalService {
 
     WfApproval submit(ApprovalSubmitRequest request);
 
+    /** 指定申请人提交（定时任务等无登录上下文） */
+    WfApproval submitAs(Long applicantId, ApprovalSubmitRequest request);
+
     Page<WfApproval> page(ApprovalQuery query);
 
     /** @deprecated 使用 {@link #page(ApprovalQuery)} */
+    @Deprecated
     default Page<WfApproval> page(long page, long pageSize, String type, String status, String scope) {
         ApprovalQuery q = new ApprovalQuery();
         q.setPage(page);

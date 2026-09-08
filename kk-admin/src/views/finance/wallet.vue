@@ -2,7 +2,9 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
+import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
+import { approvalFlowTip } from '@/utils/approvalTip'
 
 const query = reactive({ page: 1, pageSize: 10 })
 const mineQuery = reactive({ page: 1, pageSize: 10 })
@@ -11,10 +13,24 @@ const total = ref(0)
 const mine = ref<any>({})
 const mineLedgers = ref<any[]>([])
 const mineTotal = ref(0)
+const companies = ref<any[]>([])
 const reimburseDialog = ref(false)
-const reimburseForm = reactive({ amount: 0, remark: '' })
+const reimburseForm = reactive({
+  amount: 0,
+  remark: '',
+  companyId: undefined as number | undefined,
+  payMethodId: undefined as number | undefined,
+})
 const voucherFiles = ref<any[]>([])
 const uploading = ref(false)
+const myPayMethods = ref<any[]>([])
+
+function payMethodLabel(m: any) {
+  const type = m.methodTypeLabel || ({ BANK: '银行卡', ALIPAY: '支付宝', WECHAT: '微信' } as any)[m.methodType] || m.methodType
+  const name = m.accountName ? `${m.accountName} · ` : ''
+  const bank = m.methodType === 'BANK' && m.bankName ? `（${m.bankName}）` : ''
+  return `${type} · ${name}${m.accountNo || ''}${bank}`
+}
 
 function bizLabel(v: string) {
   return ({
@@ -70,10 +86,22 @@ async function load() {
   }
 }
 
-function openReimburse() {
+async function openReimburse() {
   reimburseForm.amount = 0
   reimburseForm.remark = ''
+  reimburseForm.companyId = companies.value.length === 1 ? companies.value[0].id : undefined
+  reimburseForm.payMethodId = undefined
   voucherFiles.value = []
+  try {
+    myPayMethods.value = (await bizApi.myPayMethods()) || []
+  } catch {
+    myPayMethods.value = []
+  }
+  const def = myPayMethods.value.find((m) => Number(m.isDefault) === 1) || myPayMethods.value[0]
+  reimburseForm.payMethodId = def?.id
+  if (!myPayMethods.value.length) {
+    ElMessage.warning('未配置个人收款方式，可在员工档案中添加；仍可提交申请')
+  }
   reimburseDialog.value = true
 }
 
@@ -97,6 +125,10 @@ function removeVoucher(index: number) {
 }
 
 async function submitReimburse() {
+  if (!reimburseForm.companyId) {
+    ElMessage.warning('请选择所属公司')
+    return
+  }
   if (!reimburseForm.amount || reimburseForm.amount <= 0) {
     ElMessage.warning('请填写报销金额')
     return
@@ -105,21 +137,28 @@ async function submitReimburse() {
     ElMessage.warning('请上传发票/凭证')
     return
   }
-  await workflowApi.submit({
+  const approval = await workflowApi.submit({
     type: 'REIMBURSE_PERSONAL',
     title: '个人报销',
     amount: reimburseForm.amount,
+    companyId: reimburseForm.companyId,
     remark: reimburseForm.remark,
     voucherFileIds: voucherFiles.value.map((f) => f.id),
+    payload: reimburseForm.payMethodId ? { payMethodId: reimburseForm.payMethodId } : {},
   })
-  ElMessage.success('已提交：财务审批 → 上传回执 → 请你确认到账')
+  ElMessage.success(`${approvalFlowTip(approval)}。后续：上传回执 → 确认到账`)
   reimburseDialog.value = false
   reimburseForm.amount = 0
   reimburseForm.remark = ''
+  reimburseForm.companyId = undefined
+  reimburseForm.payMethodId = undefined
   voucherFiles.value = []
 }
 
-onMounted(load)
+onMounted(async () => {
+  companies.value = await sysApi.myCompanies()
+  await load()
+})
 </script>
 
 <template>
@@ -173,8 +212,18 @@ onMounted(load)
     <el-dialog v-model="reimburseDialog" title="个人报销" width="480px" @closed="voucherFiles = []">
       <div class="flow-tip">流程：上传发票提交 → 财务审批查看发票 → 财务上传回执 → 你在审批中心确认到账</div>
       <el-form label-width="80px">
+        <el-form-item label="所属公司" required>
+          <el-select v-model="reimburseForm.companyId" filterable placeholder="选择公司" style="width: 100%">
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="金额" required>
           <el-input-number v-model="reimburseForm.amount" :min="0.01" :precision="2" />
+        </el-form-item>
+        <el-form-item label="收款方式">
+          <el-select v-model="reimburseForm.payMethodId" clearable filterable placeholder="未配置时可空" style="width: 100%">
+            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="m.id" />
+          </el-select>
         </el-form-item>
         <el-form-item label="发票" required>
           <div class="voucher-box">

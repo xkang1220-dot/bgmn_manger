@@ -11,6 +11,12 @@ public interface PmProjectService extends IService<PmProject> {
     /** 当前用户负责或参与的项目（个人中心） */
     java.util.List<PmProject> listMine(Long userId);
 
+    /** 下拉用：按当前登录人可见范围返回已生效项目 */
+    java.util.List<PmProject> listVisible();
+
+    /** 财务选项目：返回全部已生效项目（不含待审） */
+    java.util.List<PmProject> listApproved();
+
     /** 项目管理用：无财务权限时会隐藏预算/分成等敏感字段 */
     PmProject getDetail(Long id);
 

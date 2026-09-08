@@ -12,7 +12,7 @@ const routes: RouteRecordRaw[] = [
     path: '/',
     component: () => import('@/layouts/AdminLayout.vue'),
     meta: { requiresAuth: true },
-    redirect: '/dashboard',
+    redirect: '/account',
     children: [
       { path: 'dashboard', name: 'dashboard', component: () => import('@/views/dashboard/index.vue'), meta: { title: '首页' } },
       { path: 'finance/pool', redirect: '/finance/ledger' },
@@ -29,6 +29,10 @@ const routes: RouteRecordRaw[] = [
       { path: 'project/list', component: () => import('@/views/project/list.vue'), meta: { title: '项目管理' } },
       { path: 'project/task', component: () => import('@/views/project/task.vue'), meta: { title: '任务管理' } },
       { path: 'hr/archive', component: () => import('@/views/hr/archive.vue'), meta: { title: '人员档案' } },
+      { path: 'hr/depr-category', component: () => import('@/views/hr/depr-category.vue'), meta: { title: '折旧类别' } },
+      { path: 'hr/asset', component: () => import('@/views/hr/asset.vue'), meta: { title: '资产台账' } },
+      { path: 'hr/salary', component: () => import('@/views/hr/salary.vue'), meta: { title: '工资配置' } },
+      { path: 'hr/salary-run', component: () => import('@/views/hr/salary-run.vue'), meta: { title: '发薪记录' } },
       { path: 'file/list', component: () => import('@/views/file/list.vue'), meta: { title: '文件管理' } },
       { path: 'system/user', component: () => import('@/views/system/user/index.vue'), meta: { title: '账号管理' } },
       { path: 'system/role', component: () => import('@/views/system/role/index.vue'), meta: { title: '角色权限' } },
@@ -36,6 +40,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'system/menu', component: () => import('@/views/system/menu/index.vue'), meta: { title: '菜单管理' } },
       { path: 'account', component: () => import('@/views/account/index.vue'), meta: { title: '个人中心' } },
       { path: 'account/profile', component: () => import('@/views/account/profile.vue'), meta: { title: '账号资料' } },
+      { path: 'account/salary-confirm', component: () => import('@/views/account/salary-confirm.vue'), meta: { title: '工资确认' } },
       { path: 'account/overview', redirect: '/account' },
       { path: 'account/wallet', redirect: '/account' },
       { path: 'account/approval', redirect: '/account' },
@@ -54,7 +59,7 @@ router.beforeEach(async (to) => {
   document.title = `${to.meta.title || 'BGMN'} - BGMN`
   const userStore = useUserStore()
   if (to.meta.requiresAuth === false) {
-    if (userStore.token && to.name === 'login') return '/dashboard'
+    if (userStore.token && to.name === 'login') return '/account'
     return true
   }
   if (!userStore.token) return '/login'

@@ -1,15 +1,19 @@
 package com.kk.admin.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.stp.StpUtil;
+import com.kk.common.exception.BusinessException;
 import com.kk.common.result.PageResult;
 import com.kk.common.result.Result;
 import com.kk.system.entity.SysUser;
+import com.kk.system.service.DataScopeService;
 import com.kk.system.service.SysUserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @RestController
 @RequestMapping("/api/sys/user")
@@ -17,6 +21,7 @@ import java.util.Map;
 public class SysUserController {
 
     private final SysUserService userService;
+    private final DataScopeService dataScopeService;
 
     @GetMapping("/page")
     @SaCheckPermission("system:user:list")
@@ -28,19 +33,32 @@ public class SysUserController {
     }
 
     @GetMapping("/list")
-    public Result<List<SysUser>> list() {
-        return Result.ok(userService.listSimple());
+    public Result<List<SysUser>> list(@RequestParam(required = false) Long companyId) {
+        List<SysUser> users = userService.listSimple();
+        long loginId = StpUtil.getLoginIdAsLong();
+        boolean globalAdmin = dataScopeService.isGlobalAdmin(loginId);
+        if (companyId != null) {
+            if (!globalAdmin && !dataScopeService.visibleCompanyIds(loginId).contains(companyId)) {
+                throw new BusinessException("无权查看该公司人员");
+            }
+            users = users.stream()
+                    .filter(u -> dataScopeService.isGlobalAdmin(u.getId())
+                            || dataScopeService.visibleCompanyIds(u.getId()).contains(companyId))
+                    .toList();
+        } else if (!globalAdmin) {
+            Set<Long> myCompanies = dataScopeService.visibleCompanyIds(loginId);
+            users = users.stream()
+                    .filter(u -> dataScopeService.isGlobalAdmin(u.getId())
+                            || dataScopeService.visibleCompanyIds(u.getId()).stream().anyMatch(myCompanies::contains))
+                    .toList();
+        }
+        return Result.ok(users);
     }
 
     @GetMapping("/{id}")
     @SaCheckPermission("system:user:list")
     public Result<SysUser> get(@PathVariable Long id) {
-        SysUser user = userService.getById(id);
-        if (user != null) {
-            user.setPassword(null);
-            user.setRoleIds(userService.getRoleIds(id));
-        }
-        return Result.ok(user);
+        return Result.ok(userService.getUserDetail(id));
     }
 
     @PostMapping

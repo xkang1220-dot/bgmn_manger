@@ -1,5 +1,6 @@
 package com.kk.biz.service.impl;
 
+import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.kk.biz.entity.FinPayChannel;
@@ -8,6 +9,7 @@ import com.kk.biz.mapper.FinPayChannelMapper;
 import com.kk.biz.mapper.FinPoolMapper;
 import com.kk.biz.service.FinPayChannelService;
 import com.kk.common.exception.BusinessException;
+import com.kk.system.service.DataScopeService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,6 +28,7 @@ public class FinPayChannelServiceImpl extends ServiceImpl<FinPayChannelMapper, F
         implements FinPayChannelService {
 
     private final FinPoolMapper poolMapper;
+    private final DataScopeService dataScopeService;
 
     @Override
     public List<FinPayChannel> listEnabled(Long poolId) {
@@ -34,6 +37,7 @@ public class FinPayChannelServiceImpl extends ServiceImpl<FinPayChannelMapper, F
                 .eq(FinPayChannel::getStatus, 1)
                 .orderByAsc(FinPayChannel::getSort)
                 .orderByAsc(FinPayChannel::getId));
+        list = filterByCompany(list);
         fillExtras(list);
         return list;
     }
@@ -44,6 +48,7 @@ public class FinPayChannelServiceImpl extends ServiceImpl<FinPayChannelMapper, F
                 .eq(poolId != null, FinPayChannel::getPoolId, poolId)
                 .orderByAsc(FinPayChannel::getSort)
                 .orderByAsc(FinPayChannel::getId));
+        list = filterByCompany(list);
         fillExtras(list);
         return list;
     }
@@ -52,6 +57,12 @@ public class FinPayChannelServiceImpl extends ServiceImpl<FinPayChannelMapper, F
     @Transactional(rollbackFor = Exception.class)
     public void createChannel(FinPayChannel channel) {
         validate(channel);
+        FinPool pool = poolMapper.selectById(channel.getPoolId());
+        if (pool == null) {
+            throw new BusinessException("资金池不存在");
+        }
+        assertPoolVisible(pool);
+        channel.setCompanyId(pool.getCompanyId());
         if (channel.getBalance() == null) {
             channel.setBalance(BigDecimal.ZERO);
         }
@@ -71,8 +82,15 @@ public class FinPayChannelServiceImpl extends ServiceImpl<FinPayChannelMapper, F
         if (db == null) {
             throw new BusinessException("渠道不存在");
         }
+        assertChannelVisible(db);
         validate(channel);
+        FinPool pool = poolMapper.selectById(channel.getPoolId());
+        if (pool == null) {
+            throw new BusinessException("资金池不存在");
+        }
+        assertPoolVisible(pool);
         channel.setBalance(null);
+        channel.setCompanyId(pool.getCompanyId());
         updateById(channel);
     }
 
@@ -88,6 +106,7 @@ public class FinPayChannelServiceImpl extends ServiceImpl<FinPayChannelMapper, F
         if (channel.getStatus() != null && channel.getStatus() == 0) {
             throw new BusinessException("收款渠道已停用");
         }
+        assertChannelVisible(channel);
         return channel;
     }
 
@@ -154,6 +173,40 @@ public class FinPayChannelServiceImpl extends ServiceImpl<FinPayChannelMapper, F
         for (FinPayChannel c : list) {
             c.setPoolName(poolNames.get(c.getPoolId()));
             c.setChannelTypeLabel(typeLabel(c.getChannelType()));
+        }
+    }
+
+    private List<FinPayChannel> filterByCompany(List<FinPayChannel> list) {
+        long loginId = StpUtil.getLoginIdAsLong();
+        if (dataScopeService.isGlobalAdmin(loginId)) {
+            return list;
+        }
+        Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
+        if (companies.isEmpty()) {
+            return List.of();
+        }
+        return list.stream()
+                .filter(c -> c.getCompanyId() != null && companies.contains(c.getCompanyId()))
+                .collect(Collectors.toList());
+    }
+
+    private void assertChannelVisible(FinPayChannel channel) {
+        if (channel == null || dataScopeService.isGlobalAdmin(StpUtil.getLoginIdAsLong())) {
+            return;
+        }
+        Set<Long> companies = dataScopeService.visibleCompanyIds(StpUtil.getLoginIdAsLong());
+        if (channel.getCompanyId() == null || !companies.contains(channel.getCompanyId())) {
+            throw new BusinessException("无权操作该收款渠道");
+        }
+    }
+
+    private void assertPoolVisible(FinPool pool) {
+        if (pool == null || dataScopeService.isGlobalAdmin(StpUtil.getLoginIdAsLong())) {
+            return;
+        }
+        Set<Long> companies = dataScopeService.visibleCompanyIds(StpUtil.getLoginIdAsLong());
+        if (pool.getCompanyId() == null || !companies.contains(pool.getCompanyId())) {
+            throw new BusinessException("无权操作该资金池");
         }
     }
 

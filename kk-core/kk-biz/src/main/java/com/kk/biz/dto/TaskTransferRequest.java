@@ -6,7 +6,7 @@ import lombok.Data;
 @Data
 public class TaskTransferRequest {
 
-    @NotNull(message = "请选择转交对象")
+    @NotNull(message = "请选择移交对象")
     private Long assigneeId;
 
     private String remark;

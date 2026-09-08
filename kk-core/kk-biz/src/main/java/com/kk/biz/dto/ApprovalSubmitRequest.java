@@ -22,6 +22,9 @@ public class ApprovalSubmitRequest {
 
     private Long poolId;
 
+    /** 所属公司（顶层部门 id）；无项目/资金池可继承时必填 */
+    private Long companyId;
+
     private String remark;
 
     /** 业务载荷，按类型不同字段不同 */

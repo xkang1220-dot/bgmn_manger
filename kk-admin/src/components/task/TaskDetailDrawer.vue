@@ -28,6 +28,7 @@ const visible = computed({
 
 const loading = ref(false)
 const saving = ref(false)
+const closing = ref(false)
 const editing = ref(false)
 const isNew = ref(false)
 const projects = ref<any[]>([])
@@ -56,7 +57,6 @@ const form = reactive<any>({
   id: undefined,
   title: '',
   projectId: undefined,
-  assigneeId: undefined,
   participantIds: [] as number[],
   status: 0,
   priority: 2,
@@ -67,7 +67,7 @@ const form = reactive<any>({
   imageFileIds: [] as number[],
 })
 
-const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已取消' }
+const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭' }
 const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
 const statusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'> = {
   0: 'info',
@@ -77,12 +77,12 @@ const statusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'>
 }
 
 function emptyForm() {
+  const selfId = userStore.user?.id as number | undefined
   return {
     id: undefined,
     title: '',
     projectId: props.defaultProjectId || undefined,
-    assigneeId: undefined,
-    participantIds: [] as number[],
+    participantIds: selfId != null ? [selfId] : ([] as number[]),
     status: 0,
     priority: 2,
     startDate: '',
@@ -136,8 +136,11 @@ function onStatusChange() {
 
 async function loadDetail(id: number) {
   loading.value = true
+  syncingDetail.value = true
   try {
-    await ensureOptions()
+    if (!projects.value.length) {
+      projects.value = await bizApi.projectList()
+    }
     const [full, commentList, flowList] = await Promise.all([
       bizApi.taskDetail(id),
       bizApi.taskComments(id),
@@ -149,6 +152,8 @@ async function loadDetail(id: number) {
       participantIds: full.participantIds || [],
       imageFileIds: (full.images || []).map((f: any) => f.id),
     })
+    delete form.assigneeId
+    await loadUsersForCompany(resolveCompanyId())
     imageFileList.value = (full.images || []).map(toUploadFile)
     comments.value = commentList
     flows.value = flowList
@@ -156,12 +161,12 @@ async function loadDetail(id: number) {
     isNew.value = false
     detailPane.value = 'comments'
   } finally {
+    syncingDetail.value = false
     loading.value = false
   }
 }
 
 async function openCreate() {
-  await ensureOptions()
   detail.value = null
   Object.assign(form, emptyForm())
   imageFileList.value = []
@@ -170,14 +175,51 @@ async function openCreate() {
   commentText.value = ''
   editing.value = true
   isNew.value = true
+  await ensureOptions()
+}
+
+const usersCompanyId = ref<number | undefined>(undefined)
+const syncingDetail = ref(false)
+
+function resolveCompanyId(): number | undefined {
+  if (detail.value?.companyId != null) return Number(detail.value.companyId)
+  const pid = form.projectId
+  if (!pid) return undefined
+  const p = projects.value.find((x) => x.id === pid)
+  return p?.companyId != null ? Number(p.companyId) : undefined
+}
+
+async function loadUsersForCompany(companyId?: number) {
+  if (companyId == null) {
+    users.value = []
+    usersCompanyId.value = undefined
+    return
+  }
+  if (usersCompanyId.value === companyId && users.value.length) return
+  users.value = await sysApi.userList({ companyId })
+  usersCompanyId.value = companyId
 }
 
 async function ensureOptions() {
-  const jobs: Promise<any>[] = []
-  if (!projects.value.length) jobs.push(bizApi.projectList().then((r) => { projects.value = r }))
-  if (!users.value.length) jobs.push(sysApi.userList().then((r) => { users.value = r }))
-  if (jobs.length) await Promise.all(jobs)
+  if (!projects.value.length) {
+    projects.value = await bizApi.projectList()
+  }
+  await loadUsersForCompany(resolveCompanyId())
 }
+
+watch(
+  () => form.projectId,
+  async (pid) => {
+    if (!visible.value || syncingDetail.value) return
+    const p = projects.value.find((x) => x.id === pid)
+    const cid = p?.companyId != null ? Number(p.companyId) : undefined
+    await loadUsersForCompany(cid)
+    if (cid != null && form.participantIds?.length) {
+      const allowed = new Set(users.value.map((u) => u.id))
+      form.participantIds = form.participantIds.filter((id: number) => allowed.has(id))
+    }
+  },
+)
 
 watch(
   () => [props.modelValue, props.taskId] as const,
@@ -210,10 +252,23 @@ async function save() {
     ElMessage.warning('截止日期不能早于开始日期')
     return
   }
+  if (!form.participantIds?.length) {
+    ElMessage.warning('请至少选择一名参与人')
+    return
+  }
   syncImageFileIds()
   saving.value = true
   try {
-    await bizApi.saveTask(form, !isNew.value && !!form.id)
+    const payload = { ...form }
+    // 持有人字段已停用；去掉仅展示用字段，避免污染请求体
+    delete payload.assigneeId
+    delete payload.assigneeName
+    delete payload.canTransfer
+    delete payload.participantNames
+    delete payload.projectName
+    delete payload.overdue
+    delete payload.images
+    await bizApi.saveTask(payload, !isNew.value && !!form.id)
     ElMessage.success('保存成功')
     emit('saved')
     if (isNew.value) {
@@ -226,22 +281,51 @@ async function save() {
   }
 }
 
-async function remove() {
-  if (!form.id) return
-  await ElMessageBox.confirm('确认删除该任务？')
-  await bizApi.deleteTask(form.id)
-  ElMessage.success('已删除')
-  visible.value = false
-  emit('deleted')
+async function closeTask() {
+  if (!form.id || closing.value) return
+  if (detail.value?.status === 3) return
+  let reason = ''
+  try {
+    const { value } = await ElMessageBox.prompt('关闭后状态为「已关闭」，任务不会删除。请填写关闭原因。', '关闭任务', {
+      confirmButtonText: '确认关闭',
+      cancelButtonText: '取消',
+      inputType: 'textarea',
+      inputPlaceholder: '说明关闭原因（必填）',
+      inputValidator: (v) => {
+        const t = (v || '').trim()
+        if (!t) return '请填写关闭原因'
+        if (t.length > 500) return '关闭原因不能超过 500 字'
+        return true
+      },
+    })
+    reason = (value || '').trim()
+  } catch {
+    return
+  }
+  closing.value = true
+  try {
+    await bizApi.updateTaskStatus(form.id, 3, undefined, reason)
+    ElMessage.success('已关闭')
+    visible.value = false
+    emit('saved')
+  } finally {
+    closing.value = false
+  }
 }
 
-function openTransfer() {
+async function openTransfer() {
+  await loadUsersForCompany(resolveCompanyId())
   transferForm.assigneeId = undefined
   transferForm.remark = ''
   transferForm.imageFileIds = []
   transferImages.value = []
   transferDialog.value = true
 }
+
+const transferCandidates = computed(() => {
+  const joined = new Set((detail.value?.participantIds || []).map((id: number) => Number(id)))
+  return users.value.filter((u) => !joined.has(Number(u.id)))
+})
 
 async function onUploadTransferImage(options: any) {
   transferUploading.value = true
@@ -261,7 +345,7 @@ async function onUploadTransferImage(options: any) {
 async function submitTransfer() {
   if (!form.id) return
   if (!transferForm.assigneeId) {
-    ElMessage.warning('请选择转交对象')
+    ElMessage.warning('请选择移交对象')
     return
   }
   transferring.value = true
@@ -271,7 +355,7 @@ async function submitTransfer() {
       remark: transferForm.remark || undefined,
       imageFileIds: transferForm.imageFileIds.length ? transferForm.imageFileIds : undefined,
     })
-    ElMessage.success('已转交')
+    ElMessage.success('已移交')
     transferDialog.value = false
     emit('saved')
     await loadDetail(form.id)
@@ -385,7 +469,6 @@ function canDeleteComment(c: any) {
 
         <el-descriptions :column="1" border class="detail-desc">
           <el-descriptions-item label="项目">{{ detail.projectName || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="负责人">{{ detail.assigneeName || '未分配' }}</el-descriptions-item>
           <el-descriptions-item label="参与人员">
             {{ detail.participantNames?.length ? detail.participantNames.join('、') : '无' }}
           </el-descriptions-item>
@@ -415,9 +498,22 @@ function canDeleteComment(c: any) {
         </div>
 
         <div class="detail-actions">
-          <el-button type="primary" @click="editing = true">编辑</el-button>
-          <el-button @click="openTransfer">转交</el-button>
-          <el-button type="danger" plain @click="remove">删除</el-button>
+          <el-button
+            v-if="userStore.hasPermission('project:task:edit') && detail.status !== 3"
+            type="primary"
+            @click="editing = true"
+          >编辑</el-button>
+          <el-button
+            v-if="detail.canTransfer && detail.status !== 3"
+            @click="openTransfer"
+          >移交</el-button>
+          <el-button
+            v-if="userStore.hasPermission('project:task:edit') && detail.status !== 3"
+            type="danger"
+            plain
+            :loading="closing"
+            @click="closeTask"
+          >关闭</el-button>
         </div>
 
         <div class="section comments">
@@ -461,7 +557,7 @@ function canDeleteComment(c: any) {
                       <span>{{ f.operatorName || '系统' }}</span>
                     </div>
                     <div class="flow-summary">{{ f.summary }}</div>
-                    <div v-if="f.remark && f.action === 'TRANSFER'" class="flow-remark">说明：{{ f.remark }}</div>
+                    <div v-if="f.remark" class="flow-remark">说明：{{ f.remark }}</div>
                     <div v-if="f.images?.length" class="flow-images">
                       <el-image
                         v-for="img in f.images"
@@ -492,13 +588,8 @@ function canDeleteComment(c: any) {
               <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
             </el-select>
           </el-form-item>
-          <el-form-item label="负责人">
-            <el-select v-model="form.assigneeId" filterable clearable placeholder="选择负责人" style="width: 100%">
-              <el-option v-for="u in users" :key="u.id" :label="u.nickname || u.username" :value="u.id" />
-            </el-select>
-          </el-form-item>
           <el-form-item label="参与人员">
-            <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="可多选" style="width: 100%">
+            <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="可多选，默认含本人" style="width: 100%" :disabled="!form.projectId">
               <el-option v-for="u in users" :key="u.id" :label="u.nickname || u.username" :value="u.id" />
             </el-select>
           </el-form-item>
@@ -514,7 +605,6 @@ function canDeleteComment(c: any) {
               <el-option :value="0" label="待办" />
               <el-option :value="1" label="进行中" />
               <el-option :value="2" label="已完成" />
-              <el-option :value="3" label="已取消" />
             </el-select>
           </el-form-item>
           <el-form-item label="开始日期">
@@ -558,23 +648,21 @@ function canDeleteComment(c: any) {
       <img :src="previewUrl" alt="preview" style="display: block; max-width: 100%; margin: 0 auto" />
     </el-dialog>
 
-    <el-dialog v-model="transferDialog" title="转交任务" width="420px" append-to-body>
+    <el-dialog v-model="transferDialog" title="移交任务" width="420px" append-to-body>
       <el-form label-width="84px">
-        <el-form-item label="当前负责人">
-          <span>{{ detail?.assigneeName || '未分配' }}</span>
-        </el-form-item>
-        <el-form-item label="转交给" required>
-          <el-select v-model="transferForm.assigneeId" filterable placeholder="选择人员" style="width: 100%">
+        <el-form-item label="移交给" required>
+          <el-select v-model="transferForm.assigneeId" filterable placeholder="移交给同公司人员（加入参与人）" style="width: 100%">
             <el-option
-              v-for="u in users.filter((x) => x.id !== detail?.assigneeId)"
+              v-for="u in transferCandidates"
               :key="u.id"
               :label="u.nickname || u.username"
               :value="u.id"
             />
           </el-select>
+          <div v-if="!transferCandidates.length" class="transfer-empty-hint">同公司人员均已是参与人，无需移交</div>
         </el-form-item>
         <el-form-item label="说明">
-          <el-input v-model="transferForm.remark" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="可选，写明转交原因" />
+          <el-input v-model="transferForm.remark" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="可选，写明移交原因" />
         </el-form-item>
         <el-form-item label="图片">
           <el-upload :show-file-list="false" :http-request="onUploadTransferImage" accept="image/*">
@@ -594,7 +682,7 @@ function canDeleteComment(c: any) {
       </el-form>
       <template #footer>
         <el-button @click="transferDialog = false">取消</el-button>
-        <el-button type="primary" :loading="transferring" @click="submitTransfer">确认转交</el-button>
+        <el-button type="primary" :loading="transferring" @click="submitTransfer">确认移交</el-button>
       </template>
     </el-dialog>
   </el-drawer>
@@ -621,6 +709,12 @@ function canDeleteComment(c: any) {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.transfer-empty-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #94a3b8;
 }
 
 .detail-desc {

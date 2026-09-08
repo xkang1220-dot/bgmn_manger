@@ -2,6 +2,14 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { workflowApi } from '@/api/workflow'
+import { useUserStore } from '@/stores/user'
+import { approvalFlowTip } from '@/utils/approvalTip'
+
+const userStore = useUserStore()
+const canHandleApproval = computed(() => userStore.hasPermission('workflow:handle'))
+const canUploadReceipt = computed(
+  () => userStore.hasPermission('workflow:handle') || userStore.hasPermission('finance:ledger:add'),
+)
 
 const scope = ref('todo')
 const query = reactive({
@@ -131,13 +139,13 @@ function openRollback() {
 
 async function submitRollback() {
   if (!detail.value) return
-  await workflowApi.rollback({
+  const approval = await workflowApi.rollback({
     approvalId: detail.value.id,
     mode: rollbackForm.mode,
     amount: rollbackForm.mode === 'PARTIAL' ? rollbackForm.amount : undefined,
     reason: rollbackForm.reason,
   })
-  ElMessage.success('已发起回退审批')
+  ElMessage.success(approvalFlowTip(approval, '已发起回退审批'))
   rollbackDialog.value = false
   await refreshDetail()
   await load()
@@ -188,7 +196,7 @@ onMounted(load)
     <div class="page-header">
       <div>
         <h3 class="page-title">审批中心</h3>
-        <p class="page-desc">待办 / 我发起 / 全部；报销类：上传发票 → 财务审批 → 财务回执 → 申请人确认到账</p>
+        <p class="page-desc">待我处理含：待审批、待上传回执、待确认到账。报销类流程：审批通过 → 财务回执 → 申请人在详情点「确认到账」</p>
       </div>
     </div>
 
@@ -210,9 +218,12 @@ onMounted(load)
           <el-option label="分成配置" value="SHARE_CONFIG" />
           <el-option label="项目分钱" value="PROJECT_SETTLE" />
           <el-option label="工资申请" value="SALARY_APPLY" />
+          <el-option label="月度工资" value="SALARY_MONTHLY" />
           <el-option label="预留回公司" value="RESERVE_RETURN" />
           <el-option label="总账登记" value="LEDGER_REGISTER" />
           <el-option label="月度核验" value="MONTHLY_VERIFY" />
+          <el-option label="资产领用" value="ASSET_BORROW" />
+          <el-option label="资产归还" value="ASSET_RETURN" />
           <el-option label="资金回退" value="ROLLBACK" />
         </el-select>
       </el-form-item>
@@ -282,7 +293,15 @@ onMounted(load)
       <el-table-column label="金额" width="120" align="right">
         <template #default="{ row }">{{ row.amount != null ? `¥${fmtMoney(row.amount)}` : '—' }}</template>
       </el-table-column>
-      <el-table-column prop="statusLabel" label="状态" width="100" />
+      <el-table-column prop="statusLabel" label="状态" width="110" />
+      <el-table-column label="操作" width="120" fixed="right">
+        <template #default="{ row }">
+          <el-button v-if="row.canConfirm" link type="success" @click.stop="openDetail(row)">确认到账</el-button>
+          <el-button v-else-if="row.canUploadReceipt" link type="warning" @click.stop="openDetail(row)">上传回执</el-button>
+          <el-button v-else-if="row.canHandle" link type="primary" @click.stop="openDetail(row)">去审批</el-button>
+          <span v-else class="muted">—</span>
+        </template>
+      </el-table-column>
       <el-table-column label="时间" width="150">
         <template #default="{ row }">{{ fmtTime(row.createTime) }}</template>
       </el-table-column>
@@ -304,11 +323,16 @@ onMounted(load)
           <el-descriptions-item label="类型">{{ detail.typeLabel }}</el-descriptions-item>
           <el-descriptions-item label="标题">{{ detail.title }}</el-descriptions-item>
           <el-descriptions-item label="申请人">{{ detail.applicantName }}</el-descriptions-item>
+          <el-descriptions-item label="所属公司">{{ detail.companyName || '—' }}</el-descriptions-item>
           <el-descriptions-item label="项目">{{ detail.projectName || '—' }}</el-descriptions-item>
           <el-descriptions-item label="金额">{{ detail.amount != null ? `¥${fmtMoney(detail.amount)}` : '—' }}</el-descriptions-item>
           <el-descriptions-item label="状态">{{ detail.statusLabel }}</el-descriptions-item>
-          <el-descriptions-item v-if="detail.passMode" label="通过方式">
-            {{ detail.passMode === 'ANY' ? '或签（一人通过）' : '会签（全部通过）' }}
+          <el-descriptions-item v-if="detail.flowTip || detail.passModeLabel || detail.passMode" label="审批规则">
+            {{
+              detail.flowTip
+                ? detail.flowTip.replace(/^已提交审批：/, '')
+                : (detail.passModeLabel || (detail.passMode === 'ANY' ? '或签（一人通过即可）' : '会签（须全部通过）'))
+            }}
           </el-descriptions-item>
           <el-descriptions-item v-if="detail.confirmStatus != null && detail.confirmStatus > 0" label="到账确认">
             {{ confirmLabel(detail.confirmStatus) }}
@@ -380,6 +404,20 @@ onMounted(load)
             <div v-else class="empty-tip">无分钱明细</div>
           </template>
 
+          <template v-else-if="detail.type === 'SALARY_MONTHLY'">
+            <div class="kv-grid">
+              <div><span>收款人</span><b>{{ payload.userName || payload.userId || '—' }}</b></div>
+              <div><span>月份</span><b>{{ payload.yearMonth || '—' }}</b></div>
+              <div><span>合计</span><b>¥{{ fmtMoney(payload.totalAmount ?? detail.amount) }}</b></div>
+            </div>
+            <el-table v-if="payload.items?.length" :data="payload.items" size="small" style="margin-top: 10px">
+              <el-table-column prop="projectName" label="项目" min-width="140" />
+              <el-table-column label="金额" width="120" align="right">
+                <template #default="{ row }">¥{{ fmtMoney(row.amount) }}</template>
+              </el-table-column>
+            </el-table>
+          </template>
+
           <template v-else-if="detail.type === 'LEDGER_REGISTER'">
             <div class="kv-grid">
               <div><span>记账类型</span><b>{{ payload.bizTypeLabel || payload.bizType || '—' }}</b></div>
@@ -389,10 +427,31 @@ onMounted(load)
             </div>
           </template>
 
+          <template v-else-if="['ASSET_BORROW', 'ASSET_RETURN'].includes(detail.type)">
+            <div class="kv-grid">
+              <div><span>资产编码</span><b>{{ payload.assetCode || '—' }}</b></div>
+              <div><span>资产名称</span><b>{{ payload.assetName || '—' }}</b></div>
+              <div><span>冻结原值</span><b>¥{{ fmtMoney(payload.originalValue ?? detail.amount) }}</b></div>
+              <div><span>说明</span><b>{{ detail.remark || payload.remark || '—' }}</b></div>
+            </div>
+          </template>
+
           <template v-else-if="['PROJECT_ADVANCE', 'REIMBURSE_PROJECT', 'REIMBURSE_PERSONAL', 'SALARY_APPLY', 'RESERVE_RETURN'].includes(detail.type)">
             <div class="kv-grid">
               <div><span>{{ detail.type === 'RESERVE_RETURN' ? '结余金额' : '金额' }}</span><b>¥{{ fmtMoney(detail.amount) }}</b></div>
               <div v-if="detail.projectName"><span>项目</span><b>{{ detail.projectName }}</b></div>
+              <div v-if="payload.payMethod">
+                <span>收款方式</span>
+                <b>
+                  {{ payload.payMethod.methodTypeLabel || payload.payMethod.methodType || '—' }}
+                  · {{ payload.payMethod.accountName || '' }}
+                  {{ payload.payMethod.accountNo || '' }}
+                  <template v-if="payload.payMethod.bankName">（{{ payload.payMethod.bankName }}）</template>
+                </b>
+              </div>
+              <div v-else-if="['REIMBURSE_PROJECT', 'REIMBURSE_PERSONAL', 'SALARY_APPLY'].includes(detail.type)">
+                <span>收款方式</span><b>未填写</b>
+              </div>
               <div><span>说明</span><b>{{ detail.remark || payload.remark || (detail.type === 'RESERVE_RETURN' ? '项目结余退回公司总账' : '—') }}</b></div>
             </div>
           </template>
@@ -438,7 +497,7 @@ onMounted(load)
           </template>
         </div>
 
-        <h4 class="sec">会签人</h4>
+        <h4 class="sec">{{ detail.passMode === 'ANY' ? '审批人' : '会签人' }}</h4>
         <div v-for="t in detail.tasks || []" :key="t.id" class="task-row">
           <span>{{ t.assigneeName }}</span>
           <el-tag size="small">{{ t.action }}</el-tag>
@@ -452,16 +511,16 @@ onMounted(load)
           </el-timeline-item>
         </el-timeline>
 
-        <div v-if="detail.canHandle" class="actions">
+        <div v-if="detail.canHandle && canHandleApproval" class="actions">
           <el-input v-model="comment" type="textarea" :rows="2" placeholder="审批意见" />
           <div class="btns">
             <el-button type="primary" @click="approve">通过</el-button>
             <el-button type="danger" @click="reject">拒绝</el-button>
           </div>
         </div>
-        <div class="btns" style="margin-top: 12px">
-          <el-button v-if="detail.canWithdraw" @click="withdraw">撤回</el-button>
-          <el-upload v-if="detail.canUploadReceipt" :show-file-list="false" :http-request="onUploadReceipt">
+        <div class="btns action-bar">
+          <el-button v-if="detail.canWithdraw" type="warning" @click="withdraw">撤回审批</el-button>
+          <el-upload v-if="detail.canUploadReceipt && canUploadReceipt" :show-file-list="false" :http-request="onUploadReceipt">
             <el-button :loading="uploading" type="warning">上传财务回执</el-button>
           </el-upload>
           <el-button v-if="detail.canConfirm" type="success" @click="confirmReceived">确认到账</el-button>
@@ -501,6 +560,7 @@ onMounted(load)
 .muted { color: #94a3b8; }
 .actions { margin-top: 16px; }
 .btns { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.action-bar { margin-top: 16px; padding-top: 12px; border-top: 1px solid rgba(0,0,0,.06); }
 .payload-box {
   padding: 12px;
   background: #f8fafc;

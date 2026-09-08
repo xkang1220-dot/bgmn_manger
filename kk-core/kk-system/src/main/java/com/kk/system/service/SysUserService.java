@@ -32,6 +32,12 @@ public interface SysUserService extends IService<SysUser> {
 
     List<SysUser> listSimple();
 
+    SysUser getUserDetail(Long id);
+
     /** 按角色编码查启用用户 ID */
     List<Long> listUserIdsByRoleCode(String roleCode);
+
+    String generateTaskQueryCode(Long userId);
+
+    SysUser getEnabledByTaskQueryCode(String code);
 }

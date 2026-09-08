@@ -20,6 +20,8 @@ public class FinLedger extends BaseEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    private Long companyId;
+
     /** 唯一业务编号 */
     private String bizNo;
 

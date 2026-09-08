@@ -18,6 +18,8 @@ public class FinProjectAccount extends BaseEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    private Long companyId;
+
     private Long projectId;
 
     /** 可用余额 */

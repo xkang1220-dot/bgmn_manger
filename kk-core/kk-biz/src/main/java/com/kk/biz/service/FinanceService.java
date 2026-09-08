@@ -4,17 +4,23 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.kk.biz.dto.LedgerCreateRequest;
 import com.kk.biz.dto.LedgerQuery;
+import com.kk.biz.dto.LedgerRegisterResult;
+import com.kk.biz.dto.LedgerThresholdSaveRequest;
 import com.kk.biz.dto.ProjectManualSettleRequest;
 import com.kk.biz.dto.ProjectSettleRequest;
 import com.kk.biz.entity.FinLedger;
+import com.kk.biz.entity.FinLedgerThreshold;
 import com.kk.biz.entity.FinPool;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Map;
 
 public interface FinanceService extends IService<FinPool> {
 
     FinPool getDefaultPool();
+
+    List<FinPool> listVisiblePools();
 
     void createPool(FinPool pool);
 
@@ -23,6 +29,7 @@ public interface FinanceService extends IService<FinPool> {
     Page<FinLedger> pageLedger(LedgerQuery query);
 
     /** @deprecated 使用 {@link #pageLedger(LedgerQuery)} */
+    @Deprecated
     default Page<FinLedger> pageLedger(long page, long pageSize, String bizType, String accountType, Long userId, Long poolId, Long projectId) {
         LedgerQuery q = new LedgerQuery();
         q.setPage(page);
@@ -36,6 +43,15 @@ public interface FinanceService extends IService<FinPool> {
     }
 
     void createLedger(LedgerCreateRequest request);
+
+    /**
+     * 公司总账登记入口：入账始终审批；出账按公司阈值分流（未启用则审批）。
+     */
+    LedgerRegisterResult registerCompanyLedger(LedgerCreateRequest request);
+
+    FinLedgerThreshold getLedgerThreshold(Long companyId);
+
+    void saveLedgerThreshold(LedgerThresholdSaveRequest request);
 
     /**
      * 回退总账入账：按净额扣回资金池与渠道（原入账为总额−手续费）。

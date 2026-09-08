@@ -19,6 +19,8 @@ public class FinMonthVerify extends BaseEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    private Long companyId;
+
     private String verifyMonth;
 
     private Long channelId;

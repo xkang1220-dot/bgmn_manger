@@ -4,6 +4,7 @@ import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.kk.biz.dto.ApprovalQuery;
@@ -11,8 +12,10 @@ import com.kk.biz.dto.ApprovalSubmitRequest;
 import com.kk.biz.dto.LedgerCreateRequest;
 import com.kk.biz.dto.RollbackRequest;
 import com.kk.biz.entity.FinLedger;
+import com.kk.biz.entity.FinLedgerThreshold;
 import com.kk.biz.entity.FinMonthVerify;
 import com.kk.biz.entity.FinPool;
+import com.kk.biz.entity.HrPayMethod;
 import com.kk.biz.entity.HrWallet;
 import com.kk.biz.entity.PmProject;
 import com.kk.biz.entity.PmProjectMember;
@@ -30,9 +33,12 @@ import com.kk.biz.mapper.WfApprovalLogMapper;
 import com.kk.biz.mapper.WfApprovalMapper;
 import com.kk.biz.mapper.WfApprovalTaskMapper;
 import com.kk.biz.mapper.WfRollbackMapper;
+import com.kk.biz.service.FaAssetService;
+import com.kk.biz.service.FinLedgerThresholdService;
 import com.kk.biz.service.FinPayChannelService;
 import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.FinanceService;
+import com.kk.biz.service.HrArchiveService;
 import com.kk.biz.service.HrWalletService;
 import com.kk.biz.service.SysFileService;
 import com.kk.biz.service.WfApprovalFlowService;
@@ -41,6 +47,8 @@ import com.kk.biz.support.BizNoGenerator;
 import com.kk.biz.workflow.ApprovalTypes;
 import com.kk.common.exception.BusinessException;
 import com.kk.system.entity.SysUser;
+import com.kk.system.service.DataScopeService;
+import com.kk.system.service.SysDeptService;
 import com.kk.system.service.SysNotificationService;
 import com.kk.system.service.SysUserService;
 import lombok.RequiredArgsConstructor;
@@ -52,7 +60,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -68,14 +80,18 @@ import java.util.stream.Collectors;
 public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfApproval> implements WfApprovalService {
 
     private static final String ROLE_FINANCE = "finance";
+    private static final ZoneId ZONE_CN = ZoneId.of("Asia/Shanghai");
 
     private final WfApprovalTaskMapper taskMapper;
     private final WfApprovalLogMapper logMapper;
     private final WfRollbackMapper rollbackMapper;
     private final SysUserService userService;
+    private final SysDeptService deptService;
+    private final DataScopeService dataScopeService;
     private final FinProjectAccountService projectAccountService;
     private final FinanceService financeService;
     private final HrWalletService walletService;
+    private final HrArchiveService archiveService;
     private final FinPayChannelService payChannelService;
     private final FinMonthVerifyMapper monthVerifyMapper;
     private final FinPoolMapper poolMapper;
@@ -87,26 +103,72 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
     private final PlatformTransactionManager transactionManager;
     private final SysNotificationService notificationService;
     private final WfApprovalFlowService approvalFlowService;
+    private final FinLedgerThresholdService ledgerThresholdService;
+    private final FaAssetService faAssetService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public WfApproval submit(ApprovalSubmitRequest request) {
-        long applicantId = StpUtil.getLoginIdAsLong();
+        return submitAs(StpUtil.getLoginIdAsLong(), request);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public WfApproval submitAs(Long applicantId, ApprovalSubmitRequest request) {
+        if (applicantId == null) {
+            throw new BusinessException("申请人不能为空");
+        }
         String type = request.getType();
         if (!StringUtils.hasText(type)) {
             throw new BusinessException("审批类型不能为空");
         }
         validateSubmit(request, applicantId);
 
-        WfApprovalFlow flow = approvalFlowService.requireEnabled(type);
-        List<Long> assignees = approvalFlowService.resolveAssigneeIds(flow);
+        Long companyId = resolveApprovalCompanyId(request, applicantId);
+        WfApprovalFlow flow = approvalFlowService.requireEnabled(type, companyId);
+        List<Long> assignees = approvalFlowService.resolveAssigneeIds(flow, companyId);
+        String passMode = StringUtils.hasText(flow.getPassMode()) ? flow.getPassMode().toUpperCase() : "ALL";
+
+        // 出账阈值：未达审批线禁止走审批单；达审批线强制全体股东会签（防绕过登记接口）
+        if (ApprovalTypes.LEDGER_REGISTER.equals(type)) {
+            Map<String, Object> payload = request.getPayload();
+            Object bizTypeObj = payload == null ? null : payload.get("bizType");
+            String bizType = bizTypeObj == null ? null : String.valueOf(bizTypeObj).trim();
+            if ("EXPENSE".equals(bizType)) {
+                FinLedgerThreshold cfg = ledgerThresholdService.findEnabled(companyId);
+                if (cfg != null) {
+                    BigDecimal amount = request.getAmount() == null ? BigDecimal.ZERO : request.getAmount();
+                    BigDecimal approveLine = cfg.getApproveThreshold() == null ? BigDecimal.ZERO : cfg.getApproveThreshold();
+                    if (amount.compareTo(approveLine) < 0) {
+                        throw new BusinessException("未达审批线的出账请在「公司总账」登记，将按阈值直接出账或通知股东");
+                    }
+                    assignees = dataScopeService.listUserIdsByRoleCodeInCompany("shareholder", companyId);
+                    passMode = "ALL";
+                    if (assignees.isEmpty()) {
+                        throw new BusinessException("该公司暂无股东，无法提交大额出账会签，请先配置股东角色");
+                    }
+                }
+            }
+        }
+
+        // 登记入口 forceShareholderAll：无论原流程是否已是 ALL，都必须换成该公司股东（防财务角色误批大额出账）
+        if (ApprovalTypes.LEDGER_REGISTER.equals(type) && request.getPayload() != null
+                && Boolean.TRUE.equals(asBool(request.getPayload().get("forceShareholderAll")))) {
+            assignees = dataScopeService.listUserIdsByRoleCodeInCompany("shareholder", companyId);
+            passMode = "ALL";
+            if (assignees.isEmpty()) {
+                throw new BusinessException("该公司暂无股东，无法提交大额出账会签，请先配置股东角色");
+            }
+        }
+
         if (assignees.isEmpty()) {
-            throw new BusinessException("未找到审批人，请先在「审批配置」中设置角色或指定人员");
+            throw new BusinessException("未找到审批人，请先在「审批配置」中按该公司设置角色或指定人员");
         }
 
         WfApproval approval = new WfApproval();
         approval.setBizNo(bizNoGenerator.approval());
         approval.setType(type);
+        approval.setCompanyId(companyId);
         approval.setTitle(StringUtils.hasText(request.getTitle())
                 ? request.getTitle()
                 : ApprovalTypes.label(type));
@@ -116,8 +178,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         approval.setProjectId(request.getProjectId());
         approval.setPoolId(request.getPoolId());
         approval.setRemark(request.getRemark());
+        attachPayMethodSnapshot(request, applicantId);
         approval.setPayload(request.getPayload() == null ? "{}" : JSONUtil.toJsonStr(request.getPayload()));
-        String passMode = StringUtils.hasText(flow.getPassMode()) ? flow.getPassMode().toUpperCase() : "ALL";
         approval.setPassMode(passMode);
         int timeoutHours = flow.getTimeoutHours() == null ? 0 : flow.getTimeoutHours();
         approval.setAutoPass(timeoutHours > 0 ? 1 : 0);
@@ -179,15 +241,40 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if ("mine".equals(scope)) {
             wrapper.eq(WfApproval::getApplicantId, loginId);
         } else if ("todo".equals(scope)) {
-            List<Long> ids = taskMapper.selectList(new LambdaQueryWrapper<WfApprovalTask>()
+            // 1) 待我审批  2) 我发起的待确认到账  3) 待我上传财务回执
+            List<Long> pendingTaskIds = taskMapper.selectList(new LambdaQueryWrapper<WfApprovalTask>()
                             .eq(WfApprovalTask::getAssigneeId, loginId)
                             .eq(WfApprovalTask::getAction, "PENDING"))
-                    .stream().map(WfApprovalTask::getApprovalId).distinct().toList();
-            if (ids.isEmpty()) {
-                return new Page<>(query.getPage(), query.getPageSize());
-            }
-            wrapper.in(WfApproval::getId, ids).eq(WfApproval::getStatus, "PENDING");
+                    .stream().map(WfApprovalTask::getApprovalId).filter(Objects::nonNull).distinct().toList();
+
+            boolean finance = canFinanceHandle(loginId, null)
+                    || dataScopeService.isGlobalAdmin(loginId);
+
+            wrapper.and(w -> {
+                boolean any = false;
+                if (!pendingTaskIds.isEmpty()) {
+                    w.nested(n -> n.in(WfApproval::getId, pendingTaskIds).eq(WfApproval::getStatus, "PENDING"));
+                    any = true;
+                }
+                // 申请人：财务已回执，待确认到账
+                if (any) {
+                    w.or();
+                }
+                w.nested(n -> n.eq(WfApproval::getApplicantId, loginId)
+                        .eq(WfApproval::getConfirmStatus, 2)
+                        .in(WfApproval::getStatus, "APPROVED", "TIMEOUT_PASS"));
+                any = true;
+                // 财务：待上传回执
+                if (finance) {
+                    w.or().nested(n -> n.eq(WfApproval::getConfirmStatus, 1)
+                            .in(WfApproval::getStatus, "APPROVED", "TIMEOUT_PASS"));
+                }
+                if (!any) {
+                    w.eq(WfApproval::getId, -1L);
+                }
+            });
         }
+        applyCompanyScope(wrapper, loginId);
 
         Page<WfApproval> result = page(new Page<>(query.getPage(), query.getPageSize()), wrapper);
         fillExtras(result.getRecords());
@@ -200,6 +287,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (approval == null) {
             throw new BusinessException("审批单不存在");
         }
+        assertCanAccessApproval(approval, StpUtil.getLoginIdAsLong());
         fillExtras(List.of(approval));
         List<WfApprovalTask> tasks = taskMapper.selectList(new LambdaQueryWrapper<WfApprovalTask>()
                 .eq(WfApprovalTask::getApprovalId, id)
@@ -215,6 +303,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         approval.setPayloadData(buildPayloadData(approval));
         approval.setVoucherFiles(fileService.listByBiz("approval", id));
         approval.setReceiptFiles(fileService.listByBiz("approval_receipt", id));
+        fillFlowTip(approval);
         return approval;
     }
 
@@ -278,7 +367,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (approval == null) {
             throw new BusinessException("审批单不存在");
         }
-        if (!Objects.equals(approval.getApplicantId(), loginId) && !StpUtil.hasRole("admin")) {
+        if (!Objects.equals(approval.getApplicantId(), loginId) && !dataScopeService.isGlobalAdmin(loginId)) {
             throw new BusinessException("只能撤回自己发起的审批");
         }
         if (!"PENDING".equals(approval.getStatus())) {
@@ -286,8 +375,19 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
         approval.setStatus("WITHDRAWN");
         updateById(approval);
+        List<Long> assignees = taskMapper.selectList(new LambdaQueryWrapper<WfApprovalTask>()
+                        .eq(WfApprovalTask::getApprovalId, id)
+                        .eq(WfApprovalTask::getAction, "PENDING"))
+                .stream().map(WfApprovalTask::getAssigneeId).filter(Objects::nonNull).distinct().toList();
         closePendingTasks(id, "审批已撤回");
         addLog(id, loginId, "WITHDRAW", "申请人撤回");
+        if (!assignees.isEmpty()) {
+            notificationService.notifyUsers(
+                    assignees.stream().filter(uid -> !Objects.equals(uid, loginId)).toList(),
+                    "审批已撤回 · " + approval.getTitle(),
+                    "申请人已撤回单号 " + approval.getBizNo() + "，无需再处理",
+                    "approval", approval.getId(), "/workflow/center");
+        }
     }
 
     @Override
@@ -304,7 +404,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (approval.getConfirmStatus() == null || approval.getConfirmStatus() != 1) {
             throw new BusinessException("当前状态无需上传回执");
         }
-        if (!canFinanceHandle(loginId)) {
+        if (!canFinanceHandle(loginId, approval.getCompanyId())) {
             throw new BusinessException("仅财务可上传回执");
         }
         if (fileIds == null || fileIds.isEmpty()) {
@@ -330,7 +430,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (approval == null) {
             throw new BusinessException("审批单不存在");
         }
-        if (!Objects.equals(approval.getApplicantId(), loginId) && !StpUtil.hasRole("admin")) {
+        if (!Objects.equals(approval.getApplicantId(), loginId) && !dataScopeService.isGlobalAdmin(loginId)) {
             throw new BusinessException("仅申请人可确认到账");
         }
         if (approval.getConfirmStatus() == null || approval.getConfirmStatus() != 2) {
@@ -340,9 +440,9 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         updateById(approval);
         addLog(id, loginId, "CONFIRM", "申请人确认到账");
         executeMoneyEffect(approval);
-        List<Long> financeIds = userService.listUserIdsByRoleCode(ROLE_FINANCE);
+        List<Long> financeIds = listFinanceUserIds(approval.getCompanyId());
         if (financeIds.isEmpty()) {
-            financeIds = userService.listUserIdsByRoleCode("admin");
+            financeIds = dataScopeService.listUserIdsByRoleCodeInCompany("admin", approval.getCompanyId());
         }
         notificationService.notifyUsers(
                 financeIds.stream().filter(uid -> !Objects.equals(uid, loginId)).toList(),
@@ -394,6 +494,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         submit.setAmount(amount);
         submit.setProjectId(origin.getProjectId());
         submit.setPoolId(origin.getPoolId());
+        submit.setCompanyId(origin.getCompanyId());
         submit.setRemark(request.getReason());
         submit.setPayload(payload);
         WfApproval rollbackApproval = submit(submit);
@@ -437,7 +538,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                         task.setActTime(LocalDateTime.now());
                         taskMapper.updateById(task);
                     }
-                    addLog(fresh.getId(), null, "TIMEOUT_PASS", "超过3天未操作，自动通过");
+                    addLog(fresh.getId(), null, "TIMEOUT_PASS", "超时未操作，自动通过");
                     onApproved(fresh, true);
                 });
                 count++;
@@ -463,9 +564,9 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                     passLabel + " · " + approval.getTitle(),
                     "单号 " + approval.getBizNo() + " 已通过，等待财务上传回执后请确认到账",
                     "approval", approval.getId(), "/workflow/center");
-            List<Long> financeIds = userService.listUserIdsByRoleCode(ROLE_FINANCE);
+            List<Long> financeIds = listFinanceUserIds(approval.getCompanyId());
             if (financeIds.isEmpty()) {
-                financeIds = userService.listUserIdsByRoleCode("admin");
+                financeIds = dataScopeService.listUserIdsByRoleCodeInCompany("admin", approval.getCompanyId());
             }
             notificationService.notifyUsers(
                     financeIds.stream().filter(uid -> !Objects.equals(uid, approval.getApplicantId())).toList(),
@@ -510,13 +611,17 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             }
             case ApprovalTypes.REIMBURSE_PROJECT, ApprovalTypes.SALARY_APPLY -> {
                 assertExpenseWithinQuota(approval.getProjectId(), approval.getAmount());
-                projectAccountService.expense(
+                String bizType = ApprovalTypes.SALARY_APPLY.equals(type) ? "SALARY" : "REIMBURSE";
+                projectAccountService.expenseToWallet(
                         approval.getProjectId(),
+                        approval.getApplicantId(),
                         approval.getAmount(),
                         approval.getId(),
+                        bizType,
                         ApprovalTypes.label(type),
                         approval.getRemark());
             }
+            case ApprovalTypes.SALARY_MONTHLY -> effectSalaryMonthly(approval, payload);
             case ApprovalTypes.REIMBURSE_PERSONAL -> effectPersonalReimburse(approval);
             case ApprovalTypes.SHARE_CONFIG -> effectShareConfig(approval, payload);
             case ApprovalTypes.PROJECT_SETTLE -> {
@@ -528,6 +633,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             case ApprovalTypes.LEDGER_REGISTER -> effectLedgerRegister(approval, payload);
             case ApprovalTypes.MONTHLY_VERIFY -> effectMonthlyVerify(approval, payload);
             case ApprovalTypes.ROLLBACK -> effectRollback(approval, payload);
+            case ApprovalTypes.ASSET_BORROW -> faAssetService.effectBorrow(approval);
+            case ApprovalTypes.ASSET_RETURN -> faAssetService.effectReturn(approval);
             default -> {
             }
         }
@@ -546,13 +653,33 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         project.setStatus(payload.getInt("status", 1));
         project.setApproveStatus(1);
         project.setDescription(payload.getStr("description"));
-        if (StringUtils.hasText(payload.getStr("startDate"))) {
-            project.setStartDate(java.time.LocalDate.parse(payload.getStr("startDate")));
+        project.setStartDate(parsePayloadLocalDate(payload, "startDate"));
+        project.setEndDate(parsePayloadLocalDate(payload, "endDate"));
+        // 创建人记申请人，而不是最后点通过的审批人
+        project.setCreateBy(approval.getApplicantId());
+        project.setUpdateBy(approval.getApplicantId());
+        Long companyId = approval.getCompanyId();
+        if (companyId == null) {
+            throw new BusinessException("审批单缺少所属公司，无法创建项目");
         }
-        if (StringUtils.hasText(payload.getStr("endDate"))) {
-            project.setEndDate(java.time.LocalDate.parse(payload.getStr("endDate")));
+        project.setCompanyId(companyId);
+        Long ownerId = project.getOwnerId();
+        if (ownerId != null
+                && !dataScopeService.isGlobalAdmin(ownerId)
+                && !dataScopeService.visibleCompanyIds(ownerId).contains(companyId)) {
+            throw new BusinessException("不能跨公司设置项目负责人");
         }
         projectMapper.insert(project);
+        // MetaObjectHandler 可能按审批人登录态写入 createBy；强制改回申请人，保证发起人可见
+        Long applicantId = approval.getApplicantId();
+        if (applicantId != null && project.getId() != null) {
+            projectMapper.update(null, new LambdaUpdateWrapper<PmProject>()
+                    .eq(PmProject::getId, project.getId())
+                    .set(PmProject::getCreateBy, applicantId)
+                    .set(PmProject::getUpdateBy, applicantId));
+            project.setCreateBy(applicantId);
+            project.setUpdateBy(applicantId);
+        }
         projectAccountService.getOrCreate(project.getId());
         if (project.getReserveAmount() != null && project.getReserveAmount().compareTo(BigDecimal.ZERO) > 0) {
             var account = projectAccountService.getOrCreate(project.getId());
@@ -583,7 +710,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             return;
         }
         // 确认到账：公司总账出账 + 个人钱包入账（报销款归属个人）
-        FinPool pool = resolvePool(approval.getPoolId());
+        FinPool pool = resolvePool(approval.getPoolId(), approval.getCompanyId());
         BigDecimal amount = approval.getAmount();
         BigDecimal poolBefore = pool.getBalance();
         boolean ok = new com.baomidou.mybatisplus.extension.conditions.update.LambdaUpdateChainWrapper<>(poolMapper)
@@ -666,6 +793,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             existing.setVerifyMonth(month);
             existing.setChannelId(channelId);
             existing.setPoolId(channel.getPoolId());
+            existing.setCompanyId(approval.getCompanyId() != null ? approval.getCompanyId() : channel.getCompanyId());
             existing.setSystemBalance(systemBal);
             existing.setStatementBalance(statement);
             existing.setDiffAmount(diff);
@@ -758,6 +886,18 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             throw new BusinessException("项目不存在");
         }
         if (poolId != null) {
+            FinPool pool = poolMapper.selectById(poolId);
+            if (pool == null) {
+                throw new BusinessException("资金池不存在");
+            }
+            if (project.getCompanyId() != null && pool.getCompanyId() != null
+                    && !Objects.equals(project.getCompanyId(), pool.getCompanyId())) {
+                throw new BusinessException("资金池与项目不属于同一公司");
+            }
+            if (approval.getCompanyId() != null && pool.getCompanyId() != null
+                    && !Objects.equals(approval.getCompanyId(), pool.getCompanyId())) {
+                throw new BusinessException("资金池与审批单不属于同一公司");
+            }
             project.setPoolId(poolId);
         }
         if (budget != null) {
@@ -800,11 +940,11 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
         BigDecimal sum = rp.add(sp);
         if (sum.compareTo(new BigDecimal("100")) != 0) {
-            throw new BusinessException("分成% + 预留% 必须为 100%，当前 " + sum + "%（支出不占比例，直接从项目结余扣）");
+            throw new BusinessException("分成% + 预留% 必须为 100%，当前 " + sum + "%（工资/报销不占比例）");
         }
     }
 
-    /** 支出不再校验比例额度，仅校验项目结余（在动账时扣减） */
+    /** 支出不再校验比例额度，仅校验项目结余（动账时再扣项目并入钱包） */
     private void assertExpenseWithinQuota(Long projectId, BigDecimal addAmount) {
         var account = projectAccountService.getOrCreate(projectId);
         if (nz(addAmount).compareTo(nz(account.getBalance())) > 0) {
@@ -953,7 +1093,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             HrWallet walletBefore = walletService.getOrCreate(origin.getApplicantId());
             BigDecimal wb = walletBefore.getBalance();
             HrWallet walletAfter = walletService.changeBalance(origin.getApplicantId(), amount.negate());
-            FinPool pool = resolvePool(origin.getPoolId());
+            FinPool pool = resolvePool(origin.getPoolId(), origin.getCompanyId());
             BigDecimal poolBefore = pool.getBalance();
             creditPoolDirect(pool, amount);
             pool = poolMapper.selectById(pool.getId());
@@ -964,18 +1104,41 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                     amount, poolBefore, pool.getBalance(), null, walletLedger, approval.getId(),
                     "个人报销回退入公司", "回退原单 " + origin.getBizNo());
         } else if (List.of(ApprovalTypes.REIMBURSE_PROJECT, ApprovalTypes.SALARY_APPLY).contains(originType)) {
+            if (origin.getApplicantId() == null) {
+                throw new BusinessException("原单缺少申请人，无法回退个人钱包");
+            }
             var account = projectAccountService.getOrCreate(origin.getProjectId());
             if (nz(account.getExpenseAmount()).compareTo(amount) < 0) {
                 throw new BusinessException("回退金额超过项目累计支出");
             }
+            // 新逻辑会写入 WALLET 正流入账；旧单只有项目扣款，回退时不能误扣钱包
+            boolean creditedWallet = ledgerMapper.selectCount(new LambdaQueryWrapper<FinLedger>()
+                    .eq(FinLedger::getApprovalId, origin.getId())
+                    .eq(FinLedger::getAccountType, "WALLET")
+                    .eq(FinLedger::getUserId, origin.getApplicantId())
+                    .gt(FinLedger::getAmount, BigDecimal.ZERO)) > 0;
+
             BigDecimal before = nz(account.getBalance());
             account.setBalance(before.add(amount));
             account.setExpenseAmount(nz(account.getExpenseAmount()).subtract(amount));
             projectAccountService.updateById(account);
-            writeSimpleLedger("ROLLBACK", "PROJECT", origin.getPoolId(), null, amount,
+            Long projectLedger = writeSimpleLedger("ROLLBACK", "PROJECT", origin.getPoolId(), null, amount,
                     before, account.getBalance(), origin.getProjectId(), null, approval.getId(),
                     "项目支出回退", "回退原单 " + origin.getBizNo());
+            if (creditedWallet) {
+                HrWallet walletBefore = walletService.getOrCreate(origin.getApplicantId());
+                if (nz(walletBefore.getBalance()).compareTo(amount) < 0) {
+                    throw new BusinessException("申请人钱包余额不足，无法回退");
+                }
+                BigDecimal wb = walletBefore.getBalance();
+                HrWallet walletAfter = walletService.changeBalance(origin.getApplicantId(), amount.negate());
+                writeSimpleLedger("ROLLBACK", "WALLET", origin.getPoolId(), origin.getApplicantId(),
+                        amount.negate(), wb, walletAfter.getBalance(), origin.getProjectId(), projectLedger, approval.getId(),
+                        "项目支出回退扣个人钱包", "回退原单 " + origin.getBizNo());
+            }
             projectAccountService.assertBalanced(origin.getProjectId());
+        } else if (ApprovalTypes.SALARY_MONTHLY.equals(originType)) {
+            effectSalaryMonthlyRollback(approval, origin);
         } else if (ApprovalTypes.LEDGER_REGISTER.equals(originType)) {
             effectLedgerRegisterRollback(approval, origin, amount);
         } else {
@@ -992,6 +1155,79 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
     }
 
+    private void effectSalaryMonthly(WfApproval approval, JSONObject payload) {
+        Long userId = payload.getLong("userId");
+        if (userId == null) {
+            throw new BusinessException("月度工资缺少收款人");
+        }
+        var items = payload.getJSONArray("items");
+        if (items == null || items.isEmpty()) {
+            throw new BusinessException("月度工资明细为空");
+        }
+        for (int i = 0; i < items.size(); i++) {
+            JSONObject row = items.getJSONObject(i);
+            Long projectId = row.getLong("projectId");
+            BigDecimal amount = row.getBigDecimal("amount");
+            if (amount == null && row.get("amount") != null) {
+                amount = new BigDecimal(String.valueOf(row.get("amount")));
+            }
+            if (projectId == null || amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+                throw new BusinessException("月度工资明细无效");
+            }
+            assertExpenseWithinQuota(projectId, amount);
+            String projectName = row.getStr("projectName", "#" + projectId);
+            projectAccountService.expenseToWallet(
+                    projectId,
+                    userId,
+                    amount,
+                    approval.getId(),
+                    "SALARY",
+                    "月度工资 · " + projectName,
+                    approval.getRemark());
+        }
+    }
+
+    private void effectSalaryMonthlyRollback(WfApproval approval, WfApproval origin) {
+        JSONObject payload = JSONUtil.parseObj(origin.getPayload());
+        Long userId = payload.getLong("userId");
+        if (userId == null) {
+            throw new BusinessException("原单缺少收款人，无法回退");
+        }
+        var items = payload.getJSONArray("items");
+        if (items == null || items.isEmpty()) {
+            throw new BusinessException("原单明细为空，无法回退");
+        }
+        for (int i = 0; i < items.size(); i++) {
+            JSONObject row = items.getJSONObject(i);
+            Long projectId = row.getLong("projectId");
+            BigDecimal amount = row.getBigDecimal("amount");
+            if (projectId == null || amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+                continue;
+            }
+            var account = projectAccountService.getOrCreate(projectId);
+            if (nz(account.getExpenseAmount()).compareTo(amount) < 0) {
+                throw new BusinessException("回退金额超过项目累计支出");
+            }
+            BigDecimal before = nz(account.getBalance());
+            account.setBalance(before.add(amount));
+            account.setExpenseAmount(nz(account.getExpenseAmount()).subtract(amount));
+            projectAccountService.updateById(account);
+            Long projectLedger = writeSimpleLedger("ROLLBACK", "PROJECT", origin.getPoolId(), null, amount,
+                    before, account.getBalance(), projectId, null, approval.getId(),
+                    "月度工资回退", "回退原单 " + origin.getBizNo());
+            HrWallet walletBefore = walletService.getOrCreate(userId);
+            if (nz(walletBefore.getBalance()).compareTo(amount) < 0) {
+                throw new BusinessException("收款人钱包余额不足，无法回退");
+            }
+            BigDecimal wb = walletBefore.getBalance();
+            HrWallet walletAfter = walletService.changeBalance(userId, amount.negate());
+            writeSimpleLedger("ROLLBACK", "WALLET", origin.getPoolId(), userId,
+                    amount.negate(), wb, walletAfter.getBalance(), projectId, projectLedger, approval.getId(),
+                    "月度工资回退扣个人钱包", "回退原单 " + origin.getBizNo());
+            projectAccountService.assertBalanced(projectId);
+        }
+    }
+
     private void saveMembers(Long projectId, List<PmProjectMember> members) {
         if (members == null || members.isEmpty()) {
             throw new BusinessException("分成参与人不能为空");
@@ -1002,12 +1238,178 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (sum.compareTo(new BigDecimal("100")) != 0) {
             throw new BusinessException("分成合计必须为 100%");
         }
+        PmProject project = projectMapper.selectById(projectId);
+        Long companyId = project == null ? null : project.getCompanyId();
+        for (PmProjectMember member : members) {
+            if (member.getUserId() != null && companyId != null
+                    && !dataScopeService.isGlobalAdmin(member.getUserId())
+                    && !dataScopeService.visibleCompanyIds(member.getUserId()).contains(companyId)) {
+                throw new BusinessException("不能跨公司添加分成参与人");
+            }
+        }
         memberMapper.delete(new LambdaQueryWrapper<PmProjectMember>().eq(PmProjectMember::getProjectId, projectId));
         for (PmProjectMember member : members) {
             member.setId(null);
             member.setProjectId(projectId);
             memberMapper.insert(member);
         }
+    }
+
+    private Long resolveApprovalCompanyId(ApprovalSubmitRequest request, long applicantId) {
+        Long companyId = request.getCompanyId();
+        if (companyId == null && request.getPayload() != null && request.getPayload().get("companyId") != null) {
+            Object raw = request.getPayload().get("companyId");
+            if (raw instanceof Number n) {
+                companyId = n.longValue();
+            } else {
+                String text = String.valueOf(raw).trim();
+                if (StringUtils.hasText(text) && !"null".equalsIgnoreCase(text)) {
+                    try {
+                        companyId = Long.parseLong(text);
+                    } catch (NumberFormatException e) {
+                        throw new BusinessException("所属公司参数无效");
+                    }
+                }
+            }
+        }
+        if (companyId != null) {
+            assertResourceInVisibleCompanies(applicantId, companyId, "无权在该公司发起审批");
+        }
+        if (request.getProjectId() != null) {
+            PmProject project = projectMapper.selectById(request.getProjectId());
+            if (project == null) {
+                throw new BusinessException("项目不存在");
+            }
+            assertResourceInVisibleCompanies(applicantId, project.getCompanyId(), "无权操作其他公司的项目");
+            if (companyId == null) {
+                companyId = project.getCompanyId();
+            } else if (project.getCompanyId() != null && !Objects.equals(companyId, project.getCompanyId())) {
+                throw new BusinessException("所选公司与项目不属于同一公司");
+            }
+        }
+        if (request.getPoolId() != null) {
+            FinPool pool = poolMapper.selectById(request.getPoolId());
+            if (pool == null) {
+                throw new BusinessException("资金池不存在");
+            }
+            assertResourceInVisibleCompanies(applicantId, pool.getCompanyId(), "无权操作其他公司的资金池");
+            if (companyId == null) {
+                companyId = pool.getCompanyId();
+            } else if (pool.getCompanyId() != null && !Objects.equals(companyId, pool.getCompanyId())) {
+                throw new BusinessException("所选公司与资金池不属于同一公司");
+            }
+        }
+        if (companyId == null) {
+            if (request.getProjectId() != null || request.getPoolId() != null) {
+                throw new BusinessException("关联项目或资金池缺少所属公司，无法提交");
+            }
+            throw new BusinessException("请选择所属公司");
+        }
+        return companyId;
+    }
+
+    private void assertResourceInVisibleCompanies(long userId, Long companyId, String message) {
+        if (dataScopeService.isGlobalAdmin(userId)) {
+            return;
+        }
+        if (companyId == null) {
+            throw new BusinessException(message);
+        }
+        if (!dataScopeService.visibleCompanyIds(userId).contains(companyId)) {
+            throw new BusinessException(message);
+        }
+    }
+
+    private void assertCanAccessApproval(WfApproval approval, long loginId) {
+        if (dataScopeService.isGlobalAdmin(loginId)) {
+            return;
+        }
+        if (Objects.equals(approval.getApplicantId(), loginId)) {
+            return;
+        }
+        Long assigned = taskMapper.selectCount(new LambdaQueryWrapper<WfApprovalTask>()
+                .eq(WfApprovalTask::getApprovalId, approval.getId())
+                .eq(WfApprovalTask::getAssigneeId, loginId));
+        if (assigned != null && assigned > 0) {
+            return;
+        }
+        if (canFinanceHandle(loginId, approval.getCompanyId())) {
+            return;
+        }
+        Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
+        Set<Long> users = dataScopeService.visibleUserIds(loginId);
+        if (approval.getCompanyId() != null && companies.contains(approval.getCompanyId())
+                && approval.getApplicantId() != null && users.contains(approval.getApplicantId())) {
+            return;
+        }
+        throw new BusinessException("无权查看该审批单");
+    }
+
+    private void applyCompanyScope(LambdaQueryWrapper<WfApproval> wrapper, long loginId) {
+        if (dataScopeService.isGlobalAdmin(loginId)) {
+            return;
+        }
+        Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
+        if (companies.isEmpty()) {
+            wrapper.eq(WfApproval::getId, -1L);
+            return;
+        }
+        Set<Long> users = dataScopeService.visibleUserIds(loginId);
+        Set<Long> financeCompanies = companies.stream()
+                .filter(c -> canFinanceHandle(loginId, c))
+                .collect(Collectors.toSet());
+        List<Long> myApprovalIds = taskMapper.selectList(new LambdaQueryWrapper<WfApprovalTask>()
+                        .eq(WfApprovalTask::getAssigneeId, loginId)
+                        .select(WfApprovalTask::getApprovalId))
+                .stream().map(WfApprovalTask::getApprovalId).filter(Objects::nonNull).distinct().toList();
+        wrapper.in(WfApproval::getCompanyId, companies).and(w -> {
+            w.in(WfApproval::getApplicantId, users);
+            if (!myApprovalIds.isEmpty()) {
+                w.or().in(WfApproval::getId, myApprovalIds);
+            }
+            if (!financeCompanies.isEmpty()) {
+                w.or().in(WfApproval::getCompanyId, financeCompanies);
+            }
+        });
+    }
+
+    private void attachPayMethodSnapshot(ApprovalSubmitRequest request, long applicantId) {
+        String type = request.getType();
+        if (!List.of(ApprovalTypes.SALARY_APPLY, ApprovalTypes.REIMBURSE_PROJECT, ApprovalTypes.REIMBURSE_PERSONAL)
+                .contains(type)) {
+            return;
+        }
+        Map<String, Object> payload = request.getPayload() == null
+                ? new HashMap<>()
+                : new HashMap<>(request.getPayload());
+        Object rawId = payload.get("payMethodId");
+        if (rawId == null || !StringUtils.hasText(String.valueOf(rawId)) || "null".equalsIgnoreCase(String.valueOf(rawId))) {
+            request.setPayload(payload);
+            return;
+        }
+        Long methodId;
+        try {
+            if (rawId instanceof Number number) {
+                methodId = number.longValue();
+            } else {
+                methodId = Long.valueOf(String.valueOf(rawId).trim());
+            }
+        } catch (Exception e) {
+            throw new BusinessException("收款方式无效");
+        }
+        HrPayMethod method = archiveService.getOwnedMethod(applicantId, methodId);
+        if (method == null) {
+            throw new BusinessException("收款方式不存在或不属于当前用户");
+        }
+        Map<String, Object> snap = new HashMap<>();
+        snap.put("methodId", method.getId());
+        snap.put("methodType", method.getMethodType());
+        snap.put("methodTypeLabel", method.getMethodTypeLabel());
+        snap.put("accountName", method.getAccountName());
+        snap.put("accountNo", method.getAccountNo());
+        snap.put("bankName", method.getBankName());
+        payload.put("payMethod", snap);
+        request.setPayload(payload);
     }
 
     private void validateSubmit(ApprovalSubmitRequest request, long applicantId) {
@@ -1034,14 +1436,29 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                 throw new BusinessException("请填写金额");
             }
         }
+        if (ApprovalTypes.SALARY_MONTHLY.equals(type)) {
+            if (request.getCompanyId() == null
+                    && (request.getPayload() == null || request.getPayload().get("companyId") == null)) {
+                // company 也可由 resolve 推断，但月度单应显式带公司
+            }
+            if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+                throw new BusinessException("请填写月度工资合计金额");
+            }
+            if (request.getPayload() == null || request.getPayload().get("userId") == null) {
+                throw new BusinessException("月度工资缺少收款人");
+            }
+            Object items = request.getPayload().get("items");
+            if (!(items instanceof List<?> list) || list.isEmpty()) {
+                throw new BusinessException("月度工资明细不能为空");
+            }
+        }
         if (ApprovalTypes.REIMBURSE_PERSONAL.equals(type)) {
             if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
                 throw new BusinessException("请填写报销金额");
             }
         }
         if (ApprovalTypes.REIMBURSE_PERSONAL.equals(type)
-                || ApprovalTypes.REIMBURSE_PROJECT.equals(type)
-                || ApprovalTypes.SALARY_APPLY.equals(type)) {
+                || ApprovalTypes.REIMBURSE_PROJECT.equals(type)) {
             if (request.getVoucherFileIds() == null || request.getVoucherFileIds().isEmpty()) {
                 throw new BusinessException("请上传发票/凭证");
             }
@@ -1049,6 +1466,9 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (ApprovalTypes.LEDGER_REGISTER.equals(type)) {
             if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
                 throw new BusinessException("请填写金额");
+            }
+            if (request.getPoolId() == null) {
+                throw new BusinessException("请选择资金池");
             }
             Map<String, Object> payload = request.getPayload();
             Object bizTypeObj = payload == null ? null : payload.get("bizType");
@@ -1064,11 +1484,14 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             }
         }
         if (ApprovalTypes.MONTHLY_VERIFY.equals(type)) {
+            if (request.getPoolId() == null) {
+                throw new BusinessException("请选择资金池/渠道所属公司资金池");
+            }
             Map<String, Object> payload = request.getPayload();
             Object monthObj = payload == null ? null : payload.get("verifyMonth");
             String verifyMonth = monthObj == null ? null : String.valueOf(monthObj).trim();
             if (!StringUtils.hasText(verifyMonth) || "null".equalsIgnoreCase(verifyMonth)
-                    || payload.get("channelId") == null) {
+                    || payload == null || payload.get("channelId") == null) {
                 throw new BusinessException("请选择核验月份和收款渠道");
             }
             if (request.getVoucherFileIds() == null || request.getVoucherFileIds().isEmpty()) {
@@ -1088,6 +1511,54 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (ApprovalTypes.RESERVE_RETURN.equals(type)) {
             if (request.getProjectId() == null) {
                 throw new BusinessException("请选择项目");
+            }
+        }
+        if (ApprovalTypes.ASSET_BORROW.equals(type) || ApprovalTypes.ASSET_RETURN.equals(type)) {
+            Map<String, Object> payload = request.getPayload();
+            if (payload == null) {
+                payload = new HashMap<>();
+                request.setPayload(payload);
+            }
+            Object assetIdObj = payload.get("assetId");
+            Long assetId = null;
+            if (assetIdObj instanceof Number n) {
+                assetId = n.longValue();
+            } else if (assetIdObj != null) {
+                String text = String.valueOf(assetIdObj).trim();
+                if (StringUtils.hasText(text) && !"null".equalsIgnoreCase(text)) {
+                    try {
+                        assetId = Long.parseLong(text);
+                    } catch (NumberFormatException e) {
+                        throw new BusinessException("资产参数无效");
+                    }
+                }
+            }
+            if (assetId == null) {
+                throw new BusinessException("请选择资产");
+            }
+            if (ApprovalTypes.ASSET_BORROW.equals(type)) {
+                faAssetService.assertCanBorrow(assetId, applicantId);
+                var asset = faAssetService.getById(assetId);
+                if (asset != null) {
+                    request.setAmount(asset.getOriginalValue());
+                    request.setCompanyId(asset.getCompanyId());
+                    payload.put("assetCode", asset.getAssetCode());
+                    payload.put("assetName", asset.getName());
+                    payload.put("originalValue", asset.getOriginalValue());
+                    payload.put("companyId", asset.getCompanyId());
+                }
+            } else {
+                faAssetService.assertCanReturn(assetId, applicantId);
+                var asset = faAssetService.getById(assetId);
+                if (asset != null) {
+                    request.setAmount(asset.getOriginalValue());
+                    request.setCompanyId(asset.getCompanyId());
+                    payload.put("assetCode", asset.getAssetCode());
+                    payload.put("assetName", asset.getName());
+                    payload.put("originalValue", asset.getOriginalValue());
+                    payload.put("holderUserId", asset.getHolderUserId());
+                    payload.put("companyId", asset.getCompanyId());
+                }
             }
         }
     }
@@ -1141,6 +1612,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
         JSONObject payload = JSONUtil.parseObj(approval.getPayload());
         data.putAll(payload);
+        putIsoDate(data, payload, "startDate");
+        putIsoDate(data, payload, "endDate");
 
         Set<Long> userIds = new HashSet<>();
         if (payload.containsKey("members") && payload.get("members") != null) {
@@ -1221,6 +1694,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
         Set<Long> userIds = list.stream().map(WfApproval::getApplicantId).filter(Objects::nonNull).collect(Collectors.toSet());
         Set<Long> projectIds = list.stream().map(WfApproval::getProjectId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Set<Long> companyIds = list.stream().map(WfApproval::getCompanyId).filter(Objects::nonNull).collect(Collectors.toSet());
         Map<Long, SysUser> userMap = new HashMap<>();
         if (!userIds.isEmpty()) {
             userService.listByIds(userIds).forEach(u -> userMap.put(u.getId(), u));
@@ -1229,6 +1703,10 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (!projectIds.isEmpty()) {
             projectMapper.selectList(new LambdaQueryWrapper<PmProject>().in(PmProject::getId, projectIds))
                     .forEach(p -> projectMap.put(p.getId(), p));
+        }
+        Map<Long, String> companyNameMap = new HashMap<>();
+        if (!companyIds.isEmpty()) {
+            deptService.listByIds(companyIds).forEach(d -> companyNameMap.put(d.getId(), d.getName()));
         }
         for (WfApproval a : list) {
             if (a.getApplicantId() != null) {
@@ -1243,10 +1721,28 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                     a.setProjectName(p.getName());
                 }
             }
+            if (a.getCompanyId() != null) {
+                a.setCompanyName(companyNameMap.get(a.getCompanyId()));
+            }
             a.setTypeLabel(ApprovalTypes.label(a.getType()));
-            a.setStatusLabel(statusLabel(a.getStatus()));
+            a.setStatusLabel(displayStatus(a));
             fillFlags(a);
         }
+    }
+
+    private String displayStatus(WfApproval a) {
+        if (a == null) {
+            return "";
+        }
+        if (List.of("APPROVED", "TIMEOUT_PASS").contains(a.getStatus())) {
+            if (Integer.valueOf(1).equals(a.getConfirmStatus())) {
+                return "待财务回执";
+            }
+            if (Integer.valueOf(2).equals(a.getConfirmStatus())) {
+                return "待确认到账";
+            }
+        }
+        return statusLabel(a.getStatus());
     }
 
     private void fillFlags(WfApproval a) {
@@ -1256,15 +1752,19 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         } catch (Exception e) {
             return;
         }
-        a.setCanWithdraw("PENDING".equals(a.getStatus()) && Objects.equals(a.getApplicantId(), loginId));
+        a.setCanWithdraw("PENDING".equals(a.getStatus())
+                && a.getApplicantId() != null
+                && a.getApplicantId() == loginId);
         a.setCanConfirm(Integer.valueOf(2).equals(a.getConfirmStatus()) && Objects.equals(a.getApplicantId(), loginId));
         a.setCanUploadReceipt(Integer.valueOf(1).equals(a.getConfirmStatus())
                 && List.of("APPROVED", "TIMEOUT_PASS").contains(a.getStatus())
-                && canFinanceHandle(loginId));
+                && canFinanceHandle(loginId, a.getCompanyId()));
         a.setCanRollback(List.of("APPROVED", "TIMEOUT_PASS").contains(a.getStatus())
                 && ApprovalTypes.canMoneyRollback(a.getType())
                 && a.getAmount() != null && a.getAmount().compareTo(java.math.BigDecimal.ZERO) > 0
-                && (Objects.equals(a.getApplicantId(), loginId) || StpUtil.hasRole("admin") || canFinanceHandle(loginId)));
+                && (Objects.equals(a.getApplicantId(), loginId)
+                || dataScopeService.isGlobalAdmin(loginId)
+                || canFinanceHandle(loginId, a.getCompanyId())));
         if ("PENDING".equals(a.getStatus())) {
             Long cnt = taskMapper.selectCount(new LambdaQueryWrapper<WfApprovalTask>()
                     .eq(WfApprovalTask::getApprovalId, a.getId())
@@ -1276,15 +1776,22 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
     }
 
-    private boolean canFinanceHandle(long loginId) {
-        List<String> roles = userService.getRoleCodes(loginId);
-        if (roles.contains("admin") || roles.contains(ROLE_FINANCE)) {
+    private boolean canFinanceHandle(long loginId, Long companyId) {
+        if (dataScopeService.isGlobalAdmin(loginId)) {
             return true;
         }
-        List<String> permissions = userService.getPermissions(loginId);
-        return permissions != null && (permissions.contains("finance:ledger:add")
-                || permissions.contains("finance:ledger:list")
-                || permissions.contains("*:*:*"));
+        if (companyId != null && !dataScopeService.visibleCompanyIds(loginId).contains(companyId)) {
+            return false;
+        }
+        return dataScopeService.hasRoleInCompany(loginId, ROLE_FINANCE, companyId)
+                || dataScopeService.hasRoleInCompany(loginId, "Gold", companyId);
+    }
+
+    private List<Long> listFinanceUserIds(Long companyId) {
+        Set<Long> ids = new HashSet<>();
+        ids.addAll(dataScopeService.listUserIdsByRoleCodeInCompany(ROLE_FINANCE, companyId));
+        ids.addAll(dataScopeService.listUserIdsByRoleCodeInCompany("Gold", companyId));
+        return new ArrayList<>(ids);
     }
 
     private void closePendingTasks(Long approvalId, String comment) {
@@ -1356,6 +1863,33 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
     }
 
+    private void fillFlowTip(WfApproval approval) {
+        boolean any = "ANY".equalsIgnoreCase(approval.getPassMode());
+        approval.setPassModeLabel(any ? "或签（一人通过即可）" : "会签（须全部通过）");
+        StringBuilder tip = new StringBuilder("已提交审批：").append(approval.getPassModeLabel());
+        if (approval.getAutoPass() != null && approval.getAutoPass() == 1 && approval.getTimeoutAt() != null) {
+            LocalDateTime start = approval.getCreateTime() != null ? approval.getCreateTime() : LocalDateTime.now();
+            long hours = java.time.Duration.between(start, approval.getTimeoutAt()).toHours();
+            if (hours < 1) {
+                hours = 1;
+            }
+            tip.append("，").append(hours).append("小时未操作自动通过");
+        } else {
+            tip.append("，无超时自动通过");
+        }
+        if (approval.getTasks() != null && !approval.getTasks().isEmpty()) {
+            String names = approval.getTasks().stream()
+                    .map(WfApprovalTask::getAssigneeName)
+                    .filter(StringUtils::hasText)
+                    .distinct()
+                    .collect(Collectors.joining("、"));
+            if (StringUtils.hasText(names)) {
+                tip.append("；审批人：").append(names);
+            }
+        }
+        approval.setFlowTip(tip.toString());
+    }
+
     private void fillLogNames(List<WfApprovalLog> logs) {
         Set<Long> ids = logs.stream().map(WfApprovalLog::getOperatorId).filter(Objects::nonNull).collect(Collectors.toSet());
         if (ids.isEmpty()) {
@@ -1387,11 +1921,29 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         };
     }
 
-    private FinPool resolvePool(Long poolId) {
-        FinPool pool = poolId != null ? poolMapper.selectById(poolId)
-                : poolMapper.selectOne(new LambdaQueryWrapper<FinPool>().eq(FinPool::getIsDefault, 1).last("LIMIT 1"));
+    private FinPool resolvePool(Long poolId, Long companyId) {
+        FinPool pool;
+        if (poolId != null) {
+            pool = poolMapper.selectById(poolId);
+        } else if (companyId != null) {
+            pool = poolMapper.selectOne(new LambdaQueryWrapper<FinPool>()
+                    .eq(FinPool::getIsDefault, 1)
+                    .eq(FinPool::getCompanyId, companyId)
+                    .last("LIMIT 1"));
+            if (pool == null) {
+                pool = poolMapper.selectOne(new LambdaQueryWrapper<FinPool>()
+                        .eq(FinPool::getCompanyId, companyId)
+                        .orderByAsc(FinPool::getId)
+                        .last("LIMIT 1"));
+            }
+        } else {
+            throw new BusinessException("无法确定资金池所属公司");
+        }
         if (pool == null) {
             throw new BusinessException("公司账户不存在");
+        }
+        if (companyId != null && pool.getCompanyId() != null && !companyId.equals(pool.getCompanyId())) {
+            throw new BusinessException("资金池与审批单不属于同一公司");
         }
         return pool;
     }
@@ -1405,5 +1957,68 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
 
     private BigDecimal nz(BigDecimal v) {
         return v == null ? BigDecimal.ZERO : v;
+    }
+
+    private boolean asBool(Object v) {
+        if (v == null) {
+            return false;
+        }
+        if (v instanceof Boolean b) {
+            return b;
+        }
+        String s = String.valueOf(v).trim();
+        return "true".equalsIgnoreCase(s) || "1".equals(s);
+    }
+
+    private void putIsoDate(Map<String, Object> data, JSONObject payload, String key) {
+        if (!payload.containsKey(key) || payload.get(key) == null) {
+            return;
+        }
+        try {
+            LocalDate date = parsePayloadLocalDate(payload, key);
+            if (date != null) {
+                data.put(key, date.toString());
+            }
+        } catch (BusinessException ignored) {
+            // 详情展示时保留原值，避免坏数据导致整单打不开
+        }
+    }
+
+    private LocalDate parsePayloadLocalDate(JSONObject payload, String key) {
+        Object raw = payload.get(key);
+        if (raw == null) {
+            return null;
+        }
+        if (raw instanceof LocalDate date) {
+            return date;
+        }
+        if (raw instanceof java.util.Date date) {
+            return date.toInstant().atZone(ZONE_CN).toLocalDate();
+        }
+        if (raw instanceof Number number) {
+            return localDateFromEpoch(number.longValue());
+        }
+        String text = String.valueOf(raw).trim();
+        if (!StringUtils.hasText(text) || "null".equalsIgnoreCase(text)) {
+            return null;
+        }
+        if (text.matches("\\d{10,13}")) {
+            return localDateFromEpoch(Long.parseLong(text));
+        }
+        if (text.length() >= 10 && Character.isDigit(text.charAt(0))) {
+            try {
+                return LocalDate.parse(text.substring(0, 10));
+            } catch (DateTimeParseException ignored) {
+                // fall through
+            }
+        }
+        throw new BusinessException("日期格式无法识别：" + text);
+    }
+
+    private LocalDate localDateFromEpoch(long value) {
+        Instant instant = value >= 1_000_000_000_000L
+                ? Instant.ofEpochMilli(value)
+                : Instant.ofEpochSecond(value);
+        return instant.atZone(ZONE_CN).toLocalDate();
     }
 }

@@ -5,6 +5,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Plus } from '@element-plus/icons-vue'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
+import { workflowApi } from '@/api/workflow'
+import { approvalFlowTip } from '@/utils/approvalTip'
 import TaskKanban from '@/components/task/TaskKanban.vue'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
 
@@ -20,6 +22,7 @@ const query = reactive({
 const list = ref<any[]>([])
 const total = ref(0)
 const users = ref<any[]>([])
+const companies = ref<any[]>([])
 
 const activeProjectId = ref<number | null>(null)
 const detail = ref<any>(null)
@@ -39,6 +42,7 @@ const isEdit = ref(false)
 const form = reactive<any>({
   name: '',
   code: '',
+  companyId: undefined as number | undefined,
   ownerId: undefined,
   status: 1,
   startDate: '',
@@ -47,7 +51,7 @@ const form = reactive<any>({
 })
 
 const statusMap: Record<number, string> = { 0: '筹备', 1: '进行中', 2: '已完成', 3: '已关闭' }
-const taskStatusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已取消' }
+const taskStatusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭' }
 const taskStatusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'> = {
   0: 'info',
   1: 'warning',
@@ -163,32 +167,54 @@ function open(row?: any) {
         id: d.id,
         name: d.name,
         code: d.code,
+        companyId: d.companyId,
+        companyName: d.companyName,
         ownerId: d.ownerId,
         status: d.status,
         startDate: d.startDate || '',
         endDate: d.endDate || '',
         description: d.description || '',
       })
+      loadOwners(d.companyId)
       dialog.value = true
     })
   } else {
+    const only = companies.value.length === 1 ? companies.value[0].id : undefined
     Object.assign(form, {
       id: undefined,
       name: '',
       code: '',
+      companyId: only,
+      companyName: undefined,
       ownerId: undefined,
       status: 1,
       startDate: '',
       endDate: '',
       description: '',
     })
+    loadOwners(only)
     dialog.value = true
   }
+}
+
+async function loadOwners(companyId?: number) {
+  users.value = companyId
+    ? await sysApi.userList({ companyId })
+    : await sysApi.userList()
+}
+
+async function onCompanyChange(companyId?: number) {
+  form.ownerId = undefined
+  await loadOwners(companyId)
 }
 
 async function save() {
   if (!form.name?.trim()) {
     ElMessage.warning('请填写项目名称')
+    return
+  }
+  if (!isEdit.value && !form.companyId) {
+    ElMessage.warning('请选择所属公司')
     return
   }
   saving.value = true
@@ -197,8 +223,8 @@ async function save() {
       await bizApi.saveProject(form, true)
       ElMessage.success('保存成功')
     } else {
-      await bizApi.saveProject(form, false)
-      ElMessage.success('已提交创建审批，需全体股东通过（3天未操作自动通过）')
+      const approval = await bizApi.saveProject(form, false)
+      ElMessage.success(approvalFlowTip(approval))
     }
     dialog.value = false
     await load()
@@ -211,9 +237,20 @@ async function save() {
 }
 
 async function remove(id: number) {
-  await ElMessageBox.confirm('删除项目需全体股东审批，确认提交？')
-  await bizApi.deleteProject(id)
-  ElMessage.success('已提交删除审批')
+  const project = list.value.find((p) => p.id === id) || detail.value
+  const companyId = project?.companyId
+  let confirmText = '删除项目需提交审批，确认提交？'
+  if (companyId) {
+    try {
+      const desc = await workflowApi.flowDescribe('PROJECT_DELETE', companyId)
+      confirmText = `${desc.tip}，确认提交删除审批？`
+    } catch {
+      /* 配置缺失时仍允许点确认，提交接口会给出明确错误 */
+    }
+  }
+  await ElMessageBox.confirm(confirmText)
+  const approval = await bizApi.deleteProject(id)
+  ElMessage.success(approvalFlowTip(approval, '已提交删除审批'))
   if (activeProjectId.value === id) backToList()
   await load()
 }
@@ -253,6 +290,7 @@ watch(detailTab, () => {
 })
 
 onMounted(async () => {
+  companies.value = await sysApi.myCompanies()
   users.value = await sysApi.userList()
   await load()
   const id = route.query.id
@@ -274,7 +312,7 @@ onMounted(async () => {
           <p class="page-desc">以项目卡片浏览；点进卡片查看看板与任务。分成请到「财务 → 项目账款」</p>
         </div>
         <div class="page-actions">
-          <el-button type="primary" :icon="Plus" @click="open()">新建项目</el-button>
+          <el-button v-permission="'project:add'" type="primary" :icon="Plus" @click="open()">新建项目</el-button>
         </div>
       </div>
 
@@ -322,12 +360,15 @@ onMounted(async () => {
           <div class="project-card__main">
             <div>
               <h3 class="project-card__title">{{ row.name }}</h3>
-              <div class="project-card__meta">负责人 {{ row.ownerName || '未指定' }}</div>
+              <div class="project-card__meta">
+                {{ row.companyName || '未指定公司' }} · 负责人 {{ row.ownerName || '未指定' }}
+              </div>
             </div>
             <el-icon class="project-card__icon" :size="40"><FolderOpened /></el-icon>
           </div>
           <div class="project-card__actions" @click.stop>
             <el-button
+              v-permission="'project:edit'"
               class="icon-btn"
               text
               aria-label="编辑"
@@ -337,6 +378,7 @@ onMounted(async () => {
               <el-icon :size="16"><EditPen /></el-icon>
             </el-button>
             <el-button
+              v-permission="'project:remove'"
               class="icon-btn is-danger"
               text
               aria-label="删除"
@@ -432,6 +474,7 @@ onMounted(async () => {
 
           <div class="project-hero__ops">
             <el-button
+              v-permission="'project:edit'"
               class="icon-btn"
               text
               aria-label="编辑"
@@ -441,6 +484,7 @@ onMounted(async () => {
               <el-icon :size="16"><EditPen /></el-icon>
             </el-button>
             <el-button
+              v-permission="'project:remove'"
               class="icon-btn is-danger"
               text
               aria-label="删除"
@@ -470,7 +514,13 @@ onMounted(async () => {
             <div class="panel-toolbar">
               <div class="filter-pills">
                 <button
-                  v-for="item in [{ label: '全部', value: undefined }, { label: '待办', value: 0 }, { label: '进行中', value: 1 }, { label: '已完成', value: 2 }]"
+                  v-for="item in [
+                    { label: '全部', value: undefined },
+                    { label: '待办', value: 0 },
+                    { label: '进行中', value: 1 },
+                    { label: '已完成', value: 2 },
+                    { label: '已关闭', value: 3 },
+                  ]"
                   :key="String(item.value)"
                   type="button"
                   class="filter-pill"
@@ -481,7 +531,7 @@ onMounted(async () => {
                 </button>
               </div>
               <div class="panel-toolbar__right">
-                <el-button size="small" type="primary" @click="createTask">新建任务</el-button>
+                <el-button v-permission="'project:task:add'" size="small" type="primary" @click="createTask">新建任务</el-button>
                 <el-button size="small" @click="goTaskManage">全部任务</el-button>
               </div>
             </div>
@@ -497,8 +547,7 @@ onMounted(async () => {
                     <el-tag :type="priorityType[row.priority]" size="small" effect="light">{{ priorityMap[row.priority] || '中' }}</el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="assigneeName" label="负责人" width="100" />
-                <el-table-column label="参与人员" min-width="140" show-overflow-tooltip>
+                <el-table-column label="参与人员" min-width="160" show-overflow-tooltip>
                   <template #default="{ row }">
                     {{ row.participantNames?.length ? row.participantNames.join('、') : '—' }}
                   </template>
@@ -542,6 +591,10 @@ onMounted(async () => {
                 <span class="info-value">{{ detail.code || '—' }}</span>
               </div>
               <div class="info-item">
+                <span class="info-label">所属公司</span>
+                <span class="info-value">{{ detail.companyName || '—' }}</span>
+              </div>
+              <div class="info-item">
                 <span class="info-label">负责人</span>
                 <span class="info-value">{{ detail.ownerName || '—' }}</span>
               </div>
@@ -565,10 +618,23 @@ onMounted(async () => {
 
     <el-dialog v-model="dialog" :title="isEdit ? '编辑项目' : '新建项目'" width="560px" :close-on-click-modal="false">
       <el-form label-width="90px">
+        <el-form-item label="所属公司" required>
+          <el-select
+            v-if="!isEdit"
+            v-model="form.companyId"
+            filterable
+            placeholder="选择公司"
+            style="width: 100%"
+            @change="onCompanyChange"
+          >
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+          <span v-else class="info-value">{{ form.companyName || '—' }}</span>
+        </el-form-item>
         <el-form-item label="名称" required><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="编号"><el-input v-model="form.code" /></el-form-item>
         <el-form-item label="负责人">
-          <el-select v-model="form.ownerId" filterable clearable style="width: 100%">
+          <el-select v-model="form.ownerId" filterable clearable style="width: 100%" :disabled="!isEdit && !form.companyId">
             <el-option v-for="u in users" :key="u.id" :label="u.nickname || u.username" :value="u.id" />
           </el-select>
         </el-form-item>

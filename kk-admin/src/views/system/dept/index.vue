@@ -51,7 +51,7 @@ onMounted(load)
         <p class="page-desc">维护组织层级；可在部门下新增下级</p>
       </div>
       <div class="page-actions">
-        <el-button type="primary" @click="open()">新建部门</el-button>
+        <el-button v-permission="'system:dept:add'" type="primary" @click="open()">新建部门</el-button>
       </div>
     </div>
 
@@ -68,13 +68,13 @@ onMounted(load)
         <el-table-column label="操作" width="140" fixed="right" align="center">
           <template #default="{ row }">
             <div class="icon-ops">
-              <el-button text aria-label="新增下级" title="新增下级" @click="open(undefined, row.id)">
+              <el-button v-permission="'system:dept:add'" text aria-label="新增下级" title="新增下级" @click="open(undefined, row.id)">
                 <el-icon :size="16"><Plus /></el-icon>
               </el-button>
-              <el-button text aria-label="编辑" title="编辑" @click="open(row)">
+              <el-button v-permission="'system:dept:edit'" text aria-label="编辑" title="编辑" @click="open(row)">
                 <el-icon :size="16"><EditPen /></el-icon>
               </el-button>
-              <el-button text class="is-danger" aria-label="删除" title="删除" @click="remove(row.id)">
+              <el-button v-permission="'system:dept:remove'" text class="is-danger" aria-label="删除" title="删除" @click="remove(row.id)">
                 <el-icon :size="16"><Delete /></el-icon>
               </el-button>
             </div>

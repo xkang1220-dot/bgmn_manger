@@ -9,6 +9,7 @@ import lombok.Data;
 import lombok.EqualsAndHashCode;
 
 import java.time.LocalDate;
+import java.util.List;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
@@ -53,4 +54,8 @@ public class HrArchive extends BaseEntity {
 
     @TableField(exist = false)
     private String phone;
+
+    /** 个人收款方式（详情/保存） */
+    @TableField(exist = false)
+    private List<HrPayMethod> payMethods;
 }

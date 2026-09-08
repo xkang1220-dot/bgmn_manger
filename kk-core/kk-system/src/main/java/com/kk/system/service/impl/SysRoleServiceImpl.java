@@ -3,6 +3,7 @@ package com.kk.system.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.kk.common.exception.BusinessException;
+import com.kk.system.config.StpInterfaceImpl;
 import com.kk.system.entity.SysRole;
 import com.kk.system.entity.SysRoleDept;
 import com.kk.system.entity.SysRoleMenu;
@@ -97,14 +98,25 @@ public class SysRoleServiceImpl extends ServiceImpl<SysRoleMapper, SysRole> impl
 
     private void saveMenus(Long roleId, List<Long> menuIds) {
         roleMenuMapper.delete(new LambdaQueryWrapper<SysRoleMenu>().eq(SysRoleMenu::getRoleId, roleId));
-        if (menuIds == null) {
-            return;
+        if (menuIds != null) {
+            for (Long menuId : menuIds) {
+                SysRoleMenu rel = new SysRoleMenu();
+                rel.setRoleId(roleId);
+                rel.setMenuId(menuId);
+                roleMenuMapper.insert(rel);
+            }
         }
-        for (Long menuId : menuIds) {
-            SysRoleMenu rel = new SysRoleMenu();
-            rel.setRoleId(roleId);
-            rel.setMenuId(menuId);
-            roleMenuMapper.insert(rel);
+        clearUsersPermissionCache(roleId);
+    }
+
+    /** 角色菜单变更后清掉该角色用户的会话权限缓存，下次鉴权重新拉取 */
+    private void clearUsersPermissionCache(Long roleId) {
+        List<SysUserRole> users = userRoleMapper.selectList(
+                new LambdaQueryWrapper<SysUserRole>().eq(SysUserRole::getRoleId, roleId));
+        for (SysUserRole ur : users) {
+            if (ur.getUserId() != null) {
+                StpInterfaceImpl.clearPermissionCache(ur.getUserId());
+            }
         }
     }
 

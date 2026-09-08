@@ -2,6 +2,7 @@ package com.kk.admin.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.dev33.satoken.annotation.SaMode;
+import cn.dev33.satoken.stp.StpUtil;
 import com.kk.biz.entity.PmTask;
 import com.kk.biz.entity.PmTaskComment;
 import com.kk.biz.entity.PmTaskFlow;
@@ -29,9 +30,9 @@ public class TaskController {
     public Result<PageResult<PmTask>> page(
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long pageSize,
-            Long projectId, Integer status, Integer priority, Long assigneeId, String title, Boolean overdue) {
+            Long projectId, Integer status, Integer priority, Long participantId, String title, Boolean overdue) {
         return Result.ok(PageResult.of(
-                taskService.pageTasks(page, pageSize, projectId, status, priority, assigneeId, title, overdue)));
+                taskService.pageTasks(page, pageSize, projectId, status, priority, participantId, title, overdue)));
     }
 
     @GetMapping("/board")
@@ -44,6 +45,12 @@ public class TaskController {
     @SaCheckPermission("project:task:list")
     public Result<Map<String, Object>> summary(Long projectId) {
         return Result.ok(taskService.summary(projectId));
+    }
+
+    /** 当前登录用户相关任务：参与或自己创建 */
+    @GetMapping("/related")
+    public Result<List<PmTask>> related() {
+        return Result.ok(taskService.listRelatedTasks(StpUtil.getLoginIdAsLong()));
     }
 
     @GetMapping("/{id}")
@@ -69,7 +76,7 @@ public class TaskController {
     @PutMapping("/{id}/status")
     @SaCheckPermission("project:task:edit")
     public Result<Void> updateStatus(@PathVariable Long id, @RequestBody StatusRequest request) {
-        taskService.updateStatus(id, request.getStatus(), request.getImageFileIds());
+        taskService.updateStatus(id, request.getStatus(), request.getImageFileIds(), request.getRemark());
         return Result.ok();
     }
 
@@ -119,7 +126,7 @@ public class TaskController {
     }
 
     @PutMapping("/{id}/transfer")
-    @SaCheckPermission("project:task:edit")
+    @SaCheckPermission(value = {"project:task:edit", "project:task:list"}, mode = SaMode.OR)
     public Result<Void> transfer(@PathVariable Long id, @RequestBody TransferRequest request) {
         taskService.transfer(id, request.getAssigneeId(), request.getRemark(), request.getImageFileIds());
         return Result.ok();
@@ -129,6 +136,8 @@ public class TaskController {
     public static class StatusRequest {
         private Integer status;
         private List<Long> imageFileIds;
+        /** 关闭任务时必填 */
+        private String remark;
     }
 
     @Data

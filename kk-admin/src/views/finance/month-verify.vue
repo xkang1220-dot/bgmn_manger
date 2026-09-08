@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { workflowApi } from '@/api/workflow'
+import { approvalFlowTip } from '@/utils/approvalTip'
 
 const list = ref<any[]>([])
 const channels = ref<any[]>([])
@@ -70,10 +71,14 @@ async function submit() {
     return
   }
   const ch = channelMap.value.get(form.channelId)
-  await workflowApi.submit({
+  if (!ch?.poolId) {
+    ElMessage.warning('所选渠道未绑定资金池，无法确定所属公司')
+    return
+  }
+  const approval = await workflowApi.submit({
     type: 'MONTHLY_VERIFY',
     title: `月度核验 · ${form.verifyMonth} · ${ch?.name || ''}`,
-    poolId: ch?.poolId,
+    poolId: ch.poolId,
     remark: form.remark,
     voucherFileIds: voucherFiles.value.map((f) => f.id),
     payload: {
@@ -84,7 +89,7 @@ async function submit() {
       voucherFileIds: voucherFiles.value.map((f) => f.id),
     },
   })
-  ElMessage.success('已提交财务审批')
+  ElMessage.success(approvalFlowTip(approval, '已提交财务审批'))
   dialog.value = false
   await load()
 }

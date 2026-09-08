@@ -1,14 +1,19 @@
 package com.kk.biz.service.impl;
 
+import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.kk.biz.dto.LedgerCreateRequest;
 import com.kk.biz.dto.LedgerQuery;
+import com.kk.biz.dto.LedgerRegisterResult;
+import com.kk.biz.dto.LedgerThresholdSaveRequest;
 import com.kk.biz.dto.ManualShareItem;
 import com.kk.biz.dto.ProjectManualSettleRequest;
 import com.kk.biz.dto.ProjectSettleRequest;
 import com.kk.biz.entity.FinLedger;
+import com.kk.biz.entity.FinLedgerThreshold;
 import com.kk.biz.entity.FinPayChannel;
 import com.kk.biz.entity.FinPool;
 import com.kk.biz.entity.FinProjectAccount;
@@ -16,21 +21,32 @@ import com.kk.biz.entity.HrWallet;
 import com.kk.biz.entity.PmProject;
 import com.kk.biz.entity.PmProjectMember;
 import com.kk.biz.entity.SysFile;
+import com.kk.biz.entity.WfApproval;
 import com.kk.biz.mapper.FinLedgerMapper;
 import com.kk.biz.mapper.FinPoolMapper;
 import com.kk.biz.mapper.FinProjectAccountMapper;
 import com.kk.biz.mapper.HrWalletMapper;
 import com.kk.biz.mapper.PmProjectMapper;
 import com.kk.biz.mapper.PmProjectMemberMapper;
+import com.kk.biz.service.FinLedgerThresholdService;
 import com.kk.biz.service.FinPayChannelService;
 import com.kk.biz.service.FinanceService;
 import com.kk.biz.service.HrWalletService;
 import com.kk.biz.service.SysFileService;
+import com.kk.biz.service.WfApprovalService;
+import com.kk.biz.dto.ApprovalSubmitRequest;
 import com.kk.biz.support.BizNoGenerator;
+import com.kk.biz.workflow.ApprovalTypes;
 import com.kk.common.exception.BusinessException;
+import com.kk.system.entity.SysDept;
 import com.kk.system.entity.SysUser;
+import com.kk.system.service.DataScopeService;
+import com.kk.system.service.SysDeptService;
+import com.kk.system.service.SysNotificationService;
 import com.kk.system.service.SysUserService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -43,6 +59,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -55,21 +72,54 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
     private final FinProjectAccountMapper projectAccountMapper;
     private final HrWalletService walletService;
     private final SysUserService userService;
+    private final SysDeptService deptService;
+    private final DataScopeService dataScopeService;
     private final PmProjectMapper projectMapper;
     private final PmProjectMemberMapper memberMapper;
     private final SysFileService fileService;
     private final BizNoGenerator bizNoGenerator;
     private final FinPayChannelService payChannelService;
+    private final FinLedgerThresholdService ledgerThresholdService;
+    private final SysNotificationService notificationService;
     /** 审批动账时带入流水 approvalId（勿改为构造注入） */
     private final ThreadLocal<Long> approvalIdHolder = ThreadLocal.withInitial(() -> null);
 
+    @Lazy
+    @Autowired
+    private WfApprovalService wfApprovalService;
+
     @Override
     public FinPool getDefaultPool() {
-        FinPool pool = getOne(new LambdaQueryWrapper<FinPool>().eq(FinPool::getIsDefault, 1).last("LIMIT 1"));
-        if (pool == null) {
-            pool = getOne(new LambdaQueryWrapper<FinPool>().last("LIMIT 1"));
+        Long companyId = resolveLoginCompanyId();
+        if (companyId != null) {
+            FinPool pool = getOne(new LambdaQueryWrapper<FinPool>()
+                    .eq(FinPool::getIsDefault, 1)
+                    .eq(FinPool::getCompanyId, companyId)
+                    .last("LIMIT 1"));
+            if (pool == null) {
+                pool = getOne(new LambdaQueryWrapper<FinPool>()
+                        .eq(FinPool::getCompanyId, companyId)
+                        .orderByAsc(FinPool::getId)
+                        .last("LIMIT 1"));
+            }
+            if (pool != null) {
+                return pool;
+            }
+            throw new BusinessException("当前公司未配置资金池");
         }
-        return pool;
+        if (isLoginGlobalAdmin()) {
+            throw new BusinessException("请指定资金池（管理员未绑定主部门公司时不可自动选池）");
+        }
+        throw new BusinessException("无法确定所属公司，请先配置部门");
+    }
+
+    @Override
+    public List<FinPool> listVisiblePools() {
+        LambdaQueryWrapper<FinPool> wrapper = new LambdaQueryWrapper<FinPool>().orderByAsc(FinPool::getId);
+        applyPoolCompanyFilter(wrapper);
+        List<FinPool> pools = list(wrapper);
+        fillPoolCompanyNames(pools);
+        return pools;
     }
 
     @Override
@@ -79,13 +129,19 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         if (initial.compareTo(BigDecimal.ZERO) < 0) {
             throw new BusinessException("初始余额不能为负数");
         }
+        if (pool.getCompanyId() == null) {
+            throw new BusinessException("请选择所属公司");
+        }
+        if (StpUtil.isLogin() && !isLoginGlobalAdmin() && !visibleCompanies().contains(pool.getCompanyId())) {
+            throw new BusinessException("不能为其他公司创建资金池");
+        }
         // 余额一律经流水变更：先建池为 0，有初始金额再入账留痕
         pool.setBalance(BigDecimal.ZERO);
         if (pool.getStatus() == null) {
             pool.setStatus(1);
         }
         if (Integer.valueOf(1).equals(pool.getIsDefault())) {
-            clearDefault();
+            clearDefault(pool.getCompanyId());
         } else if (pool.getIsDefault() == null) {
             pool.setIsDefault(0);
         }
@@ -113,8 +169,14 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
     public void updatePool(FinPool pool) {
         // 禁止直接改余额，动账必须走 createLedger / 分钱接口并写流水
         pool.setBalance(null);
+        pool.setCompanyId(null);
+        FinPool db = getById(pool.getId());
+        if (db == null) {
+            throw new BusinessException("资金池不存在");
+        }
+        assertPoolVisible(db);
         if (Integer.valueOf(1).equals(pool.getIsDefault())) {
-            clearDefault();
+            clearDefault(db.getCompanyId());
         }
         updateById(pool);
     }
@@ -147,6 +209,7 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
                     .or().like(FinLedger::getTitle, kw)
                     .or().like(FinLedger::getRemark, kw));
         }
+        applyCompanyFilter(wrapper);
         Page<FinLedger> result = ledgerMapper.selectPage(new Page<>(query.getPage(), query.getPageSize()), wrapper);
         fillLedgers(result.getRecords());
         return result;
@@ -177,6 +240,141 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         } finally {
             approvalIdHolder.remove();
         }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public LedgerRegisterResult registerCompanyLedger(LedgerCreateRequest request) {
+        if (request == null) {
+            throw new BusinessException("请求不能为空");
+        }
+        if (!"POOL".equals(request.getAccountType())) {
+            request.setAccountType("POOL");
+        }
+        String bizType = request.getBizType() == null ? "" : request.getBizType().trim();
+        if (!List.of("INCOME", "EXPENSE").contains(bizType)) {
+            throw new BusinessException("仅支持公司入账或出账");
+        }
+        if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("金额必须大于 0");
+        }
+        if (request.getPoolId() == null) {
+            throw new BusinessException("请选择资金池");
+        }
+        FinPool pool = getById(request.getPoolId());
+        if (pool == null) {
+            throw new BusinessException("资金池不存在");
+        }
+        if (pool.getCompanyId() == null) {
+            throw new BusinessException("资金池未绑定公司");
+        }
+        if ("INCOME".equals(bizType) && request.getChannelId() == null) {
+            throw new BusinessException("入账请选择收款渠道");
+        }
+
+        // 入账：始终财务审批
+        if ("INCOME".equals(bizType)) {
+            return submitLedgerApproval(request, pool.getCompanyId(), false);
+        }
+
+        // 出账：未启用阈值 → 财务审批；启用后按档分流
+        FinLedgerThreshold cfg = ledgerThresholdService.findEnabled(pool.getCompanyId());
+        if (cfg == null) {
+            return submitLedgerApproval(request, pool.getCompanyId(), false);
+        }
+        BigDecimal amount = request.getAmount();
+        BigDecimal notifyLine = cfg.getNotifyThreshold() == null ? BigDecimal.ZERO : cfg.getNotifyThreshold();
+        BigDecimal approveLine = cfg.getApproveThreshold() == null ? BigDecimal.ZERO : cfg.getApproveThreshold();
+
+        if (amount.compareTo(approveLine) >= 0) {
+            return submitLedgerApproval(request, pool.getCompanyId(), true);
+        }
+
+        createLedger(request);
+        if (amount.compareTo(notifyLine) >= 0) {
+            boolean notified = notifyShareholdersExpense(pool.getCompanyId(), amount, request.getTitle(), request.getRemark());
+            if (notified) {
+                return LedgerRegisterResult.direct("已出账，并已通知该公司股东");
+            }
+            return LedgerRegisterResult.direct("已出账（该公司暂无其他股东可通知）");
+        }
+        return LedgerRegisterResult.direct("已直接出账（未达通知线）");
+    }
+
+    @Override
+    public FinLedgerThreshold getLedgerThreshold(Long companyId) {
+        return ledgerThresholdService.getOrDefault(companyId);
+    }
+
+    @Override
+    public void saveLedgerThreshold(LedgerThresholdSaveRequest request) {
+        ledgerThresholdService.save(request);
+    }
+
+    private LedgerRegisterResult submitLedgerApproval(LedgerCreateRequest request, Long companyId, boolean shareholderAll) {
+        ApprovalSubmitRequest submit = new ApprovalSubmitRequest();
+        submit.setType(ApprovalTypes.LEDGER_REGISTER);
+        String typeLabel = "INCOME".equals(request.getBizType()) ? "入账" : "出账";
+        submit.setTitle(StringUtils.hasText(request.getTitle()) ? request.getTitle() : ("总账" + typeLabel));
+        submit.setAmount(request.getAmount());
+        submit.setPoolId(request.getPoolId());
+        submit.setProjectId(request.getProjectId());
+        submit.setCompanyId(companyId);
+        submit.setRemark(request.getRemark());
+        submit.setVoucherFileIds(request.getVoucherFileIds());
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("bizType", request.getBizType());
+        payload.put("accountType", "POOL");
+        payload.put("poolId", request.getPoolId());
+        payload.put("channelId", request.getChannelId());
+        payload.put("projectId", request.getProjectId());
+        payload.put("amount", request.getAmount());
+        payload.put("feeMode", request.getFeeMode());
+        payload.put("feeValue", request.getFeeValue());
+        payload.put("title", request.getTitle());
+        payload.put("remark", request.getRemark());
+        payload.put("voucherFileIds", request.getVoucherFileIds());
+        if (shareholderAll) {
+            payload.put("forceShareholderAll", true);
+        }
+        submit.setPayload(payload);
+        WfApproval approval = wfApprovalService.submit(submit);
+        String msg = shareholderAll ? "已提交全体股东会签，通过后才会出账" : "已提交财务审批，通过后才会入账";
+        if ("EXPENSE".equals(request.getBizType()) && !shareholderAll) {
+            msg = "已提交财务审批，通过后才会出账";
+        }
+        return LedgerRegisterResult.approval(approval, msg);
+    }
+
+    /** @return true 若至少通知到一名股东（不含操作者本人） */
+    private boolean notifyShareholdersExpense(Long companyId, BigDecimal amount, String title, String remark) {
+        List<Long> shareholderIds = dataScopeService.listUserIdsByRoleCodeInCompany("shareholder", companyId);
+        if (shareholderIds.isEmpty()) {
+            return false;
+        }
+        long loginId = StpUtil.getLoginIdAsLong();
+        List<Long> targets = shareholderIds.stream().filter(id -> !Objects.equals(id, loginId)).toList();
+        if (targets.isEmpty()) {
+            return false;
+        }
+        String operator = "用户";
+        SysUser u = userService.getById(loginId);
+        if (u != null) {
+            operator = StringUtils.hasText(u.getNickname()) ? u.getNickname() : u.getUsername();
+        }
+        String subject = StringUtils.hasText(title) ? title : "公司出账";
+        String content = operator + " 登记公司出账 " + amount.stripTrailingZeros().toPlainString()
+                + " 元（" + subject + "）"
+                + (StringUtils.hasText(remark) ? "，备注：" + remark.trim() : "")
+                + "，已直接出账，请知悉。";
+        notificationService.notifyUsers(
+                targets,
+                "公司出账通知 · " + amount.stripTrailingZeros().toPlainString() + " 元",
+                content,
+                "ledger_expense",
+                null,
+                "/finance/ledger");
+        return true;
     }
 
     @Override
@@ -301,7 +499,9 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
     @Override
     public Map<String, Object> summary() {
         Map<String, Object> map = new HashMap<>();
-        List<FinPool> pools = list(new LambdaQueryWrapper<FinPool>().orderByAsc(FinPool::getId));
+        LambdaQueryWrapper<FinPool> poolWrapper = new LambdaQueryWrapper<FinPool>().orderByAsc(FinPool::getId);
+        applyPoolCompanyFilter(poolWrapper);
+        List<FinPool> pools = list(poolWrapper);
         BigDecimal poolTotal = pools.stream()
                 .map(p -> p.getBalance() == null ? BigDecimal.ZERO : p.getBalance())
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -313,10 +513,18 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         BigDecimal walletTotal = new BigDecimal(String.valueOf(walletAgg.getOrDefault("total", "0")));
         long walletCount = Long.parseLong(String.valueOf(walletAgg.getOrDefault("cnt", "0")));
 
-        Map<String, Object> projectAgg = projectAccountMapper.selectMaps(
-                new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<FinProjectAccount>()
-                        .select("IFNULL(SUM(balance), 0) AS total")
-        ).stream().findFirst().orElse(Map.of());
+        QueryWrapper<FinProjectAccount> projectAggWrapper = new QueryWrapper<FinProjectAccount>()
+                .select("IFNULL(SUM(balance), 0) AS total");
+        if (!isLoginGlobalAdmin()) {
+            Set<Long> companies = visibleCompanies();
+            if (companies.isEmpty()) {
+                projectAggWrapper.eq("id", -1);
+            } else {
+                projectAggWrapper.in("company_id", companies);
+            }
+        }
+        Map<String, Object> projectAgg = projectAccountMapper.selectMaps(projectAggWrapper)
+                .stream().findFirst().orElse(Map.of());
         BigDecimal projectTotal = new BigDecimal(String.valueOf(projectAgg.getOrDefault("total", "0")));
         BigDecimal assetsTotal = poolTotal.add(projectTotal).add(walletTotal);
 
@@ -326,7 +534,9 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         map.put("assetsTotal", assetsTotal);
         map.put("poolCount", pools.size());
         map.put("walletCount", walletCount);
-        map.put("projectCount", projectMapper.selectCount(null));
+        LambdaQueryWrapper<PmProject> projectCountWrapper = new LambdaQueryWrapper<>();
+        applyProjectCompanyFilter(projectCountWrapper);
+        map.put("projectCount", projectMapper.selectCount(projectCountWrapper));
         map.put("pools", pools);
         return map;
     }
@@ -515,7 +725,18 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         if (pool == null) {
             throw new BusinessException("资金池不存在");
         }
+        assertPoolVisible(pool);
         return pool;
+    }
+
+    private void assertPoolVisible(FinPool pool) {
+        if (pool == null || isLoginGlobalAdmin()) {
+            return;
+        }
+        Set<Long> companies = visibleCompanies();
+        if (pool.getCompanyId() == null || !companies.contains(pool.getCompanyId())) {
+            throw new BusinessException("无权操作该资金池");
+        }
     }
 
     private void ensurePoolEnabled(FinPool pool) {
@@ -580,8 +801,90 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         ledger.setTitle(title);
         ledger.setRemark(remark);
         ledger.setOccurTime(LocalDateTime.now());
+        ledger.setCompanyId(resolveLedgerCompanyId(poolId, projectId));
         ledgerMapper.insert(ledger);
         return ledger.getId();
+    }
+
+    private Long resolveLedgerCompanyId(Long poolId, Long projectId) {
+        if (projectId != null) {
+            PmProject project = projectMapper.selectById(projectId);
+            if (project != null && project.getCompanyId() != null) {
+                return project.getCompanyId();
+            }
+        }
+        if (poolId != null) {
+            FinPool pool = getById(poolId);
+            if (pool != null && pool.getCompanyId() != null) {
+                return pool.getCompanyId();
+            }
+        }
+        return resolveLoginCompanyId();
+    }
+
+    private Long resolveLoginCompanyId() {
+        try {
+            long uid = StpUtil.getLoginIdAsLong();
+            SysUser user = userService.getById(uid);
+            if (user != null) {
+                return deptService.resolveCompanyId(user.getDeptId());
+            }
+        } catch (Exception ignored) {
+            // 无登录上下文时跳过
+        }
+        return null;
+    }
+
+    private boolean isLoginGlobalAdmin() {
+        try {
+            return dataScopeService.isGlobalAdmin(StpUtil.getLoginIdAsLong());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private Set<Long> visibleCompanies() {
+        try {
+            return dataScopeService.visibleCompanyIds(StpUtil.getLoginIdAsLong());
+        } catch (Exception ignored) {
+            return Set.of();
+        }
+    }
+
+    private void applyCompanyFilter(LambdaQueryWrapper<FinLedger> wrapper) {
+        if (isLoginGlobalAdmin()) {
+            return;
+        }
+        Set<Long> companies = visibleCompanies();
+        if (companies.isEmpty()) {
+            wrapper.eq(FinLedger::getId, -1L);
+            return;
+        }
+        wrapper.in(FinLedger::getCompanyId, companies);
+    }
+
+    private void applyPoolCompanyFilter(LambdaQueryWrapper<FinPool> wrapper) {
+        if (isLoginGlobalAdmin()) {
+            return;
+        }
+        Set<Long> companies = visibleCompanies();
+        if (companies.isEmpty()) {
+            wrapper.eq(FinPool::getId, -1L);
+            return;
+        }
+        wrapper.in(FinPool::getCompanyId, companies);
+    }
+
+    private void applyProjectCompanyFilter(LambdaQueryWrapper<PmProject> wrapper) {
+        if (isLoginGlobalAdmin()) {
+            return;
+        }
+        Set<Long> companies = visibleCompanies();
+        if (companies.isEmpty()) {
+            wrapper.eq(PmProject::getId, -1L);
+            return;
+        }
+        wrapper.in(PmProject::getCompanyId, companies);
     }
 
     private void bindVouchers(java.util.List<Long> fileIds, Long ledgerId) {
@@ -668,8 +971,32 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         }
     }
 
-    private void clearDefault() {
-        List<FinPool> defaults = list(new LambdaQueryWrapper<FinPool>().eq(FinPool::getIsDefault, 1));
+    private void fillPoolCompanyNames(List<FinPool> pools) {
+        if (pools == null || pools.isEmpty()) {
+            return;
+        }
+        Set<Long> companyIds = pools.stream()
+                .map(FinPool::getCompanyId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        if (companyIds.isEmpty()) {
+            return;
+        }
+        Map<Long, String> nameMap = deptService.listByIds(companyIds).stream()
+                .collect(Collectors.toMap(SysDept::getId, SysDept::getName, (a, b) -> a));
+        for (FinPool pool : pools) {
+            if (pool.getCompanyId() != null) {
+                pool.setCompanyName(nameMap.get(pool.getCompanyId()));
+            }
+        }
+    }
+
+    private void clearDefault(Long companyId) {
+        LambdaQueryWrapper<FinPool> wrapper = new LambdaQueryWrapper<FinPool>().eq(FinPool::getIsDefault, 1);
+        if (companyId != null) {
+            wrapper.eq(FinPool::getCompanyId, companyId);
+        }
+        List<FinPool> defaults = list(wrapper);
         for (FinPool pool : defaults) {
             pool.setIsDefault(0);
             updateById(pool);

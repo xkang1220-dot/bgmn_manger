@@ -28,6 +28,13 @@ public interface FinProjectAccountService extends IService<FinProjectAccount> {
     /** 项目支出（报销/工资），扣项目可用余额 */
     void expense(Long projectId, BigDecimal amount, Long approvalId, String title, String remark);
 
+    /**
+     * 项目支出转入个人钱包：项目结余−、钱包+；公司总账不动。
+     * @param bizType 流水类型，如 SALARY / REIMBURSE
+     */
+    void expenseToWallet(Long projectId, Long userId, BigDecimal amount, Long approvalId,
+                         String bizType, String title, String remark);
+
     /** 项目分成到个人 */
     void settleToWallets(Long projectId, Long poolId, Map<Long, BigDecimal> shares, Long approvalId, String remark);
 

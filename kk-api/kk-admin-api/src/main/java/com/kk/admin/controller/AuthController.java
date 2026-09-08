@@ -4,6 +4,7 @@ import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.crypto.digest.BCrypt;
 import com.kk.common.exception.BusinessException;
 import com.kk.common.result.Result;
+import com.kk.system.config.StpInterfaceImpl;
 import com.kk.system.entity.SysUser;
 import com.kk.system.service.SysMenuService;
 import com.kk.system.service.SysUserService;
@@ -53,6 +54,8 @@ public class AuthController {
     @GetMapping("/info")
     public Result<Map<String, Object>> info() {
         Long userId = StpUtil.getLoginIdAsLong();
+        // 刷新会话内权限缓存，角色菜单改完后刷新页面即可生效（无需重新登录）
+        StpInterfaceImpl.clearPermissionCache(userId);
         SysUser user = userService.getById(userId);
         if (user == null) {
             throw new BusinessException(401, "用户不存在");

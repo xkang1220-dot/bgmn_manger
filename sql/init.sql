@@ -51,12 +51,14 @@ CREATE TABLE sys_user (
     totp_secret_key  VARCHAR(512) DEFAULT NULL,
     totp_enabled     TINYINT      DEFAULT 0,
     totp_verify_time DATETIME     DEFAULT NULL,
+    task_query_code  VARCHAR(4)  DEFAULT NULL COMMENT '任务公开查询码',
     create_time DATETIME     DEFAULT CURRENT_TIMESTAMP,
     update_time DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     create_by   BIGINT       DEFAULT NULL,
     update_by   BIGINT       DEFAULT NULL,
     deleted     TINYINT      DEFAULT 0,
-    UNIQUE KEY uk_username (username)
+    UNIQUE KEY uk_username (username),
+    UNIQUE KEY uk_task_query_code (task_query_code)
 ) COMMENT='系统账号';
 
 CREATE TABLE sys_role (

@@ -1,3 +1,19 @@
+export interface UserDeptBinding {
+  deptId?: number
+  dataScope?: number
+  isPrimary?: number
+  deptName?: string
+  companyId?: number
+}
+
+export interface UserRoleBinding {
+  roleId?: number
+  companyId?: number
+  roleName?: string
+  roleCode?: string
+  companyName?: string
+}
+
 export interface UserInfo {
   id: number
   username: string
@@ -9,6 +25,9 @@ export interface UserInfo {
   status?: number
   deptId?: number
   roleIds?: number[]
+  userDepts?: UserDeptBinding[]
+  roleBindings?: UserRoleBinding[]
+  taskQueryCode?: string
 }
 
 export interface MenuInfo {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import KkLogoMark from '@/components/KkLogoMark.vue'
 import { ElMessage } from 'element-plus'
@@ -15,7 +15,7 @@ const totpDigits = ref<string[]>(Array(6).fill(''))
 const totpInputs = ref<HTMLInputElement[]>([])
 let totpStatusRequestId = 0
 
-const form = reactive({ username: 'admin', password: 'admin123' })
+const form = reactive({ username: '', password: '' })
 const totpCode = computed(() => totpDigits.value.join(''))
 
 function resetTotpInput() {
@@ -102,7 +102,7 @@ async function onLogin() {
       totpCode: totpRequired.value ? totpCode.value : undefined,
     })
     ElMessage.success('登录成功')
-    await router.push('/dashboard')
+    await router.push('/account')
   } catch {
     if (totpRequired.value) {
       resetTotpInput()
@@ -113,9 +113,6 @@ async function onLogin() {
   }
 }
 
-onMounted(() => {
-  if (form.username.trim()) void checkTotpByUsername()
-})
 </script>
 
 <template>
@@ -149,6 +146,8 @@ onMounted(() => {
               size="large"
               placeholder="账号"
               prefix-icon="User"
+              autocomplete="username"
+              name="username"
               @blur="checkTotpByUsername"
             />
           </el-form-item>
@@ -160,6 +159,8 @@ onMounted(() => {
               show-password
               placeholder="密码"
               prefix-icon="Lock"
+              autocomplete="current-password"
+              name="password"
             />
           </el-form-item>
           <el-form-item v-if="totpRequired">
@@ -190,8 +191,6 @@ onMounted(() => {
             登录
           </el-button>
         </el-form>
-
-        <div class="login-hint">演示账号 admin / admin123</div>
       </section>
     </div>
   </div>
@@ -350,13 +349,6 @@ onMounted(() => {
   font-size: 15px;
   font-weight: 600;
   margin-top: 4px;
-}
-
-.login-hint {
-  margin-top: 20px;
-  text-align: center;
-  font-size: 13px;
-  color: #94a3b8;
 }
 
 .totp-label {

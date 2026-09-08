@@ -20,6 +20,15 @@ public class StpInterfaceImpl implements StpInterface {
     private static final String CACHE_KEY_PERMISSIONS = "user_permissions";
     private static final String CACHE_KEY_ROLES = "user_roles";
 
+    /** 角色菜单变更后调用，使下次鉴权重新拉权限 */
+    public static void clearPermissionCache(Object loginId) {
+        SaSession session = StpUtil.getSessionByLoginId(loginId, false);
+        if (session != null) {
+            session.delete(CACHE_KEY_PERMISSIONS);
+            session.delete(CACHE_KEY_ROLES);
+        }
+    }
+
     @Override
     public List<String> getPermissionList(Object loginId, String loginType) {
         SaSession session = StpUtil.getSessionByLoginId(loginId);

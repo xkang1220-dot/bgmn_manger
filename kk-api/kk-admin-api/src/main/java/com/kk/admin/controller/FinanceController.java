@@ -4,10 +4,13 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.dev33.satoken.annotation.SaMode;
 import com.kk.biz.dto.LedgerCreateRequest;
 import com.kk.biz.dto.LedgerQuery;
+import com.kk.biz.dto.LedgerRegisterResult;
+import com.kk.biz.dto.LedgerThresholdSaveRequest;
 import com.kk.biz.dto.ProjectManualSettleRequest;
 import com.kk.biz.dto.ProjectSettleRequest;
 import com.kk.biz.dto.ProjectShareSaveRequest;
 import com.kk.biz.entity.FinLedger;
+import com.kk.biz.entity.FinLedgerThreshold;
 import com.kk.biz.entity.FinPool;
 import com.kk.biz.entity.HrWallet;
 import com.kk.biz.entity.PmProject;
@@ -48,7 +51,7 @@ public class FinanceController {
     @GetMapping("/pool/list")
     @SaCheckPermission(value = {"finance:pool:list", "finance:ledger:list", "finance:ledger:add"}, mode = SaMode.OR)
     public Result<List<FinPool>> poolList() {
-        return Result.ok(financeService.list());
+        return Result.ok(financeService.listVisiblePools());
     }
 
     @PostMapping("/pool")
@@ -75,12 +78,14 @@ public class FinanceController {
     }
 
     @GetMapping("/wallet/mine")
+    @SaCheckPermission("finance:wallet:list")
     public Result<HrWallet> myWallet() {
         Long userId = cn.dev33.satoken.stp.StpUtil.getLoginIdAsLong();
         return Result.ok(walletService.getOrCreate(userId));
     }
 
     @GetMapping("/wallet/mine/ledger")
+    @SaCheckPermission("finance:wallet:list")
     public Result<PageResult<FinLedger>> myWalletLedger(
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long pageSize,
@@ -110,7 +115,12 @@ public class FinanceController {
             @PathVariable Long userId,
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "20") long pageSize) {
-        return Result.ok(PageResult.of(financeService.pageLedger(page, pageSize, null, "WALLET", userId, null, null)));
+        LedgerQuery q = new LedgerQuery();
+        q.setPage(page);
+        q.setPageSize(pageSize);
+        q.setAccountType("WALLET");
+        q.setUserId(userId);
+        return Result.ok(PageResult.of(financeService.pageLedger(q)));
     }
 
     @GetMapping("/ledger/page")
@@ -143,7 +153,27 @@ public class FinanceController {
     @PostMapping("/ledger")
     @SaCheckPermission("finance:ledger:add")
     public Result<Void> createLedger(@Valid @RequestBody LedgerCreateRequest request) {
-        throw new com.kk.common.exception.BusinessException("公司总账登记须提交审批，请走审批中心");
+        throw new com.kk.common.exception.BusinessException("请使用 /finance/ledger/register 登记总账");
+    }
+
+    /** 公司总账登记：入账走财务审批；出账按公司阈值分流 */
+    @PostMapping("/ledger/register")
+    @SaCheckPermission("finance:ledger:add")
+    public Result<LedgerRegisterResult> registerLedger(@Valid @RequestBody LedgerCreateRequest request) {
+        return Result.ok(financeService.registerCompanyLedger(request));
+    }
+
+    @GetMapping("/ledger-threshold")
+    @SaCheckPermission(value = {"finance:ledger:list", "finance:ledger:add", "finance:pool:edit"}, mode = SaMode.OR)
+    public Result<FinLedgerThreshold> getLedgerThreshold(@RequestParam Long companyId) {
+        return Result.ok(financeService.getLedgerThreshold(companyId));
+    }
+
+    @PutMapping("/ledger-threshold")
+    @SaCheckPermission(value = {"finance:pool:edit", "finance:ledger:add"}, mode = SaMode.OR)
+    public Result<Void> saveLedgerThreshold(@RequestBody LedgerThresholdSaveRequest request) {
+        financeService.saveLedgerThreshold(request);
+        return Result.ok();
     }
 
     @PostMapping("/ledger/voucher")
@@ -161,7 +191,7 @@ public class FinanceController {
     @PutMapping("/project-share")
     @SaCheckPermission("finance:share:edit")
     public Result<Void> saveProjectShare(@Valid @RequestBody ProjectShareSaveRequest request) {
-        throw new com.kk.common.exception.BusinessException("分成配置须提交审批（全体股东会签），请走审批中心");
+        throw new com.kk.common.exception.BusinessException("分成配置须提交审批，请走审批中心");
     }
 
     @PostMapping("/settle")

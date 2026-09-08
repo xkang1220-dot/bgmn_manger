@@ -38,6 +38,19 @@ export const bizApi = {
   createLedger(data: any) {
     return request<void>({ url: '/finance/ledger', method: 'post', data })
   },
+  registerLedger(data: any) {
+    return request<{ mode: string; message: string; approval?: any }>({
+      url: '/finance/ledger/register',
+      method: 'post',
+      data,
+    })
+  },
+  getLedgerThreshold(companyId: number) {
+    return request<any>({ url: '/finance/ledger-threshold', method: 'get', params: { companyId } })
+  },
+  saveLedgerThreshold(data: any) {
+    return request<void>({ url: '/finance/ledger-threshold', method: 'put', data })
+  },
   uploadLedgerVoucher(file: File) {
     const form = new FormData()
     form.append('file', file)
@@ -66,11 +79,35 @@ export const bizApi = {
   archiveDetail(id: number) {
     return request<any>({ url: `/hr/archive/${id}`, method: 'get' })
   },
+  myPayMethods() {
+    return request<any[]>({ url: '/hr/archive/my-pay-methods', method: 'get' })
+  },
   saveArchive(data: any, isEdit: boolean) {
     return request<void>({ url: '/hr/archive', method: isEdit ? 'put' : 'post', data })
   },
   deleteArchive(id: number) {
     return request<void>({ url: `/hr/archive/${id}`, method: 'delete' })
+  },
+  faCategoryPage(params: Record<string, unknown>) {
+    return request<PageResult<any>>({ url: '/fa/category/page', method: 'get', params })
+  },
+  faCategoryList(params?: Record<string, unknown>) {
+    return request<any[]>({ url: '/fa/category/list', method: 'get', params })
+  },
+  saveFaCategory(data: any, isEdit: boolean) {
+    return request<void>({ url: '/fa/category', method: isEdit ? 'put' : 'post', data })
+  },
+  deleteFaCategory(id: number) {
+    return request<void>({ url: `/fa/category/${id}`, method: 'delete' })
+  },
+  faAssetPage(params: Record<string, unknown>) {
+    return request<PageResult<any>>({ url: '/fa/asset/page', method: 'get', params })
+  },
+  faAssetDetail(id: number) {
+    return request<any>({ url: `/fa/asset/${id}`, method: 'get' })
+  },
+  saveFaAsset(data: any, isEdit: boolean) {
+    return request<void>({ url: '/fa/asset', method: isEdit ? 'put' : 'post', data })
   },
   projectPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/project/page', method: 'get', params })
@@ -85,13 +122,16 @@ export const bizApi = {
     return request<any>({ url: `/project/${id}`, method: 'get' })
   },
   saveProject(data: any, isEdit: boolean) {
-    return request<void>({ url: '/project', method: isEdit ? 'put' : 'post', data })
+    return request<any>({ url: '/project', method: isEdit ? 'put' : 'post', data })
   },
   deleteProject(id: number) {
-    return request<void>({ url: `/project/${id}`, method: 'delete' })
+    return request<any>({ url: `/project/${id}`, method: 'delete' })
   },
   taskPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/task/page', method: 'get', params })
+  },
+  taskRelated() {
+    return request<any[]>({ url: '/task/related', method: 'get' })
   },
   taskSummary(projectId?: number) {
     return request<any>({ url: '/task/summary', method: 'get', params: { projectId } })
@@ -102,14 +142,11 @@ export const bizApi = {
   saveTask(data: any, isEdit: boolean) {
     return request<void>({ url: '/task', method: isEdit ? 'put' : 'post', data })
   },
-  deleteTask(id: number) {
-    return request<void>({ url: `/task/${id}`, method: 'delete' })
-  },
   taskBoard(projectId: number) {
     return request<any[]>({ url: '/task/board', method: 'get', params: { projectId } })
   },
-  updateTaskStatus(id: number, status: number, imageFileIds?: number[]) {
-    return request<void>({ url: `/task/${id}/status`, method: 'put', data: { status, imageFileIds } })
+  updateTaskStatus(id: number, status: number, imageFileIds?: number[], remark?: string) {
+    return request<void>({ url: `/task/${id}/status`, method: 'put', data: { status, imageFileIds, remark } })
   },
   taskComments(taskId: number) {
     return request<any[]>({ url: `/task/${taskId}/comments`, method: 'get' })
@@ -153,5 +190,41 @@ export const bizApi = {
   },
   deleteFile(id: number) {
     return request<void>({ url: `/file/${id}`, method: 'delete' })
+  },
+  salaryItems(params: { companyId: number; userId?: number }) {
+    return request<any[]>({ url: '/hr/salary/items', method: 'get', params })
+  },
+  saveSalaryItem(data: any, isEdit: boolean) {
+    return request<void>({ url: '/hr/salary/item', method: isEdit ? 'put' : 'post', data })
+  },
+  deleteSalaryItem(id: number) {
+    return request<void>({ url: `/hr/salary/item/${id}`, method: 'delete' })
+  },
+  salarySchedule(companyId: number) {
+    return request<any>({ url: '/hr/salary/schedule', method: 'get', params: { companyId } })
+  },
+  saveSalarySchedule(data: any) {
+    return request<void>({ url: '/hr/salary/schedule', method: 'put', data })
+  },
+  salaryRuns(params: { companyId: number; yearMonth?: string }) {
+    return request<any[]>({ url: '/hr/salary/runs', method: 'get', params })
+  },
+  salaryRunLines(runId: number) {
+    return request<any[]>({ url: `/hr/salary/runs/${runId}/lines`, method: 'get' })
+  },
+  salaryPreview(data: { companyId: number; yearMonth?: string }) {
+    return request<any>({ url: '/hr/salary/preview', method: 'post', data })
+  },
+  salaryPay(data: { companyId: number; yearMonth?: string }) {
+    return request<any>({ url: '/hr/salary/pay', method: 'post', data })
+  },
+  mySalaryConfirm(yearMonth?: string) {
+    return request<any[]>({ url: '/hr/salary/my-confirm', method: 'get', params: { yearMonth } })
+  },
+  confirmSalary(lineId: number) {
+    return request<void>({ url: `/hr/salary/my-confirm/${lineId}`, method: 'post' })
+  },
+  revokeSalaryConfirm(lineId: number) {
+    return request<void>({ url: `/hr/salary/my-confirm/${lineId}/revoke`, method: 'post' })
   },
 }

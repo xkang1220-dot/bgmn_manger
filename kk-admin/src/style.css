@@ -401,22 +401,39 @@ body {
 }
 
 /* ========== Element Plus 全局微调 ========== */
-.el-button--primary {
+.el-button--primary:not(.is-plain):not(.is-link):not(.is-text) {
   background: var(--kk-primary);
   border: none;
+  color: #fff;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 4px 12px rgba(0, 0, 0, 0.08);
   transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
 
-.el-button--primary:hover,
-.el-button--primary:focus {
+.el-button--primary:not(.is-plain):not(.is-link):not(.is-text):hover,
+.el-button--primary:not(.is-plain):not(.is-link):not(.is-text):focus {
   background: var(--kk-primary-light);
+  color: #fff;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16), 0 8px 20px rgba(0, 0, 0, 0.1);
   transform: translateY(-1px);
 }
 
-.el-button--primary:active {
+.el-button--primary:not(.is-plain):not(.is-link):not(.is-text):active {
   transform: translateY(0);
+}
+
+.el-button--primary.is-plain {
+  background: rgba(24, 24, 27, 0.06) !important;
+  box-shadow: none !important;
+  transform: none !important;
+  color: var(--kk-primary) !important;
+  border: 1px solid rgba(24, 24, 27, 0.18) !important;
+}
+
+.el-button--primary.is-plain:hover,
+.el-button--primary.is-plain:focus {
+  background: rgba(24, 24, 27, 0.12) !important;
+  color: var(--kk-primary-dark) !important;
+  border-color: rgba(24, 24, 27, 0.28) !important;
 }
 
 .el-button--primary.is-link,

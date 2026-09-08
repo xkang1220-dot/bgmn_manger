@@ -36,4 +36,8 @@ public class HrWallet extends BaseEntity {
 
     @TableField(exist = false)
     private String username;
+
+    /** 可用余额 = balance - frozen */
+    @TableField(exist = false)
+    private BigDecimal available;
 }

@@ -36,7 +36,12 @@ public class ProjectController {
 
     @GetMapping("/list")
     public Result<List<PmProject>> list() {
-        return Result.ok(projectService.list());
+        // 财务相关权限选项目时看全部已生效；其余走可见范围，避免无关项目泄漏
+        boolean financePick = StpUtil.hasPermission("finance:project:list")
+                || StpUtil.hasPermission("finance:ledger:list")
+                || StpUtil.hasPermission("finance:ledger:add")
+                || StpUtil.hasPermission("finance:share:edit");
+        return Result.ok(financePick ? projectService.listApproved() : projectService.listVisible());
     }
 
     /** 个人中心：只返回当前用户负责或参与的项目 */
@@ -51,7 +56,7 @@ public class ProjectController {
         return Result.ok(projectService.getDetail(id));
     }
 
-    /** 新建项目：提交全体股东会签（3天超时自动通过） */
+    /** 新建项目：提交审批（审批人/会签或签/超时以该公司审批配置为准） */
     @PostMapping
     @SaCheckPermission("project:add")
     public Result<WfApproval> create(@RequestBody PmProject project) {
@@ -62,16 +67,18 @@ public class ProjectController {
         payload.put("name", project.getName());
         payload.put("code", project.getCode());
         payload.put("ownerId", project.getOwnerId());
+        payload.put("companyId", project.getCompanyId());
         payload.put("status", project.getStatus() == null ? 1 : project.getStatus());
         payload.put("description", project.getDescription());
         payload.put("reserveAmount", project.getReserveAmount());
         payload.put("budget", project.getBudget());
         payload.put("poolId", project.getPoolId());
-        payload.put("startDate", project.getStartDate());
-        payload.put("endDate", project.getEndDate());
+        payload.put("startDate", project.getStartDate() == null ? null : project.getStartDate().toString());
+        payload.put("endDate", project.getEndDate() == null ? null : project.getEndDate().toString());
         if (project.getMembers() != null) {
             payload.put("members", project.getMembers());
         }
+        req.setCompanyId(project.getCompanyId());
         req.setPayload(payload);
         return Result.ok(approvalService.submit(req));
     }
@@ -83,7 +90,7 @@ public class ProjectController {
         return Result.ok();
     }
 
-    /** 删除项目：提交全体股东会签 */
+    /** 删除项目：提交审批（审批人/会签或签以该公司审批配置为准） */
     @DeleteMapping("/{id:\\d+}")
     @SaCheckPermission("project:remove")
     public Result<WfApproval> delete(@PathVariable Long id) {
@@ -92,9 +99,11 @@ public class ProjectController {
         req.setType(ApprovalTypes.PROJECT_DELETE);
         req.setTitle("删除项目 · " + project.getName());
         req.setProjectId(id);
+        req.setCompanyId(project.getCompanyId());
         Map<String, Object> payload = new HashMap<>();
         payload.put("projectId", id);
         payload.put("name", project.getName());
+        payload.put("companyId", project.getCompanyId());
         req.setPayload(payload);
         return Result.ok(approvalService.submit(req));
     }

@@ -9,6 +9,7 @@ const depts = ref<any[]>([])
 const dialog = ref(false)
 const isEdit = ref(false)
 const saving = ref(false)
+const treeCheckedKeys = ref<number[]>([])
 const form = reactive<any>({ name: '', code: '', sort: 0, status: 1, dataScope: 1, remark: '', menuIds: [], deptIds: [] })
 
 const SCOPE: Record<number, string> = {
@@ -17,6 +18,15 @@ const SCOPE: Record<number, string> = {
   3: '本部门',
   4: '本部门及以下',
   5: '仅本人',
+}
+
+/** 只勾叶子节点，避免父 id 进 default-checked-keys 导致子节点被级联全选 */
+function collectLeafIds(nodes: any[], selected: Set<number>, out: number[] = []) {
+  for (const n of nodes || []) {
+    if (n.children?.length) collectLeafIds(n.children, selected, out)
+    else if (selected.has(Number(n.id))) out.push(Number(n.id))
+  }
+  return out
 }
 
 async function load() {
@@ -28,10 +38,18 @@ async function open(row?: any) {
   if (row) {
     const detail = await sysApi.roleDetail(row.id)
     Object.assign(form, detail)
+    const selected = new Set<number>((detail.menuIds || []).map((id: number) => Number(id)))
+    treeCheckedKeys.value = collectLeafIds(menus.value, selected)
+    form.menuIds = [...treeCheckedKeys.value]
   } else {
     Object.assign(form, { id: undefined, name: '', code: '', sort: 0, status: 1, dataScope: 1, remark: '', menuIds: [], deptIds: [] })
+    treeCheckedKeys.value = []
   }
   dialog.value = true
+}
+
+function onMenuCheck(_: any, info: any) {
+  form.menuIds = [...(info.checkedKeys || []), ...(info.halfCheckedKeys || [])]
 }
 
 async function save() {
@@ -70,7 +88,7 @@ onMounted(async () => {
         <p class="page-desc">配置角色可访问的菜单与数据范围</p>
       </div>
       <div class="page-actions">
-        <el-button type="primary" @click="open()">新建角色</el-button>
+        <el-button v-permission="'system:role:add'" type="primary" @click="open()">新建角色</el-button>
       </div>
     </div>
 
@@ -88,10 +106,10 @@ onMounted(async () => {
         <div class="role-scope">数据范围 · {{ SCOPE[row.dataScope] || '—' }}</div>
         <div v-if="row.remark" class="role-remark">{{ row.remark }}</div>
         <div class="role-ops icon-ops">
-          <el-button text aria-label="编辑" title="编辑" @click="open(row)">
+          <el-button v-permission="'system:role:edit'" text aria-label="编辑" title="编辑" @click="open(row)">
             <el-icon :size="16"><EditPen /></el-icon>
           </el-button>
-          <el-button text class="is-danger" aria-label="删除" title="删除" @click="remove(row.id)">
+          <el-button v-permission="'system:role:remove'" text class="is-danger" aria-label="删除" title="删除" @click="remove(row.id)">
             <el-icon :size="16"><Delete /></el-icon>
           </el-button>
         </div>
@@ -119,13 +137,13 @@ onMounted(async () => {
           <div class="menu-tree">
             <el-tree
               v-if="dialog"
-              :key="String(form.id ?? 'new')"
+              :key="String(form.id ?? 'new') + '-' + treeCheckedKeys.join(',')"
               :data="menus"
               show-checkbox
               node-key="id"
               :props="{ label: 'name' }"
-              :default-checked-keys="form.menuIds"
-              @check="(_: any, info: any) => (form.menuIds = [...info.checkedKeys, ...info.halfCheckedKeys])"
+              :default-checked-keys="treeCheckedKeys"
+              @check="onMenuCheck"
             />
           </div>
         </el-form-item>

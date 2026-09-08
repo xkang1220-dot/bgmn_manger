@@ -20,6 +20,12 @@ public class PmProject extends BaseEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    /** 所属公司（顶层部门 id） */
+    private Long companyId;
+
+    @TableField(exist = false)
+    private String companyName;
+
     private String name;
 
     private String code;

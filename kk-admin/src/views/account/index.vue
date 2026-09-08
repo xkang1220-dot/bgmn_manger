@@ -37,6 +37,15 @@ function fmtTime(t?: string) {
   return t.replace('T', ' ').slice(0, 16)
 }
 
+/** 摘要里带上项目名，避免只显示「项目分成入账」看不出是哪个项目 */
+function ledgerTitle(row: any) {
+  const title = String(row?.title || '').trim() || '—'
+  const project = String(row?.projectName || '').trim()
+  if (!project) return title
+  if (title.includes(project)) return title
+  return `${title} · ${project}`
+}
+
 function dayKey(d: Date | string) {
   if (typeof d === 'string') return d.slice(0, 10)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -76,6 +85,8 @@ const seeAllProjects = computed(() => {
   const roles = userStore.roles || []
   return roles.includes('admin') || roles.includes('shareholder')
 })
+
+const canSeeWallet = computed(() => userStore.hasPermission('finance:wallet:list'))
 
 function projectRole(p: any) {
   const uid = userStore.user?.id
@@ -135,6 +146,11 @@ async function loadLedger() {
 }
 
 async function loadApprovals() {
+  if (!userStore.hasPermission('workflow:list')) {
+    todoApprovals.value = []
+    mineApprovals.value = []
+    return
+  }
   try {
     const [todo, mine] = await Promise.all([
       workflowApi.page({ page: 1, pageSize: 8, scope: 'todo' }),
@@ -156,13 +172,12 @@ async function loadTasks() {
     return
   }
   try {
-    const seeAll = seeAllProjects.value
-    const res = await bizApi.taskPage({
-      page: 1,
-      pageSize: 200,
-      ...(seeAll ? {} : { assigneeId: uid }),
-    })
-    calendarTasks.value = res.list || []
+    if (seeAllProjects.value) {
+      const res = await bizApi.taskPage({ page: 1, pageSize: 200 })
+      calendarTasks.value = res.list || []
+    } else {
+      calendarTasks.value = (await bizApi.taskRelated()) || []
+    }
     myTasks.value = calendarTasks.value.slice(0, 10)
   } catch {
     myTasks.value = []
@@ -181,7 +196,11 @@ async function loadProjects() {
 onMounted(async () => {
   loading.value = true
   try {
-    await Promise.all([loadBalance(), loadLedger(), loadApprovals(), loadTasks(), loadProjects()])
+    const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadProjects()]
+    if (canSeeWallet.value) {
+      jobs.push(loadBalance(), loadLedger())
+    }
+    await Promise.all(jobs)
   } finally {
     loading.value = false
   }
@@ -195,11 +214,14 @@ onMounted(async () => {
       <p class="welcome-desc">先看待办和余额，再按需查流水或进对应模块处理</p>
     </div>
 
-    <div class="stat-grid">
-      <div class="stat-card stat-card--indigo">
+    <div class="stat-grid" :class="{ 'stat-grid--no-wallet': !canSeeWallet }">
+      <div v-if="canSeeWallet" class="stat-card stat-card--indigo">
         <div class="stat-body">
           <div class="stat-label">钱包余额</div>
           <div class="stat-value">¥ {{ fmt(wallet.balance) }}</div>
+          <div v-if="Number(wallet.frozen) > 0" class="stat-sub">
+            冻结 ¥{{ fmt(wallet.frozen) }} · 可用 ¥{{ fmt(wallet.available ?? (Number(wallet.balance || 0) - Number(wallet.frozen || 0))) }}
+          </div>
         </div>
         <el-icon class="stat-glyph" :size="52"><Wallet /></el-icon>
       </div>
@@ -238,7 +260,7 @@ onMounted(async () => {
       </div>
     </div>
 
-    <section class="page-card">
+    <section v-if="canSeeWallet" class="page-card">
       <div class="sec-head">
         <div>
           <h3>钱包流水</h3>
@@ -298,7 +320,11 @@ onMounted(async () => {
           <template #default="{ row }">{{ fmtTime(row.occurTime) }}</template>
         </el-table-column>
         <el-table-column prop="bizNo" label="编号" width="170" show-overflow-tooltip />
-        <el-table-column prop="title" label="摘要" min-width="200" show-overflow-tooltip />
+        <el-table-column label="摘要" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ ledgerTitle(row) }}
+          </template>
+        </el-table-column>
         <el-table-column label="金额" width="130" align="right">
           <template #default="{ row }">
             <span :class="Number(row.amount) >= 0 ? 'in' : 'out'">
@@ -352,7 +378,7 @@ onMounted(async () => {
           >
             <div>
               <b>{{ t.title }}</b>
-              <span>{{ t.projectName || '—' }} · {{ t.assigneeName || '未分配' }}</span>
+              <span>{{ t.projectName || '—' }} · {{ t.participantNames?.length ? `参与人 ${t.participantNames.join('、')}` : '无参与人' }}</span>
             </div>
             <em :class="{ overdue: t.overdue }">{{ t.statusLabel || t.status || '—' }}</em>
           </div>
@@ -424,7 +450,7 @@ onMounted(async () => {
           </div>
           <em>{{ t.statusLabel || t.status || '—' }}</em>
         </div>
-        <div v-if="!myTasks.length" class="empty">{{ seeAllProjects ? '暂无任务' : '暂无指派给我的任务' }}</div>
+        <div v-if="!myTasks.length" class="empty">{{ seeAllProjects ? '暂无任务' : '暂无相关任务' }}</div>
       </section>
 
       <section class="page-card">
@@ -482,6 +508,10 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 16px;
+}
+
+.stat-grid--no-wallet {
+  grid-template-columns: repeat(3, 1fr);
 }
 
 .stat-card {
@@ -564,6 +594,12 @@ onMounted(async () => {
   letter-spacing: -0.03em;
   font-variant-numeric: tabular-nums;
   color: var(--kk-text);
+}
+
+.stat-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--kk-text-secondary);
 }
 
 .sec-head {

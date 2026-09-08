@@ -5,6 +5,11 @@ import { useUserStore } from '@/stores/user'
 import KkLogoMark from '@/components/KkLogoMark.vue'
 import { notificationApi, type NotificationItem } from '@/api/notification'
 import type { MenuInfo } from '@/api/types'
+import {
+  createNotificationSocket,
+  toNoticeItem,
+  type NotificationPushPayload,
+} from '@/utils/notificationWs'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,6 +31,7 @@ const noticeList = ref<NotificationItem[]>([])
 const noticeLoading = ref(false)
 const noticeVisible = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let noticeSocket: { disconnect: () => void } | null = null
 
 function iconOf(name?: string) {
   return name || 'Menu'
@@ -77,6 +83,27 @@ async function openNotice(item: NotificationItem) {
   router.push(item.link || '/workflow/center')
 }
 
+async function openPushedNotice(payload: NotificationPushPayload) {
+  if (payload.id != null) {
+    try {
+      await notificationApi.markRead(payload.id)
+      const hit = noticeList.value.find((n) => n.id === payload.id)
+      if (hit) hit.readFlag = 1
+      await loadUnread()
+    } catch { /* ignore */ }
+  }
+  noticeVisible.value = false
+  router.push(payload.link || '/workflow/center')
+}
+
+function onPushNotice(payload: NotificationPushPayload) {
+  void loadUnread()
+  const item = toNoticeItem(payload)
+  if (item && noticeVisible.value) {
+    noticeList.value = [item, ...noticeList.value.filter((n) => n.id !== item.id)].slice(0, 15)
+  }
+}
+
 async function markAllRead() {
   await notificationApi.markAllRead()
   noticeList.value.forEach((n) => { n.readFlag = 1 })
@@ -84,16 +111,25 @@ async function markAllRead() {
 }
 
 async function logout() {
+  noticeSocket?.disconnect()
+  noticeSocket = null
   await userStore.logout()
 }
 
 onMounted(() => {
   loadUnread()
   pollTimer = setInterval(loadUnread, 30000)
+  noticeSocket = createNotificationSocket({
+    getToken: () => userStore.token,
+    onPush: onPushNotice,
+    onOpen: openPushedNotice,
+  })
 })
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
+  noticeSocket?.disconnect()
+  noticeSocket = null
 })
 </script>
 

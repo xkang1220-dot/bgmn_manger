@@ -5,8 +5,8 @@ export const sysApi = {
   userPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/sys/user/page', method: 'get', params })
   },
-  userList() {
-    return request<any[]>({ url: '/sys/user/list', method: 'get' })
+  userList(params?: { companyId?: number }) {
+    return request<any[]>({ url: '/sys/user/list', method: 'get', params })
   },
   saveUser(data: any, isEdit: boolean) {
     return request<void>({ url: '/sys/user', method: isEdit ? 'put' : 'post', data })
@@ -44,6 +44,15 @@ export const sysApi = {
   deptTree() {
     return request<any[]>({ url: '/sys/dept/tree', method: 'get' })
   },
+  deptCompanies() {
+    return request<any[]>({ url: '/sys/dept/companies', method: 'get' })
+  },
+  myCompanies() {
+    return request<any[]>({ url: '/sys/dept/my-companies', method: 'get' })
+  },
+  userDetail(id: number) {
+    return request<any>({ url: `/sys/user/${id}`, method: 'get' })
+  },
   saveDept(data: any, isEdit: boolean) {
     return request<void>({ url: '/sys/dept', method: isEdit ? 'put' : 'post', data })
   },
@@ -55,6 +64,9 @@ export const sysApi = {
   },
   updateProfile(data: any) {
     return request<void>({ url: '/account/profile', method: 'put', data })
+  },
+  generateTaskQueryCode() {
+    return request<string>({ url: '/account/task-query-code', method: 'post' })
   },
   updatePassword(data: { oldPassword: string; newPassword: string }) {
     return request<void>({ url: '/account/password', method: 'put', data })

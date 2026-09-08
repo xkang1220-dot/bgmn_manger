@@ -211,6 +211,9 @@ onMounted(load)
           <el-icon class="person-go" :size="16"><ArrowRight /></el-icon>
         </div>
         <div class="bal">¥ {{ fmt(row.balance) }}</div>
+        <div v-if="Number(row.frozen) > 0" class="bal-sub">
+          冻 ¥{{ fmt(row.frozen) }} · 可用 ¥{{ fmt(row.available ?? (Number(row.balance || 0) - Number(row.frozen || 0))) }}
+        </div>
       </article>
     </div>
     <el-empty
@@ -421,6 +424,11 @@ onMounted(load)
   letter-spacing: -0.03em;
   font-variant-numeric: tabular-nums;
   color: var(--kk-text);
+}
+.bal-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--kk-text-secondary);
 }
 .person.is-zero .bal { color: var(--kk-text-muted); font-weight: 600; }
 

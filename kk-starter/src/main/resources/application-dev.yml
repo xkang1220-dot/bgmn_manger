@@ -1,5 +1,5 @@
 server:
-  port: 8080
+  port: 8999
 
 spring:
   application:
@@ -11,6 +11,14 @@ spring:
     multipart:
       max-file-size: 100MB
       max-request-size: 100MB
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:123456}
+      timeout: 3s
+      repositories:
+        enabled: false
   datasource:
     type: com.alibaba.druid.pool.DruidDataSource
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -49,6 +57,9 @@ sa-token:
   is-read-header: true
 
 kk:
+  web:
+    # 对外任务跳转链接前缀（管理端前端地址，不要末尾斜杠）
+    base-url: ${KK_WEB_BASE_URL:http://localhost:5173}
   file:
     storage:
       provider: rustfs
@@ -58,14 +69,14 @@ kk:
       local:
         base-path: ./uploads
       rustfs:
-        endpoint: ${RUSTFS_ENDPOINT:http://127.0.0.1:9000}
-        access-key: ${RUSTFS_ACCESS_KEY:minioadmin}
-        secret-key: ${RUSTFS_SECRET_KEY:minioadmin}
+        endpoint: http://95.40.182.55:9000
+        access-key: ${RUSTFS_ACCESS_KEY:KO0VN5qHsKcQqib0biEy}
+        secret-key: ${RUSTFS_SECRET_KEY:F6XqqjKuiBs3MepQHngFDXd5483tPAGHrgAMAArT}
         bucket: kk-manager
-        domain: ${RUSTFS_DOMAIN:http://127.0.0.1:9000}
+        domain: http://95.40.182.55:9000
   totp:
     issuer: KK Manager
-    secret-master-key: ${TOTP_MASTER_KEY:change-me-in-production}
+    secret-master-key: ${TOTP_MASTER_KEY:KkTotp~SecretKey2026!ChangeMe}
 
 logging:
   level:

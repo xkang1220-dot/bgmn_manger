@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
+import { approvalFlowTip } from '@/utils/approvalTip'
 
 const users = ref<any[]>([])
 const projects = ref<any[]>([])
@@ -108,7 +109,7 @@ async function saveShare() {
   }
   saving.value = true
   try {
-    await workflowApi.submit({
+    const approval = await workflowApi.submit({
       type: 'SHARE_CONFIG',
       title: `分成配置 · ${detail.value?.name || projectId.value}`,
       projectId: projectId.value,
@@ -120,7 +121,7 @@ async function saveShare() {
       },
       remark: '项目分层配置审批',
     })
-    ElMessage.success('已提交分成配置审批（全体股东会签，3天超时自动通过）')
+    ElMessage.success(approvalFlowTip(approval, '已提交分成配置审批'))
     await loadProject()
   } finally {
     saving.value = false
@@ -155,7 +156,7 @@ async function settleByPreset() {
       }
       return { userId: m.userId, amount: share, layer: m.layer }
     }).filter((x: any) => x.amount > 0)
-    await workflowApi.submit({
+    const approval = await workflowApi.submit({
       type: 'PROJECT_SETTLE',
       title: `项目分钱 · ${detail.value?.name || ''}`,
       projectId: projectId.value,
@@ -164,7 +165,7 @@ async function settleByPreset() {
       remark: settleForm.remark,
       payload: { items },
     })
-    ElMessage.success('已提交分钱审批')
+    ElMessage.success(approvalFlowTip(approval, '已提交分钱审批'))
     settleForm.amount = 0
     settleForm.remark = ''
     await loadProject()

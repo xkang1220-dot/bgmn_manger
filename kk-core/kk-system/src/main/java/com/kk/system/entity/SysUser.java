@@ -53,9 +53,20 @@ public class SysUser extends BaseEntity {
     /** TOTP 绑定时间 */
     private LocalDateTime totpVerifyTime;
 
+    /** 任务公开查询码（4 位，全员唯一） */
+    private String taskQueryCode;
+
     @TableField(exist = false)
     private List<Long> roleIds;
 
     @TableField(exist = false)
     private List<String> roleNames;
+
+    /** 多部门归属 */
+    @TableField(exist = false)
+    private List<SysUserDept> userDepts;
+
+    /** 角色绑定（含公司） */
+    @TableField(exist = false)
+    private List<SysUserRole> roleBindings;
 }

@@ -1,12 +1,16 @@
 package com.kk.admin.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.stp.StpUtil;
 import com.kk.biz.entity.HrArchive;
+import com.kk.biz.entity.HrPayMethod;
 import com.kk.biz.service.HrArchiveService;
 import com.kk.common.result.PageResult;
 import com.kk.common.result.Result;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/hr/archive")
@@ -22,6 +26,12 @@ public class HrArchiveController {
             @RequestParam(defaultValue = "10") long pageSize,
             String realName, String employeeNo) {
         return Result.ok(PageResult.of(archiveService.pageArchives(page, pageSize, realName, employeeNo)));
+    }
+
+    /** 当前登录人可用的个人收款方式（申请工资/报销用） */
+    @GetMapping("/my-pay-methods")
+    public Result<List<HrPayMethod>> myPayMethods() {
+        return Result.ok(archiveService.listMyPayMethods(StpUtil.getLoginIdAsLong()));
     }
 
     @GetMapping("/{id}")

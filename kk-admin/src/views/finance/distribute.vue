@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
+import { approvalFlowTip } from '@/utils/approvalTip'
 
 const users = ref<any[]>([])
 const projects = ref<any[]>([])
@@ -114,7 +115,7 @@ async function submit() {
   }
   saving.value = true
   try {
-    await workflowApi.submit({
+    const approval = await workflowApi.submit({
       type: 'PROJECT_SETTLE',
       title: `手动分钱 · ${projectDetail.value?.name || ''}`,
       projectId: form.projectId,
@@ -122,7 +123,7 @@ async function submit() {
       remark: form.remark,
       payload: { items: payloadItems },
     })
-    ElMessage.success('已提交手动分钱审批')
+    ElMessage.success(approvalFlowTip(approval, '已提交手动分钱审批'))
     form.remark = ''
     form.fillTotal = 0
     await loadProject()

@@ -14,14 +14,17 @@ import java.util.Map;
 public interface PmTaskService extends IService<PmTask> {
 
     Page<PmTask> pageTasks(long page, long pageSize, Long projectId, Integer status, Integer priority,
-                           Long assigneeId, String title, Boolean overdue);
+                           Long participantId, String title, Boolean overdue);
 
     PmTask getDetail(Long id);
 
     Map<String, Object> summary(Long projectId);
 
-    /** 看板用：按项目拉取任务（不分页，排除已取消） */
+    /** 看板用：按项目拉取任务（不分页，排除已关闭） */
     List<PmTask> listBoardTasks(Long projectId);
+
+    /** 与用户相关的任务：参与或自己创建 */
+    List<PmTask> listRelatedTasks(Long userId);
 
     void createTask(PmTask task);
 
@@ -32,10 +35,13 @@ public interface PmTaskService extends IService<PmTask> {
 
     void updateStatus(Long id, Integer status, List<Long> imageFileIds);
 
-    /** 转交负责人 */
-    void transfer(Long id, Long assigneeId, String remark);
+    /** @param remark 关闭(status=3)时必填原因 */
+    void updateStatus(Long id, Integer status, List<Long> imageFileIds, String remark);
 
-    void transfer(Long id, Long assigneeId, String remark, List<Long> imageFileIds);
+    /** 移交：将目标人加入参与人（已存在则不重复）；不写持有人字段 */
+    void transfer(Long id, Long targetUserId, String remark);
+
+    void transfer(Long id, Long targetUserId, String remark, List<Long> imageFileIds);
 
     void deleteTask(Long id);
 

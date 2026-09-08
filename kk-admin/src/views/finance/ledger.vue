@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref, computed } from 'vue'
+import { onMounted, reactive, ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
-import { workflowApi } from '@/api/workflow'
+import { sysApi } from '@/api/system'
+import { approvalFlowTip } from '@/utils/approvalTip'
 
 const query = reactive({
   page: 1,
@@ -23,6 +24,16 @@ const dialog = ref(false)
 const uploading = ref(false)
 const listLoading = ref(false)
 const saving = ref(false)
+const thresholdDialog = ref(false)
+const thresholdSaving = ref(false)
+const companies = ref<any[]>([])
+const thresholdForm = reactive({
+  companyId: undefined as number | undefined,
+  enabled: false,
+  notifyThreshold: 5000,
+  approveThreshold: 30000,
+})
+const activeThreshold = ref<any>({ enabled: 0, notifyThreshold: 5000, approveThreshold: 30000 })
 
 const form = reactive<any>({
   bizType: 'INCOME',
@@ -333,36 +344,161 @@ async function save() {
     ElMessage.warning('入账请选择收款渠道')
     return
   }
-  const typeLabel = form.bizType === 'INCOME' ? '入账' : '出账'
+  if (!form.poolId) {
+    ElMessage.warning('请选择资金池')
+    return
+  }
   saving.value = true
   try {
-    await workflowApi.submit({
-      type: 'LEDGER_REGISTER',
-      title: form.title || `总账${typeLabel}`,
-      amount: form.amount,
+    const res = await bizApi.registerLedger({
+      bizType: form.bizType,
+      accountType: 'POOL',
       poolId: form.poolId,
+      channelId: form.bizType === 'INCOME' ? form.channelId : undefined,
       projectId: form.projectId,
+      amount: form.amount,
+      feeMode: form.bizType === 'INCOME' && form.feeMode ? form.feeMode : undefined,
+      feeValue: form.bizType === 'INCOME' && form.feeMode ? form.feeValue : undefined,
+      title: form.title,
       remark: form.remark,
-      voucherFileIds: form.voucherFileIds.length ? form.voucherFileIds : undefined,
-      payload: {
-        bizType: form.bizType,
-        accountType: 'POOL',
-        poolId: form.poolId,
-        channelId: form.bizType === 'INCOME' ? form.channelId : undefined,
-        projectId: form.projectId,
-        amount: form.amount,
-        feeMode: form.bizType === 'INCOME' && form.feeMode ? form.feeMode : undefined,
-        feeValue: form.bizType === 'INCOME' && form.feeMode ? form.feeValue : undefined,
-        title: form.title,
-        remark: form.remark,
-        voucherFileIds: form.voucherFileIds.length ? [...form.voucherFileIds] : undefined,
-      },
+      voucherFileIds: form.voucherFileIds.length ? [...form.voucherFileIds] : undefined,
     })
-    ElMessage.success('已提交审批，通过后才会入账')
+    if (res.mode === 'DIRECT') {
+      ElMessage.success(res.message || '已直接入账')
+    } else {
+      ElMessage.success(res.message || `${approvalFlowTip(res.approval)}。通过后才会入账`)
+    }
     dialog.value = false
     await Promise.all([load(), loadSummary()])
   } finally {
     saving.value = false
+  }
+}
+
+const selectedPoolCompanyId = computed(() => {
+  const pool = pools.value.find((p) => p.id === form.poolId)
+  return pool?.companyId as number | undefined
+})
+
+const registerHint = computed(() => {
+  if (form.bizType === 'INCOME') return '入账将提交财务审批，通过后才会入账'
+  const th = activeThreshold.value
+  const enabled = Number(th?.enabled) === 1
+  if (!th || !enabled) return '出账阈值未启用，将提交财务审批'
+  const amount = Number(form.amount) || 0
+  const notify = Number(th.notifyThreshold) || 0
+  const approve = Number(th.approveThreshold) || 0
+  if (amount >= approve) return `金额 ≥ ${approve}：需全体股东会签，通过后才会出账`
+  if (amount >= notify) return `金额 ≥ ${notify}：将直接出账，并通知该公司股东`
+  return `金额 < ${notify}：将直接出账`
+})
+
+const submitBtnLabel = computed(() => {
+  if (form.bizType === 'INCOME') return '提交审批'
+  const th = activeThreshold.value
+  const enabled = Number(th?.enabled) === 1
+  if (!th || !enabled) return '提交审批'
+  const amount = Number(form.amount) || 0
+  const approve = Number(th.approveThreshold) || 0
+  return amount >= approve ? '提交股东会签' : '确认出账'
+})
+
+async function refreshActiveThreshold() {
+  const cid = selectedPoolCompanyId.value
+  if (!cid) {
+    activeThreshold.value = { enabled: 0, notifyThreshold: 5000, approveThreshold: 30000 }
+    return
+  }
+  try {
+    activeThreshold.value = await bizApi.getLedgerThreshold(cid)
+  } catch {
+    activeThreshold.value = { enabled: 0, notifyThreshold: 5000, approveThreshold: 30000 }
+  }
+}
+
+watch([() => form.poolId, () => form.bizType, () => dialog.value], () => {
+  if (dialog.value) void refreshActiveThreshold()
+})
+
+async function openThresholdDialog() {
+  if (!companies.value.length) {
+    companies.value = await sysApi.myCompanies()
+  }
+  if (!thresholdForm.companyId && companies.value.length) {
+    thresholdForm.companyId = companies.value[0].id
+  }
+  await loadThresholdForm()
+  thresholdDialog.value = true
+}
+
+async function loadThresholdForm() {
+  if (!thresholdForm.companyId) return
+  const row = await bizApi.getLedgerThreshold(thresholdForm.companyId)
+  thresholdForm.enabled = Number(row.enabled) === 1
+  thresholdForm.notifyThreshold = Number(row.notifyThreshold ?? 5000)
+  thresholdForm.approveThreshold = Number(row.approveThreshold ?? 30000)
+}
+
+async function onThresholdCompanyChange() {
+  await loadThresholdForm()
+  await refreshThresholdBadge()
+}
+
+async function saveThreshold() {
+  if (!thresholdForm.companyId) {
+    ElMessage.warning('请选择公司')
+    return
+  }
+  if (thresholdForm.enabled && Number(thresholdForm.notifyThreshold) > Number(thresholdForm.approveThreshold)) {
+    ElMessage.warning('通知线不能大于审批线')
+    return
+  }
+  thresholdSaving.value = true
+  try {
+    await bizApi.saveLedgerThreshold({
+      companyId: Number(thresholdForm.companyId),
+      enabled: !!thresholdForm.enabled,
+      notifyThreshold: Number(thresholdForm.notifyThreshold),
+      approveThreshold: Number(thresholdForm.approveThreshold),
+    })
+    await loadThresholdForm()
+    await refreshThresholdBadge()
+    if (dialog.value) await refreshActiveThreshold()
+    if (thresholdForm.enabled) {
+      ElMessage.success(
+        `已保存并启用：通知线 ${thresholdForm.notifyThreshold} / 审批线 ${thresholdForm.approveThreshold}。可在本弹窗随时查看或修改。`,
+      )
+    } else {
+      ElMessage.success('已保存（未启用）。出账仍一律走财务审批；打开开关后再保存才会按阈值分流。')
+    }
+  } finally {
+    thresholdSaving.value = false
+  }
+}
+
+const thresholdBadge = ref('未配置')
+
+async function refreshThresholdBadge() {
+  try {
+    if (!companies.value.length) {
+      companies.value = await sysApi.myCompanies()
+    }
+    const cid = thresholdForm.companyId || companies.value[0]?.id || pools.value.find((p) => p.companyId)?.companyId
+    if (!cid) {
+      thresholdBadge.value = '未配置'
+      return
+    }
+    const row = await bizApi.getLedgerThreshold(Number(cid))
+    const name = companies.value.find((c) => Number(c.id) === Number(cid))?.name || '当前公司'
+    if (Number(row.enabled) === 1) {
+      thresholdBadge.value = `${name}：已启用 ${row.notifyThreshold}/${row.approveThreshold}`
+    } else if (row.configured === true || row.createTime || row.updateTime || row.createBy != null || row.updateBy != null) {
+      thresholdBadge.value = `${name}：已保存未启用（${row.notifyThreshold}/${row.approveThreshold}）`
+    } else {
+      thresholdBadge.value = `${name}：未配置`
+    }
+  } catch {
+    thresholdBadge.value = '未配置'
   }
 }
 
@@ -394,6 +530,7 @@ onMounted(async () => {
     channels.value = []
   }
   await Promise.all([load(), loadSummary()])
+  void refreshThresholdBadge()
 })
 </script>
 
@@ -404,6 +541,8 @@ onMounted(async () => {
         <p class="page-desc">系统内资金 = 公司余额 + 项目余额 + 个人钱包；公司余额是尚未拨出的部分</p>
       </div>
       <div class="page-actions">
+        <span class="threshold-badge">{{ thresholdBadge }}</span>
+        <el-button @click="openThresholdDialog">出账阈值</el-button>
         <el-button type="primary" @click="openDialog">登记流水</el-button>
       </div>
     </div>
@@ -598,7 +737,8 @@ onMounted(async () => {
       </template>
     </el-drawer>
 
-    <el-dialog v-model="dialog" title="登记流水（需审批）" width="560px" :close-on-click-modal="false" @closed="emptyForm">
+    <el-dialog v-model="dialog" :title="form.bizType === 'INCOME' ? '登记入账（需财务审批）' : '登记出账'" width="560px" :close-on-click-modal="false" @closed="emptyForm">
+      <el-alert :title="registerHint" type="info" :closable="false" show-icon style="margin-bottom: 14px" />
       <el-form label-width="100px">
         <el-form-item label="类型">
           <el-select v-model="form.bizType" style="width: 100%">
@@ -626,7 +766,7 @@ onMounted(async () => {
             <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="到账总额" required>
+        <el-form-item label="总额" required>
           <el-input-number v-model="form.amount" :min="0.01" :precision="2" style="width: 100%" />
         </el-form-item>
         <el-form-item v-if="form.bizType === 'INCOME'" label="手续费">
@@ -678,13 +818,64 @@ onMounted(async () => {
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="save">提交审批</el-button>
+        <el-button type="primary" :loading="saving" @click="save">{{ submitBtnLabel }}</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="thresholdDialog" title="公司出账阈值" width="480px" :close-on-click-modal="false">
+      <el-form label-width="100px">
+        <el-form-item label="公司" required>
+          <el-select v-model="thresholdForm.companyId" style="width: 100%" @change="onThresholdCompanyChange">
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="启用阈值">
+          <el-switch v-model="thresholdForm.enabled" />
+          <span style="margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px">
+            关闭时出账一律走财务审批
+          </span>
+        </el-form-item>
+        <el-form-item label="通知线">
+          <el-input-number v-model="thresholdForm.notifyThreshold" :min="0" :precision="2" :step="1000" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="审批线">
+          <el-input-number v-model="thresholdForm.approveThreshold" :min="0" :precision="2" :step="1000" style="width: 100%" />
+        </el-form-item>
+        <el-alert
+          type="info"
+          :closable="false"
+          title="启用后：低于通知线直接出账；通知线到审批线之间直接出账并通知股东；达到审批线需全体股东会签。入账不受此配置影响。"
+        />
+        <el-alert
+          style="margin-top: 12px"
+          :type="thresholdForm.enabled ? 'success' : 'warning'"
+          :closable="false"
+          :title="thresholdForm.enabled
+            ? `当前生效：通知线 ${thresholdForm.notifyThreshold} / 审批线 ${thresholdForm.approveThreshold}`
+            : '当前未启用：无论填多少，出账都走财务审批。打开上方开关并保存后才会按阈值分流。'"
+        />
+      </el-form>
+      <template #footer>
+        <el-button @click="thresholdDialog = false">关闭</el-button>
+        <el-button type="primary" :loading="thresholdSaving" @click="saveThreshold">保存</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <style scoped>
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.threshold-badge {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  max-width: 280px;
+  line-height: 1.3;
+}
 .summary-row {
   display: grid;
   grid-template-columns: 1.4fr 1fr 1fr 1fr;
