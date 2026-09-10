@@ -388,4 +388,27 @@ async function onLogin() {
     display: none;
   }
 }
+
+@media (max-width: 480px) {
+  .login-page {
+    padding: 12px;
+  }
+
+  .login-shell {
+    border-radius: 18px;
+  }
+
+  .login-panel {
+    padding: 32px 20px;
+  }
+
+  .totp-boxes {
+    gap: 5px;
+  }
+
+  .totp-box {
+    width: min(44px, calc((100vw - 89px) / 6));
+    min-width: 0;
+  }
+}
 </style>

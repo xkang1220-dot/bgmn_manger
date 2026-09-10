@@ -30,6 +30,7 @@ const unreadCount = ref(0)
 const noticeList = ref<NotificationItem[]>([])
 const noticeLoading = ref(false)
 const noticeVisible = ref(false)
+const mobileMenuOpen = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let noticeSocket: { disconnect: () => void } | null = null
 
@@ -38,7 +39,10 @@ function iconOf(name?: string) {
 }
 
 function go(path?: string) {
-  if (path) router.push(path)
+  if (path) {
+    mobileMenuOpen.value = false
+    router.push(path)
+  }
 }
 
 function fmtTime(t?: string) {
@@ -173,6 +177,15 @@ onUnmounted(() => {
     <el-container class="main-wrap">
       <el-header class="header">
         <div class="header-left">
+          <button
+            type="button"
+            class="icon-btn mobile-menu-trigger"
+            title="打开导航"
+            aria-label="打开导航"
+            @click="mobileMenuOpen = true"
+          >
+            <el-icon :size="20"><Menu /></el-icon>
+          </button>
           <h1 class="page-heading">{{ pageTitle }}</h1>
         </div>
         <div class="header-right">
@@ -235,6 +248,48 @@ onUnmounted(() => {
         </router-view>
       </el-main>
     </el-container>
+
+    <el-drawer
+      v-model="mobileMenuOpen"
+      class="mobile-nav-drawer"
+      direction="ltr"
+      size="min(82vw, 300px)"
+      :with-header="false"
+      append-to-body
+    >
+      <div class="mobile-nav-logo" @click="go('/dashboard')">
+        <div class="logo-mark"><KkLogoMark /></div>
+        <span class="logo-title">BGMN</span>
+      </div>
+      <el-scrollbar class="mobile-nav-scroll">
+        <el-menu
+          :default-active="route.path"
+          class="mobile-side-menu"
+          router
+          @select="mobileMenuOpen = false"
+        >
+          <template v-for="menu in visibleMenus" :key="menu.id">
+            <el-sub-menu v-if="menu.children?.length" :index="menu.path || String(menu.id)">
+              <template #title>
+                <el-icon><component :is="iconOf(menu.icon)" /></el-icon>
+                <span>{{ menu.name }}</span>
+              </template>
+              <el-menu-item
+                v-for="child in menu.children.filter((c: MenuInfo) => c.type !== 3 && c.visible !== 0)"
+                :key="child.id"
+                :index="child.path"
+              >
+                {{ child.name }}
+              </el-menu-item>
+            </el-sub-menu>
+            <el-menu-item v-else :index="menu.path">
+              <el-icon><component :is="iconOf(menu.icon)" /></el-icon>
+              <span>{{ menu.name }}</span>
+            </el-menu-item>
+          </template>
+        </el-menu>
+      </el-scrollbar>
+    </el-drawer>
   </el-container>
 </template>
 
@@ -441,7 +496,14 @@ onUnmounted(() => {
 }
 
 .header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
+}
+
+.mobile-menu-trigger {
+  display: none;
 }
 
 .page-heading {
@@ -673,5 +735,111 @@ onUnmounted(() => {
   .page-fade-leave-active {
     transition: none;
   }
+}
+
+@media (max-width: 1100px) and (min-width: 769px) {
+  .aside {
+    width: 200px !important;
+  }
+
+  .logo,
+  .menu-scroll {
+    margin-left: 12px;
+    margin-right: 12px;
+  }
+
+  .menu-scroll {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .side-menu,
+  .aside :deep(.el-menu) {
+    width: 176px;
+  }
+}
+
+@media (max-width: 768px) {
+  .aside {
+    display: none;
+  }
+
+  .header {
+    --el-header-height: 64px;
+    height: 64px;
+    padding: 0 12px;
+  }
+
+  .mobile-menu-trigger {
+    display: inline-flex;
+  }
+
+  .page-heading {
+    max-width: min(44vw, 240px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 19px;
+  }
+
+  .main {
+    padding: 0 12px 12px;
+  }
+
+  .header-right {
+    gap: 4px;
+  }
+
+  .user-name,
+  .header-split {
+    display: none;
+  }
+
+  .user-chip {
+    padding-right: 4px;
+  }
+}
+</style>
+
+<style>
+.mobile-nav-drawer .el-drawer__body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+}
+
+.mobile-nav-logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 76px;
+  padding: 14px 18px;
+  flex-shrink: 0;
+  cursor: pointer;
+  border-bottom: 1px solid var(--kk-hairline);
+}
+
+.mobile-nav-scroll {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+}
+
+.mobile-side-menu {
+  border-right: 0 !important;
+  background: transparent !important;
+}
+
+.mobile-side-menu .el-menu-item,
+.mobile-side-menu .el-sub-menu__title {
+  height: 48px;
+  margin-bottom: 4px;
+  border-radius: 12px;
+}
+
+.mobile-side-menu .el-menu-item.is-active {
+  color: var(--kk-side-active-color) !important;
+  background: var(--kk-side-active) !important;
 }
 </style>
