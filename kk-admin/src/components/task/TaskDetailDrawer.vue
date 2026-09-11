@@ -42,6 +42,7 @@ const uploading = ref(false)
 const imageFileList = ref<UploadFile[]>([])
 const previewVisible = ref(false)
 const previewUrl = ref('')
+const previewIsVideo = ref(false)
 const transferDialog = ref(false)
 const transferring = ref(false)
 const transferForm = reactive({
@@ -97,13 +98,23 @@ function imageUrl(file: { id?: number; url?: string }) {
   return file.url || `/api/file/preview/${file.id}`
 }
 
+function isVideoFile(file: { contentType?: string; name?: string; originalName?: string; url?: string }) {
+  const type = file.contentType || ''
+  if (type.startsWith('video/')) return true
+  const name = file.originalName || file.name || file.url || ''
+  return /\.(mp4|webm|mov|m4v|avi|mkv)(\?|$)/i.test(name)
+}
+
 function toUploadFile(file: any): UploadFile {
-  return {
-    name: file.originalName || `image-${file.id}`,
+  const raw = {
+    name: file.originalName || `file-${file.id}`,
     url: imageUrl(file),
     uid: file.id,
-    status: 'success',
+    status: 'success' as const,
   }
+  const item = raw as UploadFile & { contentType?: string }
+  item.contentType = file.contentType
+  return item
 }
 
 function syncImageFileIds() {
@@ -422,29 +433,35 @@ async function onUploadImage(options: any) {
     const file = await bizApi.uploadTaskImage(options.file)
     options.onSuccess?.(file)
     await nextTick()
-    const item = imageFileList.value.find((f) => f.uid === options.file.uid)
+    const item = imageFileList.value.find((f) => f.uid === options.file.uid) as (UploadFile & { contentType?: string }) | undefined
     if (item) {
       item.url = imageUrl(file)
       item.uid = file.id
       item.name = file.originalName || item.name
+      item.contentType = file.contentType
     }
     syncImageFileIds()
-    ElMessage.success('图片上传成功')
+    ElMessage.success('附件上传成功')
   } catch (e: any) {
-    ElMessage.error(e.message || '图片上传失败')
+    ElMessage.error(e.message || '附件上传失败')
     options.onError?.(e)
   } finally {
     uploading.value = false
   }
 }
 
+const MAX_ATTACH_MB = 500
+
 const beforeImageUpload: UploadProps['beforeUpload'] = (file) => {
-  if (!file.type.startsWith('image/')) {
-    ElMessage.warning('仅支持上传图片')
+  const name = file.name || ''
+  const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name)
+  const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|m4v|avi|mkv)$/i.test(name)
+  if (!isImage && !isVideo) {
+    ElMessage.warning('仅支持上传图片或视频')
     return false
   }
-  if (file.size / 1024 / 1024 > 10) {
-    ElMessage.warning('单张图片不能超过 10MB')
+  if (file.size / 1024 / 1024 > MAX_ATTACH_MB) {
+    ElMessage.warning(`单个附件不能超过 ${MAX_ATTACH_MB}MB`)
     return false
   }
   return true
@@ -456,7 +473,7 @@ async function onRemoveImage(uploadFile: UploadFile) {
     try {
       await bizApi.deleteTaskImage(fileId)
     } catch (e: any) {
-      ElMessage.error(e.message || '图片删除失败')
+      ElMessage.error(e.message || '附件删除失败')
       return false
     }
   }
@@ -466,7 +483,19 @@ async function onRemoveImage(uploadFile: UploadFile) {
 
 function onPreviewImage(uploadFile: UploadFile) {
   previewUrl.value = uploadFile.url || ''
+  previewIsVideo.value = isVideoFile({
+    contentType: (uploadFile as any).contentType,
+    name: uploadFile.name,
+    url: uploadFile.url,
+  })
   previewVisible.value = true
+}
+
+async function handleAttachRemove(uploadFile: UploadFile) {
+  const result = await onRemoveImage(uploadFile)
+  if (result === false) return
+  imageFileList.value = imageFileList.value.filter((f) => f.uid !== uploadFile.uid)
+  syncImageFileIds()
 }
 
 async function submitComment() {
@@ -535,16 +564,24 @@ function canDeleteComment(c: any) {
         </el-descriptions>
 
         <div v-if="detail.images?.length" class="section">
-          <div class="section-title">图片</div>
+          <div class="section-title">附件</div>
           <div class="image-gallery">
-            <el-image
-              v-for="img in detail.images"
-              :key="img.id"
-              :src="imageUrl(img)"
-              :preview-src-list="detail.images.map(imageUrl)"
-              fit="cover"
-              class="image-item"
-            />
+            <template v-for="file in detail.images" :key="file.id">
+              <video
+                v-if="isVideoFile(file)"
+                class="image-item media-video"
+                :src="imageUrl(file)"
+                controls
+                preload="metadata"
+              />
+              <el-image
+                v-else
+                :src="imageUrl(file)"
+                :preview-src-list="detail.images.filter((f: any) => !isVideoFile(f)).map(imageUrl)"
+                fit="cover"
+                class="image-item"
+              />
+            </template>
           </div>
         </div>
 
@@ -610,14 +647,22 @@ function canDeleteComment(c: any) {
                     <div class="flow-summary">{{ f.summary }}</div>
                     <div v-if="f.remark" class="flow-remark">说明：{{ f.remark }}</div>
                     <div v-if="f.images?.length" class="flow-images">
-                      <el-image
-                        v-for="img in f.images"
-                        :key="img.id"
-                        :src="imageUrl(img)"
-                        :preview-src-list="f.images.map(imageUrl)"
-                        fit="cover"
-                        class="flow-img"
-                      />
+                      <template v-for="img in f.images" :key="img.id">
+                        <video
+                          v-if="isVideoFile(img)"
+                          class="flow-img media-video"
+                          :src="imageUrl(img)"
+                          controls
+                          preload="metadata"
+                        />
+                        <el-image
+                          v-else
+                          :src="imageUrl(img)"
+                          :preview-src-list="f.images.filter((x: any) => !isVideoFile(x)).map(imageUrl)"
+                          fit="cover"
+                          class="flow-img"
+                        />
+                      </template>
                     </div>
                   </div>
                 </el-timeline-item>
@@ -673,11 +718,11 @@ function canDeleteComment(c: any) {
           <el-form-item label="描述">
             <el-input v-model="form.content" type="textarea" :rows="4" maxlength="1000" show-word-limit />
           </el-form-item>
-          <el-form-item label="图片">
+          <el-form-item label="附件">
             <el-upload
               v-model:file-list="imageFileList"
               list-type="picture-card"
-              accept="image/*"
+              accept="image/*,video/*"
               :limit="9"
               :http-request="onUploadImage"
               :before-upload="beforeImageUpload"
@@ -685,7 +730,24 @@ function canDeleteComment(c: any) {
               :on-preview="onPreviewImage"
             >
               <el-icon><Plus /></el-icon>
+              <template #file="{ file }">
+                <div class="attach-card">
+                  <video
+                    v-if="isVideoFile(file as any)"
+                    class="attach-card__media"
+                    :src="file.url"
+                    muted
+                    preload="metadata"
+                  />
+                  <img v-else class="attach-card__media" :src="file.url" alt="" />
+                  <span class="attach-card__actions">
+                    <span class="attach-card__btn" @click.stop="onPreviewImage(file)">预览</span>
+                    <span class="attach-card__btn is-danger" @click.stop="handleAttachRemove(file)">删除</span>
+                  </span>
+                </div>
+              </template>
             </el-upload>
+            <div class="upload-tip">支持图片、视频，单个不超过 {{ MAX_ATTACH_MB }}MB，最多 9 个</div>
           </el-form-item>
         </el-form>
         <div class="detail-actions">
@@ -695,8 +757,14 @@ function canDeleteComment(c: any) {
       </template>
     </div>
 
-    <el-dialog v-model="previewVisible" title="图片预览" width="720px" append-to-body>
-      <img :src="previewUrl" alt="preview" style="display: block; max-width: 100%; margin: 0 auto" />
+    <el-dialog v-model="previewVisible" :title="previewIsVideo ? '视频预览' : '图片预览'" width="720px" append-to-body @closed="previewUrl = ''">
+      <video
+        v-if="previewIsVideo"
+        :src="previewUrl"
+        controls
+        style="display: block; width: 100%; max-height: 70vh; background: #000"
+      />
+      <img v-else :src="previewUrl" alt="preview" style="display: block; max-width: 100%; margin: 0 auto" />
     </el-dialog>
 
     <el-dialog v-model="transferDialog" title="移交任务" width="420px" append-to-body>
@@ -715,18 +783,26 @@ function canDeleteComment(c: any) {
         <el-form-item label="说明">
           <el-input v-model="transferForm.remark" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="可选，写明移交原因" />
         </el-form-item>
-        <el-form-item label="图片">
-          <el-upload :show-file-list="false" :http-request="onUploadTransferImage" accept="image/*">
-            <el-button :loading="transferUploading">上传图片</el-button>
+        <el-form-item label="附件">
+          <el-upload :show-file-list="false" :http-request="onUploadTransferImage" :before-upload="beforeImageUpload" accept="image/*,video/*">
+            <el-button :loading="transferUploading">上传图片/视频</el-button>
           </el-upload>
           <div v-if="transferImages.length" class="flow-images" style="margin-top: 8px">
-            <el-image
-              v-for="(img, i) in transferImages"
-              :key="img.id"
-              :src="imageUrl(img)"
-              fit="cover"
-              class="flow-img"
-            />
+            <template v-for="(img, i) in transferImages" :key="img.id || i">
+              <video
+                v-if="isVideoFile(img)"
+                class="flow-img media-video"
+                :src="imageUrl(img)"
+                controls
+                preload="metadata"
+              />
+              <el-image
+                v-else
+                :src="imageUrl(img)"
+                fit="cover"
+                class="flow-img"
+              />
+            </template>
             <el-button link type="danger" @click="transferImages = []; transferForm.imageFileIds = []">清空</el-button>
           </div>
         </el-form-item>
@@ -800,6 +876,58 @@ function canDeleteComment(c: any) {
   height: 80px;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
+}
+
+.media-video {
+  object-fit: cover;
+  background: #0f172a;
+}
+
+.upload-tip {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+
+.attach-card {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #0f172a;
+}
+.attach-card__media {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attach-card__actions {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(15, 23, 42, 0.55);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.attach-card:hover .attach-card__actions {
+  opacity: 1;
+}
+.attach-card__btn {
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.16);
+}
+.attach-card__btn.is-danger:hover {
+  background: rgba(239, 68, 68, 0.85);
 }
 
 .detail-actions {

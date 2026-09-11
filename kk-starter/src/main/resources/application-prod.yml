@@ -9,8 +9,8 @@ spring:
     time-zone: GMT+8
   servlet:
     multipart:
-      max-file-size: 100MB
-      max-request-size: 100MB
+      max-file-size: 500MB
+      max-request-size: 520MB
   data:
     redis:
       host: ${REDIS_HOST:host.docker.internal}
@@ -64,7 +64,7 @@ kk:
       provider: rustfs
       prefix: kk-files
       ledger-voucher-prefix: ledger-vouchers
-      max-size-mb: 100
+      max-size-mb: 500
       local:
         base-path: ${KK_FILE_LOCAL_PATH:./uploads}
       rustfs:

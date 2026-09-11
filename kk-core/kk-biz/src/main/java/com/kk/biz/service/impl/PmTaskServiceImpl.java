@@ -417,9 +417,20 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
 
     @Override
     public SysFile uploadImage(MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            throw new BusinessException("请选择文件");
+        }
         String contentType = file.getContentType();
-        if (contentType == null || !contentType.startsWith("image/")) {
-            throw new BusinessException("仅支持上传图片文件");
+        String name = file.getOriginalFilename() == null ? "" : file.getOriginalFilename();
+        boolean image = contentType != null && contentType.startsWith("image/");
+        boolean video = contentType != null && contentType.startsWith("video/");
+        if (!image && !video) {
+            String lower = name.toLowerCase();
+            image = lower.matches(".*\\.(png|jpe?g|gif|webp|bmp|svg)$");
+            video = lower.matches(".*\\.(mp4|webm|mov|m4v|avi|mkv)$");
+        }
+        if (!image && !video) {
+            throw new BusinessException("仅支持上传图片或视频");
         }
         return fileService.upload(file, TASK_IMAGE_BIZ, null);
     }

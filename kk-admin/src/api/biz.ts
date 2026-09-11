@@ -177,6 +177,7 @@ export const bizApi = {
       method: 'post',
       data: form,
       headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 10 * 60 * 1000,
     })
   },
   deleteTaskImage(fileId: number) {
