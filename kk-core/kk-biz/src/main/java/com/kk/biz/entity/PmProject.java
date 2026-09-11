@@ -53,12 +53,19 @@ public class PmProject extends BaseEntity {
     /** 0筹备 1进行中 2已完成 3已关闭 */
     private Integer status;
 
+    /** NORMAL常规 / KEY重点 / MAJOR重大 */
+    private String scale;
+
     /** 0待审 1已生效 2已拒绝 */
     private Integer approveStatus;
 
     private LocalDate startDate;
 
+    /** 预计结束时间 */
     private LocalDate endDate;
+
+    /** 实际结束时间（手动填写） */
+    private LocalDate actualEndDate;
 
     private String description;
 
@@ -70,4 +77,8 @@ public class PmProject extends BaseEntity {
 
     @TableField(exist = false)
     private List<PmProjectMember> members;
+
+    /** 项目参与人展示名（列表用） */
+    @TableField(exist = false)
+    private List<String> participantNames;
 }

@@ -10,6 +10,8 @@ public final class ApprovalTypes {
 
     public static final String PROJECT_CREATE = "PROJECT_CREATE";
     public static final String PROJECT_DELETE = "PROJECT_DELETE";
+    /** 变更项目规模（改到重点/重大，含重点↔重大） */
+    public static final String PROJECT_SCALE_CHANGE = "PROJECT_SCALE_CHANGE";
     public static final String REIMBURSE_PERSONAL = "REIMBURSE_PERSONAL";
     public static final String REIMBURSE_PROJECT = "REIMBURSE_PROJECT";
     public static final String PROJECT_ADVANCE = "PROJECT_ADVANCE";
@@ -36,6 +38,7 @@ public final class ApprovalTypes {
         return switch (type) {
             case PROJECT_CREATE -> "创建项目";
             case PROJECT_DELETE -> "删除项目";
+            case PROJECT_SCALE_CHANGE -> "变更项目规模";
             case REIMBURSE_PERSONAL -> "个人报销";
             case REIMBURSE_PROJECT -> "项目报销";
             case PROJECT_ADVANCE -> "项目预支";

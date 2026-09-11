@@ -30,6 +30,7 @@ const detailTab = ref('board')
 const taskSummary = ref<Record<string, number>>({})
 const tasks = ref<any[]>([])
 const taskTotal = ref(0)
+const projectFlows = ref<any[]>([])
 const taskQuery = reactive({ page: 1, pageSize: 10, status: undefined as number | undefined })
 const loadingDetail = ref(false)
 const kanbanRef = ref<InstanceType<typeof TaskKanban> | null>(null)
@@ -44,13 +45,22 @@ const form = reactive<any>({
   code: '',
   companyId: undefined as number | undefined,
   ownerId: undefined,
+  participants: [] as { userId?: number; layer: string }[],
   status: 1,
+  scale: 'NORMAL',
   startDate: '',
   endDate: '',
+  actualEndDate: '',
   description: '',
 })
 
 const statusMap: Record<number, string> = { 0: '筹备', 1: '进行中', 2: '已完成', 3: '已关闭' }
+const scaleMap: Record<string, string> = { NORMAL: '常规', KEY: '重点', MAJOR: '重大' }
+const scaleOptions = [
+  { value: 'NORMAL', label: '常规', tip: '创建免审' },
+  { value: 'KEY', label: '重点', tip: '创建需审批' },
+  { value: 'MAJOR', label: '重大', tip: '创建需审批' },
+]
 const taskStatusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭' }
 const taskStatusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'> = {
   0: 'info',
@@ -131,7 +141,14 @@ async function loadDetail(id: number) {
 async function loadActiveTabData() {
   if (detailTab.value === 'tasks') {
     await loadTasks()
+  } else if (detailTab.value === 'flows') {
+    await loadProjectFlows()
   }
+}
+
+async function loadProjectFlows() {
+  if (!activeProjectId.value) return
+  projectFlows.value = await bizApi.projectFlows(activeProjectId.value)
 }
 
 async function loadTaskSummary() {
@@ -170,11 +187,20 @@ function open(row?: any) {
         companyId: d.companyId,
         companyName: d.companyName,
         ownerId: d.ownerId,
+        participants: (d.members || []).map((m: any) => ({
+          userId: m.userId,
+          layer: m.layer || '',
+        })),
         status: d.status,
+        scale: d.scale || 'NORMAL',
         startDate: d.startDate || '',
         endDate: d.endDate || '',
+        actualEndDate: d.actualEndDate || '',
         description: d.description || '',
       })
+      if (!form.participants.length) {
+        form.participants = [{ userId: undefined, layer: '' }]
+      }
       loadOwners(d.companyId)
       dialog.value = true
     })
@@ -187,25 +213,61 @@ function open(row?: any) {
       companyId: only,
       companyName: undefined,
       ownerId: undefined,
+      participants: [{ userId: undefined, layer: '' }] as { userId?: number; layer: string }[],
       status: 1,
+      scale: 'NORMAL',
       startDate: '',
       endDate: '',
+      actualEndDate: '',
       description: '',
     })
     loadOwners(only)
     dialog.value = true
+    void previewNextCode(only)
   }
 }
 
-async function loadOwners(companyId?: number) {
-  users.value = companyId
-    ? await sysApi.userList({ companyId })
+async function previewNextCode(companyId?: number | string | null) {
+  const id = companyId == null || companyId === '' ? undefined : Number(companyId)
+  if (isEdit.value || id == null || Number.isNaN(id)) {
+    if (!isEdit.value) form.code = ''
+    return
+  }
+  try {
+    form.code = await bizApi.projectNextCode(id)
+  } catch {
+    form.code = ''
+  }
+}
+
+async function loadOwners(companyId?: number | string | null) {
+  const id = companyId == null || companyId === '' ? undefined : Number(companyId)
+  users.value = id != null && !Number.isNaN(id)
+    ? await sysApi.userList({ companyId: id })
     : await sysApi.userList()
 }
 
-async function onCompanyChange(companyId?: number) {
+async function onCompanyChange(companyId?: number | string | null) {
   form.ownerId = undefined
+  form.participants = [{ userId: undefined, layer: '' }]
   await loadOwners(companyId)
+  await previewNextCode(companyId)
+}
+
+function addParticipantRow() {
+  form.participants.push({ userId: undefined, layer: '' })
+}
+
+function removeParticipantRow(index: number | string) {
+  form.participants.splice(Number(index), 1)
+  if (!form.participants.length) {
+    form.participants.push({ userId: undefined, layer: '' })
+  }
+}
+
+function formatMemberLabel(m: any) {
+  const name = m.nickname || m.userName || m.userId
+  return m.layer ? `${name}（${m.layer}）` : name
 }
 
 async function save() {
@@ -217,14 +279,51 @@ async function save() {
     ElMessage.warning('请选择所属公司')
     return
   }
+  if (!form.scale) {
+    ElMessage.warning('请选择项目规模')
+    return
+  }
+  const memberRows = (form.participants || []).filter((p: any) => p.userId != null)
+  for (const row of memberRows) {
+    if (!String(row.layer || '').trim()) {
+      ElMessage.warning('请填写每位项目参与人的职责')
+      return
+    }
+  }
+  const userIds = memberRows.map((p: any) => p.userId)
+  if (new Set(userIds).size !== userIds.length) {
+    ElMessage.warning('项目参与人不能重复')
+    return
+  }
   saving.value = true
   try {
+    const payload = {
+      ...form,
+      startDate: form.startDate || null,
+      endDate: form.endDate || null,
+      actualEndDate: form.actualEndDate || null,
+      members: memberRows.map((p: any) => ({
+        userId: p.userId,
+        layer: String(p.layer).trim(),
+        percent: 0,
+      })),
+    }
+    delete payload.participants
+    delete payload.code
     if (isEdit.value) {
-      await bizApi.saveProject(form, true)
-      ElMessage.success('保存成功')
+      const res = await bizApi.saveProject(payload, true)
+      if (res?.type === 'PROJECT_SCALE_CHANGE' || res?.bizNo) {
+        ElMessage.success(approvalFlowTip(res, '已提交规模变更审批'))
+      } else {
+        ElMessage.success('保存成功')
+      }
     } else {
-      const approval = await bizApi.saveProject(form, false)
-      ElMessage.success(approvalFlowTip(approval))
+      const res = await bizApi.saveProject(payload, false)
+      if (res?.type === 'PROJECT_CREATE' || res?.bizNo) {
+        ElMessage.success(approvalFlowTip(res))
+      } else {
+        ElMessage.success('创建成功')
+      }
     }
     dialog.value = false
     await load()
@@ -352,9 +451,14 @@ onMounted(async () => {
           @keyup.enter="enterProject(row)"
         >
           <div class="project-card__head">
-            <span class="status-pill status-pill--sm" :class="`status-pill--${row.status}`">
-              {{ statusMap[row.status] || '—' }}
-            </span>
+            <div class="project-card__tags">
+              <span class="status-pill status-pill--sm" :class="`status-pill--${row.status}`">
+                {{ statusMap[row.status] || '—' }}
+              </span>
+              <span class="scale-pill scale-pill--sm" :class="`scale-pill--${row.scale || 'NORMAL'}`">
+                {{ scaleMap[row.scale] || '常规' }}
+              </span>
+            </div>
             <span class="project-code">{{ row.code || '未编号' }}</span>
           </div>
           <div class="project-card__main">
@@ -418,6 +522,9 @@ onMounted(async () => {
             <div class="project-hero__title-row">
               <h1 class="project-hero__title">{{ detail.name }}</h1>
               <span class="status-pill" :class="`status-pill--${detail.status}`">{{ statusMap[detail.status] }}</span>
+              <span class="scale-pill" :class="`scale-pill--${detail.scale || 'NORMAL'}`">
+                {{ scaleMap[detail.scale] || '常规' }}
+              </span>
               <span class="project-code">{{ detail.code || '未编号' }}</span>
             </div>
             <div class="meta-chips">
@@ -425,9 +532,10 @@ onMounted(async () => {
                 <el-icon :size="14"><User /></el-icon>
                 {{ detail.ownerName || '未指定' }}
               </span>
-              <span v-if="detail.startDate || detail.endDate" class="meta-chip">
+              <span v-if="detail.startDate || detail.endDate || detail.actualEndDate" class="meta-chip">
                 <el-icon :size="14"><Calendar /></el-icon>
-                {{ detail.startDate || '—' }} ~ {{ detail.endDate || '—' }}
+                预计 {{ detail.startDate || '—' }} ~ {{ detail.endDate || '—' }}
+                <template v-if="detail.actualEndDate"> · 实际 {{ detail.actualEndDate }}</template>
               </span>
             </div>
           </div>
@@ -598,13 +706,29 @@ onMounted(async () => {
                 <span class="info-label">负责人</span>
                 <span class="info-value">{{ detail.ownerName || '—' }}</span>
               </div>
+              <div class="info-item info-item--full">
+                <span class="info-label">项目参与人</span>
+                <span class="info-value">{{
+                  detail.members?.length
+                    ? detail.members.map((m: any) => formatMemberLabel(m)).join('、')
+                    : '无'
+                }}</span>
+              </div>
               <div class="info-item">
                 <span class="info-label">状态</span>
                 <span class="info-value">{{ statusMap[detail.status] }}</span>
               </div>
               <div class="info-item">
-                <span class="info-label">周期</span>
+                <span class="info-label">规模</span>
+                <span class="info-value">{{ scaleMap[detail.scale] || '常规' }}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">预计周期</span>
                 <span class="info-value">{{ detail.startDate || '—' }} ~ {{ detail.endDate || '—' }}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">实际结束</span>
+                <span class="info-value">{{ detail.actualEndDate || '—' }}</span>
               </div>
               <div class="info-item info-item--full">
                 <span class="info-label">说明</span>
@@ -612,12 +736,33 @@ onMounted(async () => {
               </div>
             </div>
           </el-tab-pane>
+
+          <el-tab-pane label="操作记录" name="flows">
+            <el-timeline v-if="projectFlows.length" class="project-flow-timeline">
+              <el-timeline-item
+                v-for="flow in projectFlows"
+                :key="flow.id"
+                :timestamp="flow.createTime ? String(flow.createTime).replace('T', ' ').slice(0, 16) : ''"
+                placement="top"
+              >
+                <div class="flow-item">
+                  <div class="flow-item__title">
+                    {{ flow.actionLabel || flow.action }}
+                    <span class="flow-item__op">{{ flow.operatorName || '系统' }}</span>
+                  </div>
+                  <div class="flow-item__summary">{{ flow.summary || '—' }}</div>
+                  <div v-if="flow.approvalId" class="flow-item__meta">关联审批 #{{ flow.approvalId }}</div>
+                </div>
+              </el-timeline-item>
+            </el-timeline>
+            <el-empty v-else description="暂无操作记录" />
+          </el-tab-pane>
         </el-tabs>
       </section>
     </template>
 
-    <el-dialog v-model="dialog" :title="isEdit ? '编辑项目' : '新建项目'" width="560px" :close-on-click-modal="false">
-      <el-form label-width="90px">
+    <el-dialog v-model="dialog" :title="isEdit ? '编辑项目' : '新建项目'" width="640px" :close-on-click-modal="false">
+      <el-form label-width="110px">
         <el-form-item label="所属公司" required>
           <el-select
             v-if="!isEdit"
@@ -632,11 +777,43 @@ onMounted(async () => {
           <span v-else class="info-value">{{ form.companyName || '—' }}</span>
         </el-form-item>
         <el-form-item label="名称" required><el-input v-model="form.name" /></el-form-item>
-        <el-form-item label="编号"><el-input v-model="form.code" /></el-form-item>
+        <el-form-item label="编号">
+          <el-input
+            v-model="form.code"
+            disabled
+            :placeholder="isEdit ? '—' : (form.companyId ? '生成中…' : '请先选择所属公司')"
+          />
+        </el-form-item>
         <el-form-item label="负责人">
           <el-select v-model="form.ownerId" filterable clearable style="width: 100%" :disabled="!isEdit && !form.companyId">
             <el-option v-for="u in users" :key="u.id" :label="u.nickname || u.username" :value="u.id" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="项目参与人">
+          <div class="participant-editor" :class="{ 'is-disabled': !isEdit && !form.companyId }">
+            <div v-for="(row, index) in form.participants" :key="index" class="participant-row">
+              <el-select
+                v-model="row.userId"
+                filterable
+                clearable
+                placeholder="选择人员"
+                style="width: 42%"
+                :disabled="!isEdit && !form.companyId"
+              >
+                <el-option v-for="u in users" :key="u.id" :label="u.nickname || u.username" :value="u.id" />
+              </el-select>
+              <el-input
+                v-model="row.layer"
+                maxlength="64"
+                show-word-limit
+                placeholder="职责（必填）"
+                style="flex: 1"
+                :disabled="!isEdit && !form.companyId"
+              />
+              <el-button link type="danger" :disabled="form.participants.length <= 1" @click="removeParticipantRow(index)">删除</el-button>
+            </div>
+            <el-button link type="primary" :disabled="!isEdit && !form.companyId" @click="addParticipantRow">添加参与人</el-button>
+          </div>
         </el-form-item>
         <el-row :gutter="16">
           <el-col :span="12">
@@ -645,11 +822,14 @@ onMounted(async () => {
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="结束日期">
+            <el-form-item label="预计结束时间">
               <el-date-picker v-model="form.endDate" value-format="YYYY-MM-DD" style="width: 100%" />
             </el-form-item>
           </el-col>
         </el-row>
+        <el-form-item label="实际结束时间">
+          <el-date-picker v-model="form.actualEndDate" value-format="YYYY-MM-DD" style="width: 100%" />
+        </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="form.status" style="width: 100%">
             <el-option :value="0" label="筹备" />
@@ -657,6 +837,17 @@ onMounted(async () => {
             <el-option :value="2" label="已完成" />
             <el-option :value="3" label="已关闭" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="规模" required>
+          <el-select v-model="form.scale" style="width: 100%" placeholder="选择规模">
+            <el-option
+              v-for="opt in scaleOptions"
+              :key="opt.value"
+              :value="opt.value"
+              :label="`${opt.label}（${opt.tip}）`"
+            />
+          </el-select>
+          <div class="form-tip">常规创建免审；改为重点/重大（含互切）需审批</div>
         </el-form-item>
         <el-form-item label="说明"><el-input v-model="form.description" type="textarea" :rows="3" /></el-form-item>
       </el-form>
@@ -677,6 +868,20 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.participant-editor {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.participant-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
 .filter-keyword--wide {
   width: 220px;
 }
@@ -737,6 +942,13 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.project-card__tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .project-code {
@@ -900,6 +1112,55 @@ onMounted(async () => {
 .status-pill--1 { background: #fef3c7; color: #b45309; }
 .status-pill--2 { background: #d1fae5; color: #047857; }
 .status-pill--3 { background: #f1f5f9; color: #475569; }
+
+.scale-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.scale-pill--sm {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+.scale-pill--NORMAL { background: #f1f5f9; color: #64748b; }
+.scale-pill--KEY { background: #dbeafe; color: #1d4ed8; }
+.scale-pill--MAJOR { background: #fee2e2; color: #b91c1c; }
+
+.form-tip {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+
+.project-flow-timeline {
+  padding: 8px 12px 0;
+}
+.flow-item__title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-weight: 600;
+  color: #0f172a;
+}
+.flow-item__op {
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
+}
+.flow-item__summary {
+  margin-top: 4px;
+  font-size: 13px;
+  color: #334155;
+}
+.flow-item__meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #94a3b8;
+}
 
 .meta-chips {
   display: flex;

@@ -121,8 +121,14 @@ export const bizApi = {
   projectDetail(id: number) {
     return request<any>({ url: `/project/${id}`, method: 'get' })
   },
+  projectNextCode(companyId: number) {
+    return request<string>({ url: '/project/next-code', method: 'get', params: { companyId } })
+  },
   saveProject(data: any, isEdit: boolean) {
     return request<any>({ url: '/project', method: isEdit ? 'put' : 'post', data })
+  },
+  projectFlows(id: number) {
+    return request<any[]>({ url: `/project/${id}/flows`, method: 'get' })
   },
   deleteProject(id: number) {
     return request<any>({ url: `/project/${id}`, method: 'delete' })

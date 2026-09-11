@@ -3,6 +3,7 @@ package com.kk.biz.service;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.kk.biz.entity.PmProject;
+import com.kk.biz.entity.PmProjectFlow;
 
 public interface PmProjectService extends IService<PmProject> {
 
@@ -26,6 +27,28 @@ public interface PmProjectService extends IService<PmProject> {
     void createProject(PmProject project);
 
     void updateProject(PmProject project);
+
+    /**
+     * 更新项目；若目标规模需审批且规模有变，则不改 scale，返回待提交的 from/to。
+     * @return null 表示已全部落库；非 null 为待审批的规模变更 [fromScale, toScale]
+     */
+    String[] updateProjectMaybeScaleApproval(PmProject project);
+
+    void applyScaleChange(Long projectId, String toScale, Long approvalId);
+
+    void applyScaleChange(Long projectId, String toScale, Long approvalId, Long operatorId);
+
+    void recordFlow(Long projectId, String action, String fromValue, String toValue, Long approvalId, String remark);
+
+    void recordFlow(Long projectId, String action, String fromValue, String toValue, Long approvalId, String remark, Long operatorId);
+
+    java.util.List<PmProjectFlow> listFlows(Long projectId);
+
+    /** 按公司名拼音首字母生成下一编号，如 XYGS-001 */
+    String allocateNextCode(Long companyId);
+
+    /** 任务可选参与人：项目负责人 ∪ 项目成员 */
+    java.util.Set<Long> eligibleTaskParticipantIds(Long projectId);
 
     /** 财务侧保存项目分层（资金池/预算/分成比例） */
     void saveShareConfig(Long projectId, Long poolId, java.math.BigDecimal budget,

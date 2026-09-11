@@ -5,12 +5,14 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.kk.biz.entity.PmProject;
+import com.kk.biz.entity.PmProjectMember;
 import com.kk.biz.entity.PmTask;
 import com.kk.biz.entity.PmTaskComment;
 import com.kk.biz.entity.PmTaskFlow;
 import com.kk.biz.entity.PmTaskMember;
 import com.kk.biz.entity.SysFile;
 import com.kk.biz.mapper.PmProjectMapper;
+import com.kk.biz.mapper.PmProjectMemberMapper;
 import com.kk.biz.mapper.PmTaskCommentMapper;
 import com.kk.biz.mapper.PmTaskFlowMapper;
 import com.kk.biz.mapper.PmTaskMapper;
@@ -46,6 +48,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     private static final String TASK_IMAGE_BIZ = "task";
 
     private final PmProjectMapper projectMapper;
+    private final PmProjectMemberMapper projectMemberMapper;
     private final PmTaskMemberMapper taskMemberMapper;
     private final PmTaskCommentMapper commentMapper;
     private final PmTaskFlowMapper flowMapper;
@@ -209,15 +212,17 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             throw new BusinessException("项目缺少所属公司，无法创建任务");
         }
         long loginId = StpUtil.getLoginIdAsLong();
+        Set<Long> eligible = eligibleTaskParticipantIds(project.getId());
         List<Long> participants = task.getParticipantIds() == null
                 ? new ArrayList<>()
                 : new ArrayList<>(task.getParticipantIds());
-        if (!participants.contains(loginId)) {
+        if (eligible.contains(loginId) && !participants.contains(loginId)) {
             participants.add(loginId);
         }
         task.setAssigneeId(null);
         task.setParticipantIds(participants);
         assertUsersInCompany(project.getCompanyId(), null, participants);
+        assertParticipantsEligible(project.getId(), participants);
         if (task.getStatus() == null) {
             task.setStatus(0);
         }
@@ -244,6 +249,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         assertCanAccessTask(existing);
         assertTaskNotClosed(existing);
+        assertCanWriteTask(existing);
         if (task.getStatus() != null && task.getStatus() == 3 && !Objects.equals(existing.getStatus(), 3)) {
             throw new BusinessException("关闭任务请使用关闭操作并填写原因");
         }
@@ -261,6 +267,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         // 持有人字段已停用：强制清空，忽略入参
         task.setAssigneeId(null);
         assertUsersInCompany(companyId, null, task.getParticipantIds());
+        if (task.getParticipantIds() != null) {
+            assertParticipantsEligible(existing.getProjectId(), task.getParticipantIds());
+        }
         validateDateRange(task);
         normalizeProgress(task);
         Integer oldStatus = existing.getStatus();
@@ -304,12 +313,13 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         assertCanAccessTask(existing);
         Integer oldStatus = existing.getStatus();
-        if (Objects.equals(oldStatus, 3) && !Objects.equals(status, 3)) {
-            throw new BusinessException("已关闭的任务不可修改，仅可查看");
-        }
         if (status.equals(oldStatus)) {
             return;
         }
+        if (Objects.equals(oldStatus, 3)) {
+            throw new BusinessException("已关闭的任务不可修改，仅可查看");
+        }
+        assertCanWriteTask(existing);
         String note = StringUtils.hasText(remark) ? remark.trim() : null;
         if (status == 3) {
             if (!StringUtils.hasText(note)) {
@@ -354,6 +364,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         assertCanAccessTask(existing);
         assertTaskNotClosed(existing);
+        assertCanWriteTask(existing);
         assertCanTransfer(existing);
         SysUser target = userService.getById(targetUserId);
         if (target == null) {
@@ -367,6 +378,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             }
         }
         assertUsersInCompany(companyId, null, List.of(targetUserId));
+        assertParticipantsEligible(existing.getProjectId(), List.of(targetUserId));
         String note = StringUtils.hasText(remark) ? remark.trim() : null;
         if (note != null && note.length() > 500) {
             throw new BusinessException("移交说明不能超过 500 字");
@@ -660,56 +672,147 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             return;
         }
         Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
-        Set<Long> users = dataScopeService.visibleUserIds(loginId);
-        if (companies.isEmpty() || users.isEmpty()) {
+        if (companies.isEmpty()) {
             wrapper.eq(PmTask::getId, -1L);
             return;
         }
-        Set<Long> memberTaskIds = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
-                        .in(PmTaskMember::getUserId, users)
-                        .select(PmTaskMember::getTaskId))
+        wrapper.and(outer -> {
+            boolean any = false;
+            for (Long companyId : companies) {
+                if (dataScopeService.hasRoleInCompany(loginId, "control", companyId)) {
+                    outer.or().eq(PmTask::getCompanyId, companyId);
+                    any = true;
+                    continue;
+                }
+                Set<Long> users = dataScopeService.visibleUserIdsInCompany(loginId, companyId);
+                if (users.isEmpty()) {
+                    continue;
+                }
+                Set<Long> memberTaskIds = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
+                                .in(PmTaskMember::getUserId, users)
+                                .select(PmTaskMember::getTaskId))
+                        .stream()
+                        .map(PmTaskMember::getTaskId)
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toSet());
+                final Set<Long> companyMemberTaskIds;
+                if (memberTaskIds.isEmpty()) {
+                    companyMemberTaskIds = Set.of();
+                } else {
+                    companyMemberTaskIds = list(new LambdaQueryWrapper<PmTask>()
+                                    .in(PmTask::getId, memberTaskIds)
+                                    .eq(PmTask::getCompanyId, companyId)
+                                    .select(PmTask::getId))
+                            .stream()
+                            .map(PmTask::getId)
+                            .filter(Objects::nonNull)
+                            .collect(Collectors.toSet());
+                }
+                Set<Long> ownedProjectIds = projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
+                                .eq(PmProject::getCompanyId, companyId)
+                                .in(PmProject::getOwnerId, users)
+                                .select(PmProject::getId))
+                        .stream()
+                        .map(PmProject::getId)
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toSet());
+                // 我作为项目参与人的项目 → 可见其下全部任务
+                final Set<Long> joinedProjectIds = listJoinedProjectIds(loginId, companyId);
+                outer.or(w -> {
+                    w.eq(PmTask::getCompanyId, companyId).and(inner -> {
+                        inner.in(PmTask::getCreateBy, users);
+                        if (!companyMemberTaskIds.isEmpty()) {
+                            inner.or().in(PmTask::getId, companyMemberTaskIds);
+                        }
+                        if (!ownedProjectIds.isEmpty()) {
+                            inner.or().in(PmTask::getProjectId, ownedProjectIds);
+                        }
+                        if (!joinedProjectIds.isEmpty()) {
+                            inner.or().in(PmTask::getProjectId, joinedProjectIds);
+                        }
+                    });
+                });
+                any = true;
+            }
+            if (!any) {
+                outer.eq(PmTask::getId, -1L);
+            }
+        });
+    }
+
+    /** 当前用户在该公司作为项目成员的项目 ID */
+    private Set<Long> listJoinedProjectIds(long userId, Long companyId) {
+        Set<Long> projectIds = projectMemberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
+                        .eq(PmProjectMember::getUserId, userId)
+                        .select(PmProjectMember::getProjectId))
                 .stream()
-                .map(PmTaskMember::getTaskId)
+                .map(PmProjectMember::getProjectId)
                 .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
-        Set<Long> ownedProjectIds = projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
-                        .in(PmProject::getOwnerId, users)
+        if (projectIds.isEmpty() || companyId == null) {
+            return projectIds;
+        }
+        return projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
+                        .in(PmProject::getId, projectIds)
+                        .eq(PmProject::getCompanyId, companyId)
                         .select(PmProject::getId))
                 .stream()
                 .map(PmProject::getId)
                 .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
-        wrapper.in(PmTask::getCompanyId, companies).and(w -> {
-            w.in(PmTask::getCreateBy, users);
-            if (!memberTaskIds.isEmpty()) {
-                w.or().in(PmTask::getId, memberTaskIds);
-            }
-            if (!ownedProjectIds.isEmpty()) {
-                w.or().in(PmTask::getProjectId, ownedProjectIds);
-            }
-        });
     }
 
+    private boolean isProjectMember(Long projectId, long userId) {
+        if (projectId == null) {
+            return false;
+        }
+        Long cnt = projectMemberMapper.selectCount(new LambdaQueryWrapper<PmProjectMember>()
+                .eq(PmProjectMember::getProjectId, projectId)
+                .eq(PmProjectMember::getUserId, userId));
+        return cnt != null && cnt > 0;
+    }
+
+    private boolean isTaskParticipant(Long taskId, long userId) {
+        if (taskId == null) {
+            return false;
+        }
+        Long cnt = taskMemberMapper.selectCount(new LambdaQueryWrapper<PmTaskMember>()
+                .eq(PmTaskMember::getTaskId, taskId)
+                .eq(PmTaskMember::getUserId, userId));
+        return cnt != null && cnt > 0;
+    }
+
+    /** 可读：admin / 公司 control / data_scope 相关 / 项目成员或负责人 */
     private void assertCanAccessTask(PmTask task) {
         long loginId = StpUtil.getLoginIdAsLong();
         if (dataScopeService.isGlobalAdmin(loginId)) {
             return;
         }
+        Long companyId = task.getCompanyId();
         Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
-        if (task.getCompanyId() == null || !companies.contains(task.getCompanyId())) {
+        if (companyId == null || !companies.contains(companyId)) {
             throw new BusinessException("无权操作该任务");
         }
-        Set<Long> users = dataScopeService.visibleUserIds(loginId);
+        if (dataScopeService.hasRoleInCompany(loginId, "control", companyId)) {
+            return;
+        }
+        Set<Long> users = dataScopeService.visibleUserIdsInCompany(loginId, companyId);
         if (task.getCreateBy() != null && users.contains(task.getCreateBy())) {
             return;
         }
         if (task.getProjectId() != null) {
             PmProject project = projectMapper.selectById(task.getProjectId());
-            if (project != null && Objects.equals(project.getOwnerId(), loginId)) {
-                return;
+            if (project != null && Objects.equals(project.getCompanyId(), companyId)) {
+                if (Objects.equals(project.getOwnerId(), loginId)
+                        || (project.getOwnerId() != null && users.contains(project.getOwnerId()))) {
+                    return;
+                }
+                if (isProjectMember(project.getId(), loginId)) {
+                    return;
+                }
             }
         }
-        if (task.getId() != null) {
+        if (task.getId() != null && !users.isEmpty()) {
             Long cnt = taskMemberMapper.selectCount(new LambdaQueryWrapper<PmTaskMember>()
                     .eq(PmTaskMember::getTaskId, task.getId())
                     .in(PmTaskMember::getUserId, users));
@@ -720,24 +823,30 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         throw new BusinessException("无权操作该任务");
     }
 
-    private void assertCanTransfer(PmTask task) {
-        if (!canTransferTask(task, null)) {
-            throw new BusinessException("仅任务参与人、项目负责人或管理员可移交");
+    /** 可写：admin / 公司 control / 项目负责人 / 任务参与人（含创建人若在参与人中；创建人也放行） */
+    private void assertCanWriteTask(PmTask task) {
+        if (!canWriteTask(task, null)) {
+            throw new BusinessException("仅任务参与人、项目负责人或股东可修改任务");
         }
     }
 
-    private boolean canTransferTask(PmTask task, PmProject project) {
+    private boolean canWriteTask(PmTask task, PmProject project) {
         if (task == null) {
-            return false;
-        }
-        if (task.getStatus() != null && task.getStatus() == 3) {
             return false;
         }
         if (!StpUtil.isLogin()) {
             return false;
         }
+        // 已关闭：列表上 canEdit=false；写接口另有 assertTaskNotClosed
+        if (task.getStatus() != null && task.getStatus() == 3) {
+            return false;
+        }
         long loginId = StpUtil.getLoginIdAsLong();
         if (dataScopeService.isGlobalAdmin(loginId)) {
+            return true;
+        }
+        Long companyId = task.getCompanyId();
+        if (companyId != null && dataScopeService.hasRoleInCompany(loginId, "control", companyId)) {
             return true;
         }
         PmProject p = project;
@@ -747,13 +856,38 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (p != null && Objects.equals(p.getOwnerId(), loginId)) {
             return true;
         }
-        if (task.getId() == null) {
+        if (Objects.equals(task.getCreateBy(), loginId)) {
+            return true;
+        }
+        return isTaskParticipant(task.getId(), loginId);
+    }
+
+    private void assertCanTransfer(PmTask task) {
+        if (!canTransferTask(task, null)) {
+            throw new BusinessException("仅任务参与人、项目负责人或股东可移交");
+        }
+    }
+
+    private boolean canTransferTask(PmTask task, PmProject project) {
+        if (!canWriteTask(task, project)) {
             return false;
         }
-        Long cnt = taskMemberMapper.selectCount(new LambdaQueryWrapper<PmTaskMember>()
-                .eq(PmTaskMember::getTaskId, task.getId())
-                .eq(PmTaskMember::getUserId, loginId));
-        return cnt != null && cnt > 0;
+        long loginId = StpUtil.getLoginIdAsLong();
+        if (dataScopeService.isGlobalAdmin(loginId)) {
+            return true;
+        }
+        Long companyId = task.getCompanyId();
+        if (companyId != null && dataScopeService.hasRoleInCompany(loginId, "control", companyId)) {
+            return true;
+        }
+        PmProject p = project;
+        if (p == null && task.getProjectId() != null) {
+            p = projectMapper.selectById(task.getProjectId());
+        }
+        if (p != null && Objects.equals(p.getOwnerId(), loginId)) {
+            return true;
+        }
+        return isTaskParticipant(task.getId(), loginId);
     }
 
     private void assertTaskNotClosed(PmTask task) {
@@ -770,6 +904,40 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
         if (project.getCompanyId() == null || !companies.contains(project.getCompanyId())) {
             throw new BusinessException("无权操作该项目的任务");
+        }
+    }
+
+    private Set<Long> eligibleTaskParticipantIds(Long projectId) {
+        Set<Long> ids = new HashSet<>();
+        if (projectId == null) {
+            return ids;
+        }
+        PmProject project = projectMapper.selectById(projectId);
+        if (project == null) {
+            return ids;
+        }
+        if (project.getOwnerId() != null) {
+            ids.add(project.getOwnerId());
+        }
+        projectMemberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
+                        .eq(PmProjectMember::getProjectId, projectId)
+                        .select(PmProjectMember::getUserId))
+                .stream()
+                .map(PmProjectMember::getUserId)
+                .filter(Objects::nonNull)
+                .forEach(ids::add);
+        return ids;
+    }
+
+    private void assertParticipantsEligible(Long projectId, List<Long> userIds) {
+        if (userIds == null || userIds.isEmpty()) {
+            return;
+        }
+        Set<Long> allowed = eligibleTaskParticipantIds(projectId);
+        for (Long userId : userIds) {
+            if (userId != null && !allowed.contains(userId)) {
+                throw new BusinessException("任务参与人须为项目负责人或项目参与人");
+            }
         }
     }
 
@@ -854,6 +1022,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             }
             // 持有人字段已停用
             task.setAssigneeName(null);
+            task.setCanEdit(canWriteTask(task, project));
             task.setCanTransfer(canTransferTask(task, project));
             List<PmTaskMember> members = membersByTask.getOrDefault(task.getId(), List.of());
             if (members.isEmpty()) {

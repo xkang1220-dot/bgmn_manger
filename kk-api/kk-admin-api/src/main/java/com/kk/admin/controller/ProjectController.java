@@ -4,13 +4,17 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.dev33.satoken.stp.StpUtil;
 import com.kk.biz.dto.ApprovalSubmitRequest;
 import com.kk.biz.entity.PmProject;
+import com.kk.biz.entity.PmProjectFlow;
 import com.kk.biz.entity.WfApproval;
 import com.kk.biz.service.PmProjectService;
 import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.workflow.ApprovalTypes;
+import com.kk.biz.workflow.ProjectScales;
+import com.kk.common.exception.BusinessException;
 import com.kk.common.result.PageResult;
 import com.kk.common.result.Result;
 import lombok.RequiredArgsConstructor;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
@@ -56,25 +60,48 @@ public class ProjectController {
         return Result.ok(projectService.getDetail(id));
     }
 
-    /** 新建项目：提交审批（审批人/会签或签/超时以该公司审批配置为准） */
+    @GetMapping("/{id:\\d+}/flows")
+    @SaCheckPermission("project:list")
+    public Result<List<PmProjectFlow>> flows(@PathVariable Long id) {
+        return Result.ok(projectService.listFlows(id));
+    }
+
+    /** 预览下一项目编号（按公司拼音前缀 + 序号，不占号） */
+    @GetMapping("/next-code")
+    @SaCheckPermission("project:add")
+    public Result<String> nextCode(@RequestParam Long companyId) {
+        return Result.ok(projectService.allocateNextCode(companyId));
+    }
+
+    /**
+     * 新建项目：常规档直存；重点/重大走审批（审批人/会签或签/超时以该公司审批配置为准）
+     */
     @PostMapping
     @SaCheckPermission("project:add")
-    public Result<WfApproval> create(@RequestBody PmProject project) {
+    public Result<?> create(@RequestBody PmProject project) {
+        String scale = ProjectScales.normalize(project.getScale());
+        project.setScale(scale);
+        if (!ProjectScales.needsApproval(scale)) {
+            project.setApproveStatus(1);
+            projectService.createProject(project);
+            return Result.ok(projectService.getDetail(project.getId()));
+        }
         ApprovalSubmitRequest req = new ApprovalSubmitRequest();
         req.setType(ApprovalTypes.PROJECT_CREATE);
         req.setTitle("创建项目 · " + project.getName());
         Map<String, Object> payload = new HashMap<>();
         payload.put("name", project.getName());
-        payload.put("code", project.getCode());
         payload.put("ownerId", project.getOwnerId());
         payload.put("companyId", project.getCompanyId());
         payload.put("status", project.getStatus() == null ? 1 : project.getStatus());
+        payload.put("scale", scale);
         payload.put("description", project.getDescription());
         payload.put("reserveAmount", project.getReserveAmount());
         payload.put("budget", project.getBudget());
         payload.put("poolId", project.getPoolId());
         payload.put("startDate", project.getStartDate() == null ? null : project.getStartDate().toString());
         payload.put("endDate", project.getEndDate() == null ? null : project.getEndDate().toString());
+        payload.put("actualEndDate", project.getActualEndDate() == null ? null : project.getActualEndDate().toString());
         if (project.getMembers() != null) {
             payload.put("members", project.getMembers());
         }
@@ -83,11 +110,33 @@ public class ProjectController {
         return Result.ok(approvalService.submit(req));
     }
 
+    /**
+     * 编辑项目：规模不变或降到常规直存；改到重点/重大（含互切）提交规模变更审批
+     */
     @PutMapping
     @SaCheckPermission("project:edit")
-    public Result<Void> update(@RequestBody PmProject project) {
-        projectService.updateProject(project);
-        return Result.ok();
+    @Transactional(rollbackFor = Exception.class)
+    public Result<?> update(@RequestBody PmProject project) {
+        String[] pendingScale = projectService.updateProjectMaybeScaleApproval(project);
+        if (pendingScale == null) {
+            return Result.ok();
+        }
+        PmProject existing = projectService.getById(project.getId());
+        if (existing == null) {
+            throw new BusinessException("项目不存在");
+        }
+        ApprovalSubmitRequest req = new ApprovalSubmitRequest();
+        req.setType(ApprovalTypes.PROJECT_SCALE_CHANGE);
+        req.setTitle("变更项目规模 · " + existing.getName());
+        req.setProjectId(existing.getId());
+        req.setCompanyId(existing.getCompanyId());
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("projectId", existing.getId());
+        payload.put("name", existing.getName());
+        payload.put("fromScale", pendingScale[0]);
+        payload.put("toScale", pendingScale[1]);
+        req.setPayload(payload);
+        return Result.ok(approvalService.submit(req));
     }
 
     /** 删除项目：提交审批（审批人/会签或签以该公司审批配置为准） */

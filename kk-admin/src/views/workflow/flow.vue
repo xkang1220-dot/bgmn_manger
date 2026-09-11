@@ -8,6 +8,7 @@ import { sysApi } from '@/api/system'
 const BUILTIN_TYPES = [
   { type: 'PROJECT_CREATE', name: '创建项目' },
   { type: 'PROJECT_DELETE', name: '删除项目' },
+  { type: 'PROJECT_SCALE_CHANGE', name: '变更项目规模' },
   { type: 'SHARE_CONFIG', name: '资金配置' },
   { type: 'ROLLBACK', name: '资金回退' },
   { type: 'REIMBURSE_PERSONAL', name: '个人报销' },
@@ -137,7 +138,7 @@ function pickBuiltin(type: string) {
   const hit = BUILTIN_TYPES.find((t) => t.type === type)
   form.type = type
   form.name = hit?.name || type
-  if (['PROJECT_CREATE', 'PROJECT_DELETE', 'SHARE_CONFIG', 'ROLLBACK'].includes(type)) {
+  if (['PROJECT_CREATE', 'PROJECT_DELETE', 'PROJECT_SCALE_CHANGE', 'SHARE_CONFIG', 'ROLLBACK'].includes(type)) {
     form.passMode = 'ALL'
     form.roleCodeList = ['shareholder']
     form.timeoutHours = 72

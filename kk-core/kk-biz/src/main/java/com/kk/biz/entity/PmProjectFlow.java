@@ -8,30 +8,33 @@ import com.kk.common.entity.BaseEntity;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
-import java.math.BigDecimal;
-
 @Data
 @EqualsAndHashCode(callSuper = true)
-@TableName("pm_project_member")
-public class PmProjectMember extends BaseEntity {
+@TableName("pm_project_flow")
+public class PmProjectFlow extends BaseEntity {
 
     @TableId(type = IdType.AUTO)
     private Long id;
 
     private Long projectId;
 
-    private Long userId;
+    /** CREATE / UPDATE / DELETE / MEMBER / STATUS / SCALE */
+    private String action;
 
-    /** 项目职责标识（短文本）；财务分层场景也可复用 */
-    private String layer;
+    private String fromValue;
 
-    private BigDecimal percent;
+    private String toValue;
+
+    private Long approvalId;
 
     private String remark;
 
     @TableField(exist = false)
-    private String userName;
+    private String operatorName;
 
     @TableField(exist = false)
-    private String nickname;
+    private String actionLabel;
+
+    @TableField(exist = false)
+    private String summary;
 }

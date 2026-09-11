@@ -18,6 +18,10 @@ const userStore = useUserStore()
 const canCreateTask = computed(() => userStore.hasPermission('project:task:add'))
 const canEditTask = computed(() => userStore.hasPermission('project:task:edit'))
 
+function canDragTask(task: any) {
+  return canEditTask.value && !!task.canEdit
+}
+
 const loading = ref(false)
 const boardTasks = ref<any[]>([])
 const draggingId = ref<number | null>(null)
@@ -131,6 +135,10 @@ async function onDrop(e: DragEvent, status: number) {
   if (Number.isNaN(id)) return
   const task = boardTasks.value.find((t) => t.id === id)
   if (!task || task.status === status) return
+  if (!task.canEdit) {
+    ElMessage.warning('仅任务参与人或项目负责人可流转')
+    return
+  }
 
   const fromLabel = columns.find((c) => c.status === task.status)?.label || ''
   const toLabel = columns.find((c) => c.status === status)?.label || ''
@@ -196,7 +204,7 @@ defineExpose({ load })
             :key="task.id"
             class="kanban-card"
             :class="{ dragging: draggingId === task.id, overdue: task.overdue }"
-            :draggable="canEditTask"
+            :draggable="canDragTask(task)"
             @dragstart="onDragStart($event, task)"
             @dragend="onDragEnd"
             @click="onCardClick(task)"

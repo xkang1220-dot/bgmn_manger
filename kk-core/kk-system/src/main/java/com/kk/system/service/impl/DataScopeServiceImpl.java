@@ -87,27 +87,58 @@ public class DataScopeServiceImpl implements DataScopeService {
         if (userId == null) {
             return userIds;
         }
-        userIds.add(userId);
         if (isGlobalAdmin(userId)) {
             userService.list(new LambdaQueryWrapper<SysUser>().select(SysUser::getId))
                     .forEach(u -> userIds.add(u.getId()));
             return userIds;
         }
+        for (Long companyId : visibleCompanyIds(userId)) {
+            userIds.addAll(visibleUserIdsInCompany(userId, companyId));
+        }
+        if (userIds.isEmpty()) {
+            userIds.add(userId);
+        }
+        return userIds;
+    }
+
+    @Override
+    public Set<Long> visibleUserIdsInCompany(Long userId, Long companyId) {
+        Set<Long> userIds = new HashSet<>();
+        if (userId == null || companyId == null) {
+            return userIds;
+        }
+        if (isGlobalAdmin(userId)) {
+            userIds.addAll(listUserIdsInCompany(companyId));
+            userIds.add(userId);
+            return userIds;
+        }
+        boolean belongs = false;
         for (SysUserDept row : listUserDepts(userId)) {
-            Integer scope = row.getDataScope() == null ? 5 : row.getDataScope();
             Long deptId = row.getDeptId();
             if (deptId == null) {
                 continue;
             }
-            Long companyId = deptService.resolveCompanyId(deptId);
-            if (scope == 1 && companyId != null) {
+            Long rowCompanyId = deptService.resolveCompanyId(deptId);
+            if (!Objects.equals(rowCompanyId, companyId)) {
+                continue;
+            }
+            belongs = true;
+            Integer scope = row.getDataScope() == null ? 5 : row.getDataScope();
+            if (scope == 1) {
                 userIds.addAll(listUserIdsInCompany(companyId));
             } else if (scope == 3) {
                 userIds.addAll(listUserIdsInDepts(List.of(deptId)));
             } else if (scope == 4) {
-                userIds.addAll(listUserIdsInDepts(deptService.listChildIds(deptId)));
+                List<Long> childIds = deptService.listChildIds(deptId);
+                if (childIds != null && !childIds.isEmpty()) {
+                    userIds.addAll(listUserIdsInDepts(childIds));
+                }
             }
         }
+        if (!belongs) {
+            return Set.of();
+        }
+        userIds.add(userId);
         return userIds;
     }
 

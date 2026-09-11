@@ -172,6 +172,10 @@ function pct(n?: number | string | null) {
   return `${Number(n).toFixed(2)}%`
 }
 
+function scaleLabel(scale?: string | null) {
+  return ({ NORMAL: '常规', KEY: '重点', MAJOR: '重大' } as Record<string, string>)[scale || ''] || scale || '—'
+}
+
 function onFilter() {
   query.page = 1
   load()
@@ -212,6 +216,7 @@ onMounted(load)
         <el-select v-model="query.type" clearable placeholder="全部" class="filter-select--wide">
           <el-option label="创建项目" value="PROJECT_CREATE" />
           <el-option label="删除项目" value="PROJECT_DELETE" />
+          <el-option label="变更项目规模" value="PROJECT_SCALE_CHANGE" />
           <el-option label="个人报销" value="REIMBURSE_PERSONAL" />
           <el-option label="项目报销" value="REIMBURSE_PROJECT" />
           <el-option label="项目预支" value="PROJECT_ADVANCE" />
@@ -459,24 +464,34 @@ onMounted(load)
           <template v-else-if="detail.type === 'PROJECT_CREATE'">
             <div class="kv-grid">
               <div><span>项目名称</span><b>{{ payload.name || '—' }}</b></div>
-              <div><span>编码</span><b>{{ payload.code || '—' }}</b></div>
+              <div><span>编码</span><b>{{ payload.code || '审批通过后自动生成' }}</b></div>
+              <div><span>规模</span><b>{{ scaleLabel(payload.scale) }}</b></div>
               <div><span>负责人</span><b>{{ payload.ownerName || payload.ownerId || '—' }}</b></div>
               <div><span>预算</span><b>¥{{ fmtMoney(payload.budget) }}</b></div>
-              <div><span>周期</span><b>{{ payload.startDate || '—' }} ~ {{ payload.endDate || '—' }}</b></div>
+              <div><span>预计周期</span><b>{{ payload.startDate || '—' }} ~ {{ payload.endDate || '—' }}</b></div>
+              <div><span>实际结束</span><b>{{ payload.actualEndDate || '—' }}</b></div>
               <div><span>说明</span><b>{{ payload.description || '—' }}</b></div>
             </div>
             <template v-if="payload.members?.length">
-              <div class="sub-title">初始分成人员</div>
+              <div class="sub-title">项目参与人</div>
               <el-table :data="payload.members" size="small">
                 <el-table-column label="人员" min-width="100">
                   <template #default="{ row }">{{ row.userName || row.userId || '—' }}</template>
                 </el-table-column>
-                <el-table-column prop="layer" label="角色" width="90" />
+                <el-table-column prop="layer" label="职责" width="120" />
                 <el-table-column label="分成 %" width="90" align="right">
                   <template #default="{ row }">{{ pct(row.percent) }}</template>
                 </el-table-column>
               </el-table>
             </template>
+          </template>
+
+          <template v-else-if="detail.type === 'PROJECT_SCALE_CHANGE'">
+            <div class="kv-grid">
+              <div><span>项目</span><b>{{ detail.projectName || payload.name || payload.projectId || '—' }}</b></div>
+              <div><span>原规模</span><b>{{ scaleLabel(payload.fromScale) }}</b></div>
+              <div><span>目标规模</span><b>{{ scaleLabel(payload.toScale) }}</b></div>
+            </div>
           </template>
 
           <template v-else-if="detail.type === 'ROLLBACK'">

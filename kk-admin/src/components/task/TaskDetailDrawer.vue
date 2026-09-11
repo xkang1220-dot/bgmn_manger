@@ -4,7 +4,6 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import type { UploadFile, UploadProps } from 'element-plus'
 import { bizApi } from '@/api/biz'
-import { sysApi } from '@/api/system'
 import { useUserStore } from '@/stores/user'
 
 const props = defineProps<{
@@ -32,7 +31,8 @@ const closing = ref(false)
 const editing = ref(false)
 const isNew = ref(false)
 const projects = ref<any[]>([])
-const users = ref<any[]>([])
+const candidateUsers = ref<any[]>([])
+const candidateProjectId = ref<number | undefined>(undefined)
 const detail = ref<any>(null)
 const comments = ref<any[]>([])
 const flows = ref<any[]>([])
@@ -153,7 +153,7 @@ async function loadDetail(id: number) {
       imageFileIds: (full.images || []).map((f: any) => f.id),
     })
     delete form.assigneeId
-    await loadUsersForCompany(resolveCompanyId())
+    await loadProjectCandidates(full.projectId)
     imageFileList.value = (full.images || []).map(toUploadFile)
     comments.value = commentList
     flows.value = flowList
@@ -176,47 +176,89 @@ async function openCreate() {
   editing.value = true
   isNew.value = true
   await ensureOptions()
+  const allowed = new Set(
+    candidateUsers.value.filter(isEligibleCandidate).map((u) => Number(u.id)),
+  )
+  form.participantIds = (form.participantIds || []).filter((id: number) => allowed.has(Number(id)))
 }
 
-const usersCompanyId = ref<number | undefined>(undefined)
 const syncingDetail = ref(false)
 
-function resolveCompanyId(): number | undefined {
-  if (detail.value?.companyId != null) return Number(detail.value.companyId)
-  const pid = form.projectId
-  if (!pid) return undefined
-  const p = projects.value.find((x) => x.id === pid)
-  return p?.companyId != null ? Number(p.companyId) : undefined
+function candidateLabel(u: any) {
+  const name = u.nickname || u.username || `用户${u.id}`
+  return u.layer ? `${name}（${u.layer}）` : name
 }
 
-async function loadUsersForCompany(companyId?: number) {
-  if (companyId == null) {
-    users.value = []
-    usersCompanyId.value = undefined
+function isEligibleCandidate(u: any) {
+  return u?.layer !== '需从参与人移除'
+}
+
+async function loadProjectCandidates(projectId?: number) {
+  if (projectId == null) {
+    candidateUsers.value = []
+    candidateProjectId.value = undefined
     return
   }
-  if (usersCompanyId.value === companyId && users.value.length) return
-  users.value = await sysApi.userList({ companyId })
-  usersCompanyId.value = companyId
+  const d = await bizApi.projectDetail(projectId)
+  const map = new Map<number, any>()
+  if (d.ownerId != null) {
+    map.set(Number(d.ownerId), {
+      id: Number(d.ownerId),
+      nickname: d.ownerName || `用户${d.ownerId}`,
+      layer: '负责人',
+    })
+  }
+  for (const m of d.members || []) {
+    if (m.userId == null) continue
+    const id = Number(m.userId)
+    const prev = map.get(id)
+    const duty = m.layer != null ? String(m.layer).trim() : ''
+    map.set(id, {
+      id,
+      nickname: m.nickname || m.userName || prev?.nickname || `用户${id}`,
+      layer: duty || prev?.layer,
+    })
+  }
+  candidateUsers.value = [...map.values()]
+  candidateProjectId.value = projectId
+  const have = new Set(candidateUsers.value.map((u) => Number(u.id)))
+  const ids = form.participantIds || []
+  const names = detail.value?.participantNames || []
+  const detailIds = detail.value?.participantIds || []
+  for (const raw of ids) {
+    const id = Number(raw)
+    if (have.has(id)) continue
+    const idx = detailIds.findIndex((x: number) => Number(x) === id)
+    candidateUsers.value.push({
+      id,
+      nickname: names[idx] || `用户${id}`,
+      layer: '需从参与人移除',
+    })
+    have.add(id)
+  }
 }
 
 async function ensureOptions() {
   if (!projects.value.length) {
     projects.value = await bizApi.projectList()
   }
-  await loadUsersForCompany(resolveCompanyId())
+  await loadProjectCandidates(form.projectId)
 }
 
 watch(
   () => form.projectId,
   async (pid) => {
     if (!visible.value || syncingDetail.value) return
-    const p = projects.value.find((x) => x.id === pid)
-    const cid = p?.companyId != null ? Number(p.companyId) : undefined
-    await loadUsersForCompany(cid)
-    if (cid != null && form.participantIds?.length) {
-      const allowed = new Set(users.value.map((u) => u.id))
-      form.participantIds = form.participantIds.filter((id: number) => allowed.has(id))
+    await loadProjectCandidates(pid)
+    if (pid !== detail.value?.projectId) {
+      const allowed = new Set(
+        candidateUsers.value.filter(isEligibleCandidate).map((u) => Number(u.id)),
+      )
+      form.participantIds = (form.participantIds || []).filter((id: number) => allowed.has(Number(id)))
+      const selfId = userStore.user?.id
+      if (selfId != null && allowed.has(Number(selfId)) && !form.participantIds.includes(selfId)) {
+        form.participantIds = [...form.participantIds, selfId]
+      }
     }
   },
 )
@@ -256,6 +298,14 @@ async function save() {
     ElMessage.warning('请至少选择一名参与人')
     return
   }
+  const eligibleIds = new Set(
+    candidateUsers.value.filter(isEligibleCandidate).map((u) => Number(u.id)),
+  )
+  const invalid = (form.participantIds || []).filter((id: number) => !eligibleIds.has(Number(id)))
+  if (invalid.length) {
+    ElMessage.warning('参与人须为项目负责人或项目参与人，请先移除无效人员')
+    return
+  }
   syncImageFileIds()
   saving.value = true
   try {
@@ -264,6 +314,7 @@ async function save() {
     delete payload.assigneeId
     delete payload.assigneeName
     delete payload.canTransfer
+    delete payload.canEdit
     delete payload.participantNames
     delete payload.projectName
     delete payload.overdue
@@ -314,7 +365,7 @@ async function closeTask() {
 }
 
 async function openTransfer() {
-  await loadUsersForCompany(resolveCompanyId())
+  await loadProjectCandidates(form.projectId || detail.value?.projectId)
   transferForm.assigneeId = undefined
   transferForm.remark = ''
   transferForm.imageFileIds = []
@@ -324,7 +375,7 @@ async function openTransfer() {
 
 const transferCandidates = computed(() => {
   const joined = new Set((detail.value?.participantIds || []).map((id: number) => Number(id)))
-  return users.value.filter((u) => !joined.has(Number(u.id)))
+  return candidateUsers.value.filter((u) => isEligibleCandidate(u) && !joined.has(Number(u.id)))
 })
 
 async function onUploadTransferImage(options: any) {
@@ -499,16 +550,16 @@ function canDeleteComment(c: any) {
 
         <div class="detail-actions">
           <el-button
-            v-if="userStore.hasPermission('project:task:edit') && detail.status !== 3"
+            v-if="userStore.hasPermission('project:task:edit') && detail.canEdit && detail.status !== 3"
             type="primary"
             @click="editing = true"
           >编辑</el-button>
           <el-button
-            v-if="detail.canTransfer && detail.status !== 3"
+            v-if="userStore.hasPermission('project:task:edit') && detail.canTransfer && detail.status !== 3"
             @click="openTransfer"
           >移交</el-button>
           <el-button
-            v-if="userStore.hasPermission('project:task:edit') && detail.status !== 3"
+            v-if="userStore.hasPermission('project:task:edit') && detail.canEdit && detail.status !== 3"
             type="danger"
             plain
             :loading="closing"
@@ -589,8 +640,8 @@ function canDeleteComment(c: any) {
             </el-select>
           </el-form-item>
           <el-form-item label="参与人员">
-            <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="可多选，默认含本人" style="width: 100%" :disabled="!form.projectId">
-              <el-option v-for="u in users" :key="u.id" :label="u.nickname || u.username" :value="u.id" />
+            <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="仅可选项目负责人/参与人" style="width: 100%" :disabled="!form.projectId">
+              <el-option v-for="u in candidateUsers" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
             </el-select>
           </el-form-item>
           <el-form-item label="优先级">
@@ -651,15 +702,15 @@ function canDeleteComment(c: any) {
     <el-dialog v-model="transferDialog" title="移交任务" width="420px" append-to-body>
       <el-form label-width="84px">
         <el-form-item label="移交给" required>
-          <el-select v-model="transferForm.assigneeId" filterable placeholder="移交给同公司人员（加入参与人）" style="width: 100%">
+          <el-select v-model="transferForm.assigneeId" filterable placeholder="移交给项目负责人或参与人" style="width: 100%">
             <el-option
               v-for="u in transferCandidates"
               :key="u.id"
-              :label="u.nickname || u.username"
+              :label="candidateLabel(u)"
               :value="u.id"
             />
           </el-select>
-          <div v-if="!transferCandidates.length" class="transfer-empty-hint">同公司人员均已是参与人，无需移交</div>
+          <div v-if="!transferCandidates.length" class="transfer-empty-hint">项目内可选人员均已是任务参与人，无需移交</div>
         </el-form-item>
         <el-form-item label="说明">
           <el-input v-model="transferForm.remark" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="可选，写明移交原因" />

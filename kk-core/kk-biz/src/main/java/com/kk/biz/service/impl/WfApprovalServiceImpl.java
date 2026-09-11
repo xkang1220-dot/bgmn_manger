@@ -40,12 +40,16 @@ import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.FinanceService;
 import com.kk.biz.service.HrArchiveService;
 import com.kk.biz.service.HrWalletService;
+import com.kk.biz.service.PmProjectService;
 import com.kk.biz.service.SysFileService;
 import com.kk.biz.service.WfApprovalFlowService;
 import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.support.BizNoGenerator;
 import com.kk.biz.workflow.ApprovalTypes;
+import com.kk.biz.workflow.ProjectScales;
+import com.kk.biz.util.ProjectCodeUtil;
 import com.kk.common.exception.BusinessException;
+import com.kk.system.entity.SysDept;
 import com.kk.system.entity.SysUser;
 import com.kk.system.service.DataScopeService;
 import com.kk.system.service.SysDeptService;
@@ -53,6 +57,7 @@ import com.kk.system.service.SysNotificationService;
 import com.kk.system.service.SysUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
@@ -105,6 +110,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
     private final WfApprovalFlowService approvalFlowService;
     private final FinLedgerThresholdService ledgerThresholdService;
     private final FaAssetService faAssetService;
+    @Lazy
+    private final PmProjectService projectService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -600,6 +607,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         switch (type) {
             case ApprovalTypes.PROJECT_CREATE -> effectProjectCreate(approval, payload);
             case ApprovalTypes.PROJECT_DELETE -> effectProjectDelete(approval);
+            case ApprovalTypes.PROJECT_SCALE_CHANGE -> effectProjectScaleChange(approval, payload);
             case ApprovalTypes.PROJECT_ADVANCE -> {
                 projectAccountService.advanceFromCompany(
                         approval.getProjectId(),
@@ -644,24 +652,28 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
     private void effectProjectCreate(WfApproval approval, JSONObject payload) {
         PmProject project = new PmProject();
         project.setName(payload.getStr("name"));
-        project.setCode(payload.getStr("code"));
+        Long companyId = approval.getCompanyId();
+        if (companyId == null) {
+            throw new BusinessException("审批单缺少所属公司，无法创建项目");
+        }
+        project.setCode(allocateNextProjectCode(companyId));
         project.setOwnerId(payload.getLong("ownerId", approval.getApplicantId()));
         project.setPoolId(payload.getLong("poolId"));
         project.setBudget(payload.getBigDecimal("budget", BigDecimal.ZERO));
         project.setReserveAmount(payload.getBigDecimal("reserveAmount", BigDecimal.ZERO));
         project.setSettledAmount(BigDecimal.ZERO);
         project.setStatus(payload.getInt("status", 1));
+        String scaleRaw = payload.getStr("scale");
+        String scale = StringUtils.hasText(scaleRaw) ? ProjectScales.normalize(scaleRaw) : ProjectScales.KEY;
+        project.setScale(scale);
         project.setApproveStatus(1);
         project.setDescription(payload.getStr("description"));
         project.setStartDate(parsePayloadLocalDate(payload, "startDate"));
         project.setEndDate(parsePayloadLocalDate(payload, "endDate"));
+        project.setActualEndDate(parsePayloadLocalDate(payload, "actualEndDate"));
         // 创建人记申请人，而不是最后点通过的审批人
         project.setCreateBy(approval.getApplicantId());
         project.setUpdateBy(approval.getApplicantId());
-        Long companyId = approval.getCompanyId();
-        if (companyId == null) {
-            throw new BusinessException("审批单缺少所属公司，无法创建项目");
-        }
         project.setCompanyId(companyId);
         Long ownerId = project.getOwnerId();
         if (ownerId != null
@@ -686,13 +698,40 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             account.setReserveAmount(project.getReserveAmount());
             projectAccountService.updateById(account);
         }
-        // 分成配置
+        // 成员：分成合计 100% 走财务规则；否则按项目参与人（percent 可为 0）
         if (payload.containsKey("members")) {
             List<PmProjectMember> members = JSONUtil.toList(payload.getJSONArray("members"), PmProjectMember.class);
-            saveMembers(project.getId(), members);
+            BigDecimal sum = members == null ? BigDecimal.ZERO : members.stream()
+                    .map(m -> m.getPercent() == null ? BigDecimal.ZERO : m.getPercent())
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+            if (sum.compareTo(new BigDecimal("100")) == 0) {
+                saveMembers(project.getId(), members);
+            } else {
+                saveCollaborationMembers(project.getId(), members);
+            }
         }
         // 回写 projectId 便于查询
         approval.setProjectId(project.getId());
+        updateById(approval);
+        projectService.recordFlow(project.getId(), "CREATE", null, ProjectScales.label(scale),
+                approval.getId(), "创建项目（" + ProjectScales.label(scale) + "）",
+                approval.getApplicantId());
+    }
+
+    private void effectProjectScaleChange(WfApproval approval, JSONObject payload) {
+        Long projectId = approval.getProjectId();
+        if (projectId == null) {
+            projectId = payload.getLong("projectId");
+        }
+        if (projectId == null) {
+            throw new BusinessException("缺少项目ID");
+        }
+        String toScale = payload.getStr("toScale");
+        if (!StringUtils.hasText(toScale)) {
+            throw new BusinessException("缺少目标规模");
+        }
+        projectService.applyScaleChange(projectId, toScale, approval.getId(), approval.getApplicantId());
+        approval.setProjectId(projectId);
         updateById(approval);
     }
 
@@ -700,6 +739,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (approval.getProjectId() == null) {
             throw new BusinessException("缺少项目ID");
         }
+        projectService.recordFlow(approval.getProjectId(), "DELETE", null, null,
+                approval.getId(), "删除项目", approval.getApplicantId());
         projectMapper.deleteById(approval.getProjectId());
         memberMapper.delete(new LambdaQueryWrapper<PmProjectMember>()
                 .eq(PmProjectMember::getProjectId, approval.getProjectId()));
@@ -1255,6 +1296,66 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
     }
 
+    /** 项目协作参与人（不校验分成合计；职责必填） */
+    private void saveCollaborationMembers(Long projectId, List<PmProjectMember> members) {
+        if (members == null || members.isEmpty()) {
+            return;
+        }
+        PmProject project = projectMapper.selectById(projectId);
+        Long companyId = project == null ? null : project.getCompanyId();
+        memberMapper.delete(new LambdaQueryWrapper<PmProjectMember>().eq(PmProjectMember::getProjectId, projectId));
+        Set<Long> seen = new HashSet<>();
+        for (PmProjectMember member : members) {
+            if (member == null || member.getUserId() == null || !seen.add(member.getUserId())) {
+                continue;
+            }
+            if (companyId != null
+                    && !dataScopeService.isGlobalAdmin(member.getUserId())
+                    && !dataScopeService.visibleCompanyIds(member.getUserId()).contains(companyId)) {
+                throw new BusinessException("不能跨公司添加项目参与人");
+            }
+            String duty = member.getLayer() == null ? "" : member.getLayer().trim();
+            if (!StringUtils.hasText(duty)) {
+                throw new BusinessException("请填写项目参与人职责");
+            }
+            if (duty.length() > 64) {
+                throw new BusinessException("参与人职责不能超过 64 字");
+            }
+            member.setId(null);
+            member.setProjectId(projectId);
+            member.setLayer(duty);
+            if (member.getPercent() == null) {
+                member.setPercent(BigDecimal.ZERO);
+            }
+            memberMapper.insert(member);
+        }
+    }
+
+    private String allocateNextProjectCode(Long companyId) {
+        SysDept company = deptService.getById(companyId);
+        String prefix = ProjectCodeUtil.companyPrefix(company == null ? null : company.getName());
+        String marker = prefix + "-";
+        List<PmProject> coded = projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
+                .eq(PmProject::getCompanyId, companyId)
+                .likeRight(PmProject::getCode, marker)
+                .select(PmProject::getCode));
+        int maxSeq = 0;
+        for (PmProject p : coded) {
+            if (p == null || !StringUtils.hasText(p.getCode()) || !p.getCode().startsWith(marker)) {
+                continue;
+            }
+            String tail = p.getCode().substring(marker.length()).trim();
+            if (tail.matches("\\d+")) {
+                try {
+                    maxSeq = Math.max(maxSeq, Integer.parseInt(tail));
+                } catch (NumberFormatException ignored) {
+                    // skip
+                }
+            }
+        }
+        return ProjectCodeUtil.formatCode(prefix, maxSeq + 1);
+    }
+
     private Long resolveApprovalCompanyId(ApprovalSubmitRequest request, long applicantId) {
         Long companyId = request.getCompanyId();
         if (companyId == null && request.getPayload() != null && request.getPayload().get("companyId") != null) {
@@ -1337,7 +1438,9 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             return;
         }
         Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
-        Set<Long> users = dataScopeService.visibleUserIds(loginId);
+        Set<Long> users = approval.getCompanyId() == null
+                ? Set.of()
+                : dataScopeService.visibleUserIdsInCompany(loginId, approval.getCompanyId());
         if (approval.getCompanyId() != null && companies.contains(approval.getCompanyId())
                 && approval.getApplicantId() != null && users.contains(approval.getApplicantId())) {
             return;
@@ -1354,7 +1457,6 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             wrapper.eq(WfApproval::getId, -1L);
             return;
         }
-        Set<Long> users = dataScopeService.visibleUserIds(loginId);
         Set<Long> financeCompanies = companies.stream()
                 .filter(c -> canFinanceHandle(loginId, c))
                 .collect(Collectors.toSet());
@@ -1362,13 +1464,28 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                         .eq(WfApprovalTask::getAssigneeId, loginId)
                         .select(WfApprovalTask::getApprovalId))
                 .stream().map(WfApprovalTask::getApprovalId).filter(Objects::nonNull).distinct().toList();
-        wrapper.in(WfApproval::getCompanyId, companies).and(w -> {
-            w.in(WfApproval::getApplicantId, users);
+        wrapper.and(outer -> {
+            boolean any = false;
             if (!myApprovalIds.isEmpty()) {
-                w.or().in(WfApproval::getId, myApprovalIds);
+                outer.or().in(WfApproval::getId, myApprovalIds);
+                any = true;
             }
-            if (!financeCompanies.isEmpty()) {
-                w.or().in(WfApproval::getCompanyId, financeCompanies);
+            for (Long companyId : companies) {
+                if (financeCompanies.contains(companyId)) {
+                    outer.or().eq(WfApproval::getCompanyId, companyId);
+                    any = true;
+                    continue;
+                }
+                Set<Long> users = dataScopeService.visibleUserIdsInCompany(loginId, companyId);
+                if (users.isEmpty()) {
+                    continue;
+                }
+                outer.or(w -> w.eq(WfApproval::getCompanyId, companyId)
+                        .in(WfApproval::getApplicantId, users));
+                any = true;
+            }
+            if (!any) {
+                outer.eq(WfApproval::getId, -1L);
             }
         });
     }
@@ -1417,6 +1534,30 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (ApprovalTypes.PROJECT_CREATE.equals(type)) {
             if (request.getPayload() == null || !StringUtils.hasText(String.valueOf(request.getPayload().get("name")))) {
                 throw new BusinessException("请填写项目名称");
+            }
+            Object membersObj = request.getPayload().get("members");
+            if (membersObj instanceof List<?> list && !list.isEmpty()) {
+                Set<Long> seen = new HashSet<>();
+                for (Object item : list) {
+                    if (item == null) {
+                        continue;
+                    }
+                    JSONObject m = item instanceof JSONObject jo ? jo : JSONUtil.parseObj(item);
+                    Long uid = m.getLong("userId");
+                    if (uid == null) {
+                        continue;
+                    }
+                    if (!seen.add(uid)) {
+                        throw new BusinessException("项目参与人不能重复");
+                    }
+                    String duty = m.getStr("layer");
+                    if (!StringUtils.hasText(duty == null ? null : duty.trim())) {
+                        throw new BusinessException("请填写项目参与人职责");
+                    }
+                    if (duty.trim().length() > 64) {
+                        throw new BusinessException("参与人职责不能超过 64 字");
+                    }
+                }
             }
         }
         if (ApprovalTypes.PROJECT_DELETE.equals(type) && request.getProjectId() == null) {
@@ -1614,6 +1755,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         data.putAll(payload);
         putIsoDate(data, payload, "startDate");
         putIsoDate(data, payload, "endDate");
+        putIsoDate(data, payload, "actualEndDate");
 
         Set<Long> userIds = new HashSet<>();
         if (payload.containsKey("members") && payload.get("members") != null) {

@@ -3,9 +3,15 @@ import { onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
+import { useUserStore } from '@/stores/user'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
 
 const route = useRoute()
+const userStore = useUserStore()
+
+function currentUserId() {
+  return userStore.user?.id as number | undefined
+}
 
 const query = reactive({
   page: 1,
@@ -14,7 +20,7 @@ const query = reactive({
   projectId: undefined as number | undefined,
   status: undefined as number | undefined,
   priority: undefined as number | undefined,
-  participantId: undefined as number | undefined,
+  participantId: currentUserId(),
   overdue: undefined as boolean | undefined,
 })
 
@@ -97,7 +103,7 @@ function resetQuery() {
     projectId: undefined,
     status: undefined,
     priority: undefined,
-    participantId: undefined,
+    participantId: currentUserId(),
     overdue: undefined,
   })
   load()
@@ -132,6 +138,9 @@ function progressStatus(row: any) {
 onMounted(async () => {
   projects.value = await bizApi.projectList()
   users.value = await sysApi.userList()
+  if (query.participantId == null) {
+    query.participantId = currentUserId()
+  }
   const pid = route.query.projectId
   if (pid) {
     const num = Number(pid)
