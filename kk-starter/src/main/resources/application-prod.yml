@@ -81,3 +81,7 @@ logging:
   level:
     root: info
     com.kk: info
+
+wallet:
+  withdraw:
+    tax-rate: ${WALLET_WITHDRAW_TAX_RATE:0.2}
