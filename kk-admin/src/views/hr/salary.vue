@@ -3,6 +3,7 @@ import { onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
+import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 
 const companies = ref<any[]>([])
 const users = ref<any[]>([])
@@ -107,9 +108,6 @@ async function saveSchedule() {
   await load()
 }
 
-const companyProjects = () =>
-  (projects.value || []).filter((p: any) => !companyId.value || p.companyId === companyId.value)
-
 watch(companyId, () => load())
 
 onMounted(async () => {
@@ -182,9 +180,18 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-form-item label="项目" required>
-          <el-select v-model="form.projectId" filterable style="width: 100%">
-            <el-option v-for="p in companyProjects()" :key="p.id" :label="p.name" :value="p.id" />
-          </el-select>
+          <ProjectCascadeSelect
+            v-model="form.projectId"
+            :projects="projects"
+            :company-id="companyId"
+            mode="pick"
+            top-placeholder="重点或重大"
+            child-placeholder="请选择小项目"
+            top-width="100%"
+            child-width="100%"
+            :clearable="false"
+          />
+          <div class="hint">仅支持为重点项目配薪；选重大时请再选下属小项目。以往常规项目的配置会保留，只是不再发薪</div>
         </el-form-item>
         <el-form-item label="月薪" required>
           <el-input-number v-model="form.amount" :min="0.01" :precision="2" style="width: 100%" />

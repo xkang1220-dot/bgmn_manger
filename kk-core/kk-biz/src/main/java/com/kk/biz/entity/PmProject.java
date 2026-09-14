@@ -56,6 +56,16 @@ public class PmProject extends BaseEntity {
     /** NORMAL常规 / KEY重点 / MAJOR重大 */
     private String scale;
 
+    /** 父项目 ID；非空表示重大项目下的小项目 */
+    private Long parentId;
+
+    @TableField(exist = false)
+    private String parentName;
+
+    /** 未删小项目数量（重大外壳详情用） */
+    @TableField(exist = false)
+    private Integer childCount;
+
     /** 0待审 1已生效 2已拒绝 */
     private Integer approveStatus;
 

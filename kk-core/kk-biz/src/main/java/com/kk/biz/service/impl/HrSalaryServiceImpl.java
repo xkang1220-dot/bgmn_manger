@@ -19,6 +19,7 @@ import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.HrSalaryService;
 import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.workflow.ApprovalTypes;
+import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
 import com.kk.system.entity.SysDept;
 import com.kk.system.entity.SysUser;
@@ -101,6 +102,9 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         }
         if (!Objects.equals(project.getCompanyId(), item.getCompanyId())) {
             throw new BusinessException("项目不属于该公司");
+        }
+        if (!ProjectScales.isSalaryEligible(project)) {
+            throw new BusinessException("仅可为重点项目（含重大下的小项目）配置工资；常规与重大外壳不可选");
         }
         if (item.getEnabled() == null) {
             item.setEnabled(1);
@@ -654,8 +658,16 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         List<HrSalaryItem> items = itemMapper.selectList(new LambdaQueryWrapper<HrSalaryItem>()
                 .eq(HrSalaryItem::getCompanyId, companyId)
                 .eq(HrSalaryItem::getEnabled, 1));
+        Set<Long> projectIds = items.stream().map(HrSalaryItem::getProjectId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<Long, PmProject> projects = projectIds.isEmpty() ? Map.of()
+                : projectMapper.selectBatchIds(projectIds).stream()
+                .collect(Collectors.toMap(PmProject::getId, p -> p, (a, b) -> a));
         Map<Long, List<HrSalaryItem>> map = new LinkedHashMap<>();
         for (HrSalaryItem item : items) {
+            PmProject project = projects.get(item.getProjectId());
+            if (!ProjectScales.isSalaryEligible(project)) {
+                continue;
+            }
             map.computeIfAbsent(item.getUserId(), k -> new ArrayList<>()).add(item);
         }
         return map;

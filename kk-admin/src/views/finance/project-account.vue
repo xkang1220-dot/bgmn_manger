@@ -7,7 +7,15 @@ import { workflowApi } from '@/api/workflow'
 import { approvalFlowTip } from '@/utils/approvalTip'
 
 const list = ref<any[]>([])
+const companies = ref<any[]>([])
+const filter = reactive({
+  companyId: undefined as number | undefined,
+  scale: '' as string,
+})
 const activeId = ref<number | null>(null)
+/** 从重大外壳点进小项目后，返回时回到外壳 */
+const shellParentId = ref<number | null>(null)
+const childAccounts = ref<any[]>([])
 const account = ref<any>(null)
 const shareDetail = ref<any>(null)
 const users = ref<any[]>([])
@@ -118,8 +126,30 @@ function bizTagType(v?: string) {
   } as Record<string, string>)[v || ''] || 'info'
 }
 
+function scaleLabel(v?: string) {
+  return ({ NORMAL: '常规', KEY: '重点', MAJOR: '重大' } as Record<string, string>)[v || ''] || v || '—'
+}
+
+function scaleTone(v?: string) {
+  return ({ KEY: 'primary', MAJOR: 'warning' } as Record<string, string>)[v || ''] || 'info'
+}
+
 async function loadList() {
-  list.value = await bizApi.projectAccountList()
+  const params: { companyId?: number; scale?: string } = {}
+  if (filter.companyId != null) params.companyId = filter.companyId
+  if (filter.scale) params.scale = filter.scale
+  list.value = await bizApi.projectAccountList(params)
+}
+
+async function loadCompanies() {
+  if (companies.value.length) return
+  companies.value = await sysApi.myCompanies()
+}
+
+function resetFilter() {
+  filter.companyId = undefined
+  filter.scale = ''
+  loadList()
 }
 
 async function ensureUsers() {
@@ -128,14 +158,50 @@ async function ensureUsers() {
 
 async function enter(row: any) {
   activeId.value = row.projectId
+  shellParentId.value = null
   tab.value = 'overview'
+  childAccounts.value = []
   await loadDetail()
+}
+
+async function enterChild(row: any) {
+  shellParentId.value = activeId.value
+  activeId.value = row.projectId
+  tab.value = 'overview'
+  childAccounts.value = []
+  await loadDetail()
+}
+
+function back() {
+  if (shellParentId.value) {
+    activeId.value = shellParentId.value
+    shellParentId.value = null
+    childAccounts.value = []
+    void loadDetail()
+    return
+  }
+  activeId.value = null
+  account.value = null
+  shareDetail.value = null
+  childAccounts.value = []
 }
 
 async function loadDetail() {
   if (!activeId.value) return
   await ensureUsers()
   account.value = await bizApi.projectAccountDetail(activeId.value)
+  if (account.value?.majorShell) {
+    try {
+      childAccounts.value = await bizApi.projectAccountChildren(activeId.value)
+    } catch {
+      childAccounts.value = []
+    }
+    shareDetail.value = null
+    ledgers.value = []
+    ledgerTotal.value = 0
+    return
+  }
+  childAccounts.value = []
   try {
     shareDetail.value = await bizApi.projectShareDetail(activeId.value)
     shareForm.budget = Number(shareDetail.value?.budget || 0)
@@ -156,12 +222,6 @@ async function loadDetail() {
   const res = await bizApi.projectAccountLedger(activeId.value, ledgerQuery)
   ledgers.value = res.list
   ledgerTotal.value = res.total
-}
-
-function back() {
-  activeId.value = null
-  account.value = null
-  shareDetail.value = null
 }
 
 function addMember() {
@@ -357,9 +417,9 @@ async function openPayDialog(kind: 'reimburse' | 'salary') {
   voucherFiles.value = []
   await loadMyPayMethods()
   const def = myPayMethods.value.find((m) => Number(m.isDefault) === 1) || myPayMethods.value[0]
-  form.payMethodId = def?.id
+  form.payMethodId = def?.id != null ? Number(def.id) : undefined
   if (!myPayMethods.value.length) {
-    ElMessage.warning('未配置个人收款方式，可在员工档案中添加；仍可提交申请')
+    ElMessage.warning('请先在员工档案中配置个人收款方式，否则无法提交')
   }
   if (kind === 'reimburse') reimburseDialog.value = true
   else salaryDialog.value = true
@@ -393,6 +453,10 @@ async function submitPay(type: 'REIMBURSE_PROJECT' | 'SALARY_APPLY') {
     ElMessage.warning('请填写金额')
     return
   }
+  if (!form.payMethodId) {
+    ElMessage.warning('请选择收款方式，便于财务线下打款')
+    return
+  }
   if (type === 'REIMBURSE_PROJECT' && !voucherFiles.value.length) {
     ElMessage.warning('请上传发票/凭证')
     return
@@ -412,7 +476,7 @@ async function submitPay(type: 'REIMBURSE_PROJECT' | 'SALARY_APPLY') {
     amount: form.amount,
     remark: form.remark,
     voucherFileIds: voucherFiles.value.length ? voucherFiles.value.map((f) => f.id) : undefined,
-    payload: form.payMethodId ? { payMethodId: form.payMethodId } : {},
+    payload: { payMethodId: form.payMethodId },
   })
   const moneyHint = type === 'SALARY_APPLY'
     ? '审批通过并确认到账后：项目结余转入你的个人钱包，公司总账不变'
@@ -426,7 +490,10 @@ async function submitPay(type: 'REIMBURSE_PROJECT' | 'SALARY_APPLY') {
   voucherFiles.value = []
 }
 
-onMounted(loadList)
+onMounted(async () => {
+  await loadCompanies()
+  await loadList()
+})
 </script>
 
 <template>
@@ -434,8 +501,27 @@ onMounted(loadList)
     <template v-if="!activeId">
       <div class="page-top">
         <div class="page-top__main">
-          <p class="page-desc">分成与预留合计 100%；工资 / 报销确认到账后从项目结余转入个人钱包，不扣公司总账</p>
+          <p class="page-desc">分成与预留合计 100%；工资 / 报销确认到账后从项目结余转入个人钱包，不扣公司总账。常规项目不进入本页。</p>
         </div>
+      </div>
+      <div class="page-card filter-card">
+        <el-form :inline="true" class="filter-form" @submit.prevent>
+          <el-form-item label="公司">
+            <el-select v-model="filter.companyId" clearable filterable placeholder="全部公司" style="width: 200px">
+              <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="重要度">
+            <el-select v-model="filter.scale" clearable placeholder="重点+重大" style="width: 140px">
+              <el-option label="重点" value="KEY" />
+              <el-option label="重大" value="MAJOR" />
+            </el-select>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="loadList">查询</el-button>
+            <el-button @click="resetFilter">重置</el-button>
+          </el-form-item>
+        </el-form>
       </div>
       <div v-if="list.length" class="acc-grid">
         <article
@@ -448,8 +534,11 @@ onMounted(loadList)
           @keyup.enter="enter(row)"
         >
           <div class="acc-card__head">
-            <h4>{{ row.projectName || `项目#${row.projectId}` }}</h4>
-            <p>负责人 {{ row.ownerName || '—' }}</p>
+            <div class="acc-card__title-row">
+              <h4>{{ row.projectName || `项目#${row.projectId}` }}</h4>
+              <el-tag v-if="row.scale" :type="scaleTone(row.scale)" size="small" effect="plain">{{ scaleLabel(row.scale) }}</el-tag>
+            </div>
+            <p>{{ row.companyName || '—' }} · 负责人 {{ row.ownerName || '—' }}</p>
           </div>
           <div class="acc-card__balance">
             <div>
@@ -477,10 +566,13 @@ onMounted(loadList)
             <p class="page-desc">负责人 {{ account.ownerName || shareDetail?.ownerName || '—' }}</p>
           </div>
           <div class="page-actions">
-            <el-button type="primary" @click="() => { form.amount = 0; form.remark = ''; advanceDialog = true }">从公司转入</el-button>
-            <el-button @click="openPayDialog('reimburse')">申请报销</el-button>
-            <el-button @click="openPayDialog('salary')">申请发工资</el-button>
-            <el-button v-if="Number(account.balance) > 0" @click="returnRemainder">预留回公司</el-button>
+            <template v-if="!account.majorShell">
+              <el-button type="primary" @click="() => { form.amount = 0; form.remark = ''; advanceDialog = true }">从公司转入</el-button>
+              <el-button @click="openPayDialog('reimburse')">申请报销</el-button>
+              <el-button @click="openPayDialog('salary')">申请发工资</el-button>
+              <el-button v-if="Number(account.balance) > 0" @click="returnRemainder">预留回公司</el-button>
+            </template>
+            <el-tag v-else type="warning" effect="plain">重大项目汇总（请进入小项目动账）</el-tag>
           </div>
         </div>
 
@@ -508,27 +600,59 @@ onMounted(loadList)
           </div>
           <div class="metric-card metric-card--cyan">
             <div class="metric-body">
-              <div class="metric-label">分成（{{ shareForm.settlePercent }}%）</div>
+              <div class="metric-label">{{ account.majorShell ? '已分给个人（汇总）' : `分成（${shareForm.settlePercent}%）` }}</div>
               <div class="metric-value sm">¥ {{ fmt(account.settleAmount) }}</div>
-              <div class="metric-hint">额度 ¥{{ fmt(settleQuota) }}</div>
+              <div v-if="!account.majorShell" class="metric-hint">额度 ¥{{ fmt(settleQuota) }}</div>
             </div>
             <el-icon class="metric-glyph" :size="48"><Coin /></el-icon>
           </div>
           <div class="metric-card metric-card--slate">
             <div class="metric-body">
-              <div class="metric-label">预留（{{ shareForm.reservePercent }}%）</div>
-              <div class="metric-value sm">¥ {{ fmt(reserveQuota) }}</div>
-              <div class="metric-hint">结束回公司</div>
+              <div class="metric-label">{{ account.majorShell ? '预留（汇总）' : `预留（${shareForm.reservePercent}%）` }}</div>
+              <div class="metric-value sm">¥ {{ fmt(account.majorShell ? account.reserveAmount : reserveQuota) }}</div>
+              <div v-if="!account.majorShell" class="metric-hint">结束回公司</div>
             </div>
             <el-icon class="metric-glyph" :size="48"><Box /></el-icon>
           </div>
         </div>
 
         <p class="rule-tip">
-          实账结余 = 已转入 − 已支出 − 已分成。工资 / 报销确认到账后从结余转入个人钱包（公司总账不变）；分成与预留合计须 100%。改配置不会改已分、已花。
+          <template v-if="account.majorShell">
+            重大项目仅展示小项目汇总结余；请先创建小项目，再在小项目上转入/报销/发工资/分钱。
+          </template>
+          <template v-else>
+            实账结余 = 已转入 − 已支出 − 已分成。工资 / 报销确认到账后从结余转入个人钱包（公司总账不变）；分成与预留合计须 100%。改配置不会改已分、已花。
+          </template>
         </p>
 
-        <div class="page-card">
+        <div v-if="account.majorShell" class="page-card" style="margin-bottom: 16px">
+          <h3 style="margin: 0 0 12px; font-size: 16px">小项目账款</h3>
+          <div v-if="childAccounts.length" class="acc-grid">
+            <article
+              v-for="row in childAccounts"
+              :key="row.projectId"
+              class="acc-card"
+              role="button"
+              tabindex="0"
+              @click="enterChild(row)"
+              @keyup.enter="enterChild(row)"
+            >
+              <div class="acc-card__head">
+                <h4>{{ row.projectName || `项目#${row.projectId}` }}</h4>
+                <p>负责人 {{ row.ownerName || '—' }}</p>
+              </div>
+              <div class="acc-card__balance">
+                <div>
+                  <span>项目结余</span>
+                  <b>¥ {{ fmt(row.balance) }}</b>
+                </div>
+              </div>
+            </article>
+          </div>
+          <el-empty v-else description="暂无小项目，请先在项目管理中创建" />
+        </div>
+
+        <div v-if="!account.majorShell" class="page-card">
         <el-tabs v-model="tab" class="tabs">
           <el-tab-pane label="项目流水" name="overview">
             <el-table :data="ledgers" stripe empty-text="暂无流水">
@@ -774,9 +898,14 @@ onMounted(loadList)
         <el-form-item label="报销金额" required>
           <el-input-number v-model="form.amount" :min="0.01" :precision="2" :max="Number(account?.balance || 0) || undefined" style="width: 200px" />
         </el-form-item>
-        <el-form-item label="收款方式">
-          <el-select v-model="form.payMethodId" clearable filterable placeholder="未配置时可空" style="width: 100%">
-            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="m.id" />
+        <el-form-item label="收款方式" required>
+          <el-select
+            v-model="form.payMethodId"
+            filterable
+            :placeholder="myPayMethods.length ? '选择收款方式' : '请先在员工档案配置'"
+            style="width: 100%"
+          >
+            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="Number(m.id)" />
           </el-select>
         </el-form-item>
         <el-form-item label="发票" required>
@@ -810,9 +939,14 @@ onMounted(loadList)
         <el-form-item label="工资金额" required>
           <el-input-number v-model="form.amount" :min="0.01" :precision="2" :max="Number(account?.balance || 0) || undefined" style="width: 200px" />
         </el-form-item>
-        <el-form-item label="收款方式">
-          <el-select v-model="form.payMethodId" clearable filterable placeholder="未配置时可空" style="width: 100%">
-            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="m.id" />
+        <el-form-item label="收款方式" required>
+          <el-select
+            v-model="form.payMethodId"
+            filterable
+            :placeholder="myPayMethods.length ? '选择收款方式' : '请先在员工档案配置'"
+            style="width: 100%"
+          >
+            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="Number(m.id)" />
           </el-select>
         </el-form-item>
         <el-form-item label="说明"><el-input v-model="form.remark" placeholder="例如：3 月外包劳务" /></el-form-item>
@@ -860,6 +994,22 @@ onMounted(loadList)
   font-size: 16px;
   font-weight: 600;
   color: var(--kk-text);
+}
+.acc-card__title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.filter-card {
+  margin-bottom: 16px;
+  padding: 14px 18px;
+}
+.filter-form {
+  margin: 0;
+}
+.filter-form :deep(.el-form-item) {
+  margin-bottom: 0;
 }
 .acc-card__head p {
   margin: 4px 0 0;

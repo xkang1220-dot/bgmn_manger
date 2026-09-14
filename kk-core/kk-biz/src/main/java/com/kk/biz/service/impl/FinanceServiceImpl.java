@@ -28,6 +28,7 @@ import com.kk.biz.mapper.FinProjectAccountMapper;
 import com.kk.biz.mapper.HrWalletMapper;
 import com.kk.biz.mapper.PmProjectMapper;
 import com.kk.biz.mapper.PmProjectMemberMapper;
+import com.kk.biz.mapper.WfApprovalMapper;
 import com.kk.biz.service.FinLedgerThresholdService;
 import com.kk.biz.service.FinPayChannelService;
 import com.kk.biz.service.FinanceService;
@@ -37,6 +38,7 @@ import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.dto.ApprovalSubmitRequest;
 import com.kk.biz.support.BizNoGenerator;
 import com.kk.biz.workflow.ApprovalTypes;
+import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
 import com.kk.system.entity.SysDept;
 import com.kk.system.entity.SysUser;
@@ -53,10 +55,15 @@ import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -81,6 +88,7 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
     private final FinPayChannelService payChannelService;
     private final FinLedgerThresholdService ledgerThresholdService;
     private final SysNotificationService notificationService;
+    private final WfApprovalMapper approvalMapper;
     /** 审批动账时带入流水 approvalId（勿改为构造注入） */
     private final ThreadLocal<Long> approvalIdHolder = ThreadLocal.withInitial(() -> null);
 
@@ -190,13 +198,14 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
                 .eq(StringUtils.hasText(query.getBizType()), FinLedger::getBizType, query.getBizType())
                 .eq(StringUtils.hasText(query.getAccountType()), FinLedger::getAccountType, query.getAccountType())
                 .eq(query.getUserId() != null, FinLedger::getUserId, query.getUserId())
+                .eq(query.getCompanyId() != null, FinLedger::getCompanyId, query.getCompanyId())
                 .eq(query.getPoolId() != null, FinLedger::getPoolId, query.getPoolId())
-                .eq(query.getProjectId() != null, FinLedger::getProjectId, query.getProjectId())
                 .eq(query.getChannelId() != null, FinLedger::getChannelId, query.getChannelId())
                 .ge(query.getStartTime() != null, FinLedger::getOccurTime, query.getStartTime())
                 .le(query.getEndTime() != null, FinLedger::getOccurTime, query.getEndTime())
                 .orderByDesc(FinLedger::getOccurTime)
                 .orderByDesc(FinLedger::getId);
+        applyProjectIdFilter(wrapper, query.getProjectId());
         if (query.getMinAmount() != null) {
             wrapper.apply("ABS(amount) >= {0}", query.getMinAmount());
         }
@@ -209,9 +218,142 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
                     .or().like(FinLedger::getTitle, kw)
                     .or().like(FinLedger::getRemark, kw));
         }
-        applyCompanyFilter(wrapper);
+        if (!query.isSkipCompanyScope()) {
+            applyCompanyFilter(wrapper);
+        }
         Page<FinLedger> result = ledgerMapper.selectPage(new Page<>(query.getPage(), query.getPageSize()), wrapper);
         fillLedgers(result.getRecords());
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> myWalletBoard(Long userId, String period) {
+        if (userId == null) {
+            throw new BusinessException("缺少用户");
+        }
+        boolean monthly = "monthly".equalsIgnoreCase(period) || "month".equalsIgnoreCase(period);
+        HrWallet wallet = walletService.getOrCreate(userId);
+
+        LocalDate today = LocalDate.now();
+        LocalDateTime rangeStart = monthly
+                ? YearMonth.from(today).minusMonths(11).atDay(1).atStartOfDay()
+                : today.minusDays(29).atStartOfDay();
+
+        List<FinLedger> rangeLedgers = ledgerMapper.selectList(new LambdaQueryWrapper<FinLedger>()
+                .eq(FinLedger::getAccountType, "WALLET")
+                .eq(FinLedger::getUserId, userId)
+                .ge(FinLedger::getOccurTime, rangeStart)
+                .orderByAsc(FinLedger::getOccurTime)
+                .orderByAsc(FinLedger::getId));
+        fillLedgers(rangeLedgers);
+
+        Map<String, BigDecimal> bucket = new LinkedHashMap<>();
+        if (monthly) {
+            for (int i = 11; i >= 0; i--) {
+                YearMonth ym = YearMonth.from(today).minusMonths(i);
+                bucket.put(ym.toString(), BigDecimal.ZERO);
+            }
+            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM");
+            for (FinLedger ledger : rangeLedgers) {
+                if (ledger.getOccurTime() == null || ledger.getAmount() == null) {
+                    continue;
+                }
+                String key = ledger.getOccurTime().format(fmt);
+                bucket.merge(key, ledger.getAmount(), BigDecimal::add);
+            }
+        } else {
+            for (int i = 29; i >= 0; i--) {
+                bucket.put(today.minusDays(i).toString(), BigDecimal.ZERO);
+            }
+            for (FinLedger ledger : rangeLedgers) {
+                if (ledger.getOccurTime() == null || ledger.getAmount() == null) {
+                    continue;
+                }
+                String key = ledger.getOccurTime().toLocalDate().toString();
+                bucket.merge(key, ledger.getAmount(), BigDecimal::add);
+            }
+        }
+        List<Map<String, Object>> trend = new ArrayList<>();
+        BigDecimal maxAbs = BigDecimal.ZERO;
+        for (Map.Entry<String, BigDecimal> e : bucket.entrySet()) {
+            BigDecimal abs = e.getValue().abs();
+            if (abs.compareTo(maxAbs) > 0) {
+                maxAbs = abs;
+            }
+            Map<String, Object> point = new HashMap<>();
+            point.put("label", e.getKey());
+            point.put("amount", e.getValue());
+            trend.add(point);
+        }
+        for (Map<String, Object> point : trend) {
+            BigDecimal amount = (BigDecimal) point.get("amount");
+            double pct = maxAbs.compareTo(BigDecimal.ZERO) == 0
+                    ? 0
+                    : amount.abs().multiply(BigDecimal.valueOf(100))
+                    .divide(maxAbs, 2, RoundingMode.HALF_UP).doubleValue();
+            point.put("pct", pct);
+        }
+
+        Map<String, BigDecimal> byType = new HashMap<>();
+        for (FinLedger ledger : rangeLedgers) {
+            if (ledger.getAmount() == null || ledger.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+                continue;
+            }
+            String type = StringUtils.hasText(ledger.getBizType()) ? ledger.getBizType() : "OTHER";
+            byType.merge(type, ledger.getAmount(), BigDecimal::add);
+        }
+        List<Map<String, Object>> sourceBreakdown = byType.entrySet().stream()
+                .sorted(Map.Entry.<String, BigDecimal>comparingByValue().reversed())
+                .map(e -> {
+                    Map<String, Object> row = new HashMap<>();
+                    row.put("bizType", e.getKey());
+                    row.put("amount", e.getValue());
+                    return row;
+                })
+                .collect(Collectors.toList());
+
+        LocalDateTime monthStart = YearMonth.from(today).atDay(1).atStartOfDay();
+        LocalDateTime monthEnd = today.atTime(LocalTime.MAX);
+        List<FinLedger> monthLedgers = ledgerMapper.selectList(new LambdaQueryWrapper<FinLedger>()
+                .eq(FinLedger::getAccountType, "WALLET")
+                .eq(FinLedger::getUserId, userId)
+                .ge(FinLedger::getOccurTime, monthStart)
+                .le(FinLedger::getOccurTime, monthEnd));
+        BigDecimal monthIn = BigDecimal.ZERO;
+        BigDecimal monthOut = BigDecimal.ZERO;
+        for (FinLedger ledger : monthLedgers) {
+            BigDecimal amt = ledger.getAmount() == null ? BigDecimal.ZERO : ledger.getAmount();
+            if (amt.compareTo(BigDecimal.ZERO) > 0) {
+                monthIn = monthIn.add(amt);
+            } else if (amt.compareTo(BigDecimal.ZERO) < 0) {
+                monthOut = monthOut.add(amt.abs());
+            }
+        }
+
+        LedgerQuery recentQ = new LedgerQuery();
+        recentQ.setPage(1);
+        recentQ.setPageSize(8);
+        recentQ.setAccountType("WALLET");
+        recentQ.setUserId(userId);
+        recentQ.setSkipCompanyScope(true);
+        Page<FinLedger> recentPage = pageLedger(recentQ);
+
+        long pendingConfirm = approvalMapper.selectCount(new LambdaQueryWrapper<WfApproval>()
+                .eq(WfApproval::getApplicantId, userId)
+                .eq(WfApproval::getConfirmStatus, 2)
+                .in(WfApproval::getStatus, "APPROVED", "TIMEOUT_PASS"));
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("balance", wallet.getBalance());
+        result.put("frozen", wallet.getFrozen());
+        result.put("available", wallet.getAvailable());
+        result.put("period", monthly ? "monthly" : "daily");
+        result.put("trend", trend);
+        result.put("sourceBreakdown", sourceBreakdown);
+        result.put("recentLedgers", recentPage.getRecords());
+        result.put("pendingConfirmCount", pendingConfirm);
+        result.put("monthIn", monthIn);
+        result.put("monthOut", monthOut);
         return result;
     }
 
@@ -902,6 +1044,7 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         Set<Long> poolIds = new HashSet<>();
         Set<Long> projectIds = new HashSet<>();
         Set<Long> channelIds = new HashSet<>();
+        Set<Long> companyIds = new HashSet<>();
         Set<Long> ledgerIds = new HashSet<>();
         for (FinLedger ledger : ledgers) {
             if (ledger.getUserId() != null) {
@@ -915,6 +1058,9 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
             }
             if (ledger.getChannelId() != null) {
                 channelIds.add(ledger.getChannelId());
+            }
+            if (ledger.getCompanyId() != null) {
+                companyIds.add(ledger.getCompanyId());
             }
             if (ledger.getId() != null) {
                 ledgerIds.add(ledger.getId());
@@ -939,6 +1085,20 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         if (!channelIds.isEmpty()) {
             payChannelService.listByIds(channelIds).forEach(c -> channelMap.put(c.getId(), c));
         }
+        for (FinPool pool : poolMap.values()) {
+            if (pool.getCompanyId() != null) {
+                companyIds.add(pool.getCompanyId());
+            }
+        }
+        for (PmProject project : projectMap.values()) {
+            if (project.getCompanyId() != null) {
+                companyIds.add(project.getCompanyId());
+            }
+        }
+        Map<Long, String> companyNameMap = new HashMap<>();
+        if (!companyIds.isEmpty()) {
+            deptService.listByIds(companyIds).forEach(d -> companyNameMap.put(d.getId(), d.getName()));
+        }
         Map<Long, List<SysFile>> voucherMap = fileService.mapByBiz("ledger", ledgerIds);
 
         for (FinLedger ledger : ledgers) {
@@ -952,13 +1112,22 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
                 FinPool pool = poolMap.get(ledger.getPoolId());
                 if (pool != null) {
                     ledger.setPoolName(pool.getName());
+                    if (ledger.getCompanyId() == null && pool.getCompanyId() != null) {
+                        ledger.setCompanyId(pool.getCompanyId());
+                    }
                 }
             }
             if (ledger.getProjectId() != null) {
                 PmProject project = projectMap.get(ledger.getProjectId());
                 if (project != null) {
                     ledger.setProjectName(project.getName());
+                    if (ledger.getCompanyId() == null && project.getCompanyId() != null) {
+                        ledger.setCompanyId(project.getCompanyId());
+                    }
                 }
+            }
+            if (ledger.getCompanyId() != null) {
+                ledger.setCompanyName(companyNameMap.get(ledger.getCompanyId()));
             }
             if (ledger.getChannelId() != null) {
                 FinPayChannel channel = channelMap.get(ledger.getChannelId());
@@ -969,6 +1138,34 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
             }
             ledger.setVouchers(voucherMap.getOrDefault(ledger.getId(), List.of()));
         }
+    }
+
+    private void applyProjectIdFilter(LambdaQueryWrapper<FinLedger> wrapper, Long projectId) {
+        if (projectId == null) {
+            return;
+        }
+        PmProject project = projectMapper.selectById(projectId);
+        if (project == null) {
+            wrapper.eq(FinLedger::getProjectId, -1L);
+            return;
+        }
+        if (ProjectScales.isMajorShell(project)) {
+            List<Long> childIds = projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
+                            .eq(PmProject::getParentId, projectId)
+                            .and(w -> w.isNull(PmProject::getApproveStatus).or().eq(PmProject::getApproveStatus, 1))
+                            .select(PmProject::getId))
+                    .stream()
+                    .map(PmProject::getId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+            if (childIds.isEmpty()) {
+                wrapper.eq(FinLedger::getProjectId, -1L);
+            } else {
+                wrapper.in(FinLedger::getProjectId, childIds);
+            }
+            return;
+        }
+        wrapper.eq(FinLedger::getProjectId, projectId);
     }
 
     private void fillPoolCompanyNames(List<FinPool> pools) {

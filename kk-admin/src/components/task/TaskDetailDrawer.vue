@@ -5,6 +5,7 @@ import { Plus } from '@element-plus/icons-vue'
 import type { UploadFile, UploadProps } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { useUserStore } from '@/stores/user'
+import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 
 const props = defineProps<{
   modelValue: boolean
@@ -680,9 +681,17 @@ function canDeleteComment(c: any) {
             <el-input v-model="form.title" placeholder="任务标题" maxlength="128" show-word-limit />
           </el-form-item>
           <el-form-item label="项目" required>
-            <el-select v-model="form.projectId" filterable placeholder="选择项目" style="width: 100%" :disabled="!!defaultProjectId && isNew">
-              <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
-            </el-select>
+            <ProjectCascadeSelect
+              v-model="form.projectId"
+              :projects="projects"
+              mode="pick"
+              top-placeholder="重点或重大"
+              child-placeholder="请选择小项目"
+              top-width="100%"
+              child-width="100%"
+              :clearable="false"
+              :disabled="!!defaultProjectId && isNew"
+            />
           </el-form-item>
           <el-form-item label="参与人员">
             <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="仅可选项目负责人/参与人" style="width: 100%" :disabled="!form.projectId">

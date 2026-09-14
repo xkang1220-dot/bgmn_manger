@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
+import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
+import { approvalFlowTip } from '@/utils/approvalTip'
 import { useUserStore } from '@/stores/user'
+import WalletBoardCharts from '@/components/wallet/WalletBoardCharts.vue'
+import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -13,6 +18,10 @@ const ledgerLoading = ref(false)
 const wallet = ref<any>({})
 const ledgers = ref<any[]>([])
 const ledgerTotal = ref(0)
+const companies = ref<any[]>([])
+const projects = ref<any[]>([])
+const walletBoard = ref<any>(null)
+const boardPeriod = ref<'daily' | 'monthly'>('daily')
 const ledgerQuery = reactive({
   page: 1,
   pageSize: 10,
@@ -20,7 +29,34 @@ const ledgerQuery = reactive({
   dateRange: [] as string[],
   minAmount: undefined as number | undefined,
   maxAmount: undefined as number | undefined,
+  companyId: undefined as number | undefined,
+  projectId: undefined as number | undefined,
+  bizType: '' as string,
 })
+
+const reimburseDialog = ref(false)
+const withdrawDialog = ref(false)
+const reimburseForm = reactive({
+  amount: 0,
+  remark: '',
+  companyId: undefined as number | undefined,
+  payMethodId: undefined as number | undefined,
+})
+const withdrawForm = reactive({
+  amount: 0,
+  remark: '',
+  companyId: undefined as number | undefined,
+  payMethodId: undefined as number | undefined,
+})
+const voucherFiles = ref<any[]>([])
+const uploading = ref(false)
+const myPayMethods = ref<any[]>([])
+const withdrawTaxRate = ref(0.2)
+const withdrawTaxMode = ref<'FLAT' | 'TIER'>('FLAT')
+const withdrawTaxBreakdown = ref<any[]>([])
+const withdrawCalcTax = ref(0)
+const withdrawCalcNet = ref(0)
+let withdrawTaxSeq = 0
 
 const todoApprovals = ref<any[]>([])
 const mineApprovals = ref<any[]>([])
@@ -28,6 +64,9 @@ const myTasks = ref<any[]>([])
 const calendarTasks = ref<any[]>([])
 const myProjects = ref<any[]>([])
 const calendarDate = ref(new Date())
+/** admin/shareholder 可切全部；默认我的（创建或参与） */
+const taskScope = ref<'mine' | 'all'>('mine')
+let taskLoadSeq = 0
 
 function fmt(n?: number) {
   return Number(n || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -35,6 +74,66 @@ function fmt(n?: number) {
 function fmtTime(t?: string) {
   if (!t) return '—'
   return t.replace('T', ' ').slice(0, 16)
+}
+
+function bizLabel(v?: string) {
+  return ({
+    INCOME: '入账',
+    EXPENSE: '出账',
+    SETTLE: '分成',
+    ADVANCE: '预支',
+    RESERVE: '预留',
+    SALARY: '工资',
+    REIMBURSE: '报销',
+    WITHDRAW: '提现',
+    ROLLBACK: '回退',
+  } as Record<string, string>)[v || ''] || v || '—'
+}
+
+function payMethodLabel(m: any) {
+  const type = m.methodTypeLabel || ({ BANK: '银行卡', ALIPAY: '支付宝', WECHAT: '微信' } as any)[m.methodType] || m.methodType
+  const name = m.accountName ? `${m.accountName} · ` : ''
+  const bank = m.methodType === 'BANK' && m.bankName ? `（${m.bankName}）` : ''
+  return `${type} · ${name}${m.accountNo || ''}${bank}`
+}
+
+const withdrawTax = computed(() => Number(withdrawCalcTax.value || 0))
+const withdrawNet = computed(() => Number(withdrawCalcNet.value || 0))
+
+async function refreshWithdrawTax() {
+  const seq = ++withdrawTaxSeq
+  const companyId = withdrawForm.companyId
+  const amount = Number(withdrawForm.amount || 0)
+  try {
+    const cfg = await bizApi.withdrawConfig({
+      companyId: companyId || undefined,
+      amount: amount > 0 ? amount : undefined,
+    })
+    if (seq !== withdrawTaxSeq) return
+    withdrawTaxRate.value = Number(cfg?.taxRate ?? cfg?.defaultTaxRate ?? 0.2)
+    withdrawTaxMode.value = (cfg?.taxMode === 'TIER' ? 'TIER' : 'FLAT')
+    withdrawTaxBreakdown.value = cfg?.breakdown || []
+    if (amount > 0 && cfg?.tax != null) {
+      withdrawCalcTax.value = Number(cfg.tax)
+      withdrawCalcNet.value = Number(cfg.net ?? Math.max(0, amount - Number(cfg.tax)))
+    } else if (amount > 0) {
+      const tax = Number((amount * withdrawTaxRate.value).toFixed(2))
+      withdrawCalcTax.value = tax
+      withdrawCalcNet.value = Number((amount - tax).toFixed(2))
+      withdrawTaxBreakdown.value = []
+    } else {
+      withdrawCalcTax.value = 0
+      withdrawCalcNet.value = 0
+      withdrawTaxBreakdown.value = []
+    }
+  } catch {
+    if (seq !== withdrawTaxSeq) return
+    if (amount > 0) {
+      const tax = Number((amount * Number(withdrawTaxRate.value || 0.2)).toFixed(2))
+      withdrawCalcTax.value = tax
+      withdrawCalcNet.value = Number((amount - tax).toFixed(2))
+    }
+  }
 }
 
 /** 摘要里带上项目名，避免只显示「项目分成入账」看不出是哪个项目 */
@@ -86,6 +185,16 @@ const seeAllProjects = computed(() => {
   return roles.includes('admin') || roles.includes('shareholder')
 })
 
+const showTaskScopeToggle = computed(() => seeAllProjects.value)
+
+const taskSectionTitle = computed(() =>
+  showTaskScopeToggle.value && taskScope.value === 'all' ? '全部任务' : '我的任务',
+)
+
+const taskEmptyText = computed(() =>
+  showTaskScopeToggle.value && taskScope.value === 'all' ? '暂无任务' : '暂无相关任务',
+)
+
 const canSeeWallet = computed(() => userStore.hasPermission('finance:wallet:list'))
 
 function projectRole(p: any) {
@@ -111,6 +220,9 @@ function resetLedger() {
   ledgerQuery.dateRange = []
   ledgerQuery.minAmount = undefined
   ledgerQuery.maxAmount = undefined
+  ledgerQuery.companyId = undefined
+  ledgerQuery.projectId = undefined
+  ledgerQuery.bizType = ''
   void loadLedger()
 }
 
@@ -120,6 +232,28 @@ async function loadBalance() {
   } catch {
     wallet.value = {}
   }
+}
+
+let boardLoadSeq = 0
+
+async function loadBoard() {
+  const seq = ++boardLoadSeq
+  try {
+    const data = await bizApi.myWalletBoard({ period: boardPeriod.value })
+    if (seq !== boardLoadSeq) return
+    walletBoard.value = data
+    if (data?.withdrawTaxRate != null) {
+      withdrawTaxRate.value = Number(data.withdrawTaxRate)
+    }
+  } catch {
+    if (seq !== boardLoadSeq) return
+    walletBoard.value = null
+  }
+}
+
+async function onBoardPeriod(period: 'daily' | 'monthly') {
+  boardPeriod.value = period
+  await loadBoard()
 }
 
 async function loadLedger() {
@@ -132,6 +266,9 @@ async function loadLedger() {
       keyword: ledgerQuery.keyword || undefined,
       minAmount: ledgerQuery.minAmount,
       maxAmount: ledgerQuery.maxAmount,
+      companyId: ledgerQuery.companyId,
+      projectId: ledgerQuery.projectId,
+      bizType: ledgerQuery.bizType || undefined,
       startTime: range[0] ? `${range[0]} 00:00:00` : undefined,
       endTime: range[1] ? `${range[1]} 23:59:59` : undefined,
     })
@@ -143,6 +280,135 @@ async function loadLedger() {
   } finally {
     ledgerLoading.value = false
   }
+}
+
+async function preparePayForm(form: { companyId?: number; payMethodId?: number; amount: number; remark: string }) {
+  form.amount = 0
+  form.remark = ''
+  form.companyId = companies.value.length === 1 ? companies.value[0].id : undefined
+  form.payMethodId = undefined
+  try {
+    myPayMethods.value = (await bizApi.myPayMethods()) || []
+  } catch {
+    myPayMethods.value = []
+  }
+  const def = myPayMethods.value.find((m) => Number(m.isDefault) === 1) || myPayMethods.value[0]
+  form.payMethodId = def?.id != null ? Number(def.id) : undefined
+}
+
+async function openReimburse() {
+  voucherFiles.value = []
+  await preparePayForm(reimburseForm)
+  if (!myPayMethods.value.length) {
+    ElMessage.warning('请先在员工档案中配置个人收款方式，否则无法提交提现/报销')
+  }
+  reimburseDialog.value = true
+}
+
+async function openWithdraw() {
+  await preparePayForm(withdrawForm)
+  if (!myPayMethods.value.length) {
+    ElMessage.warning('请先在员工档案中配置个人收款方式，否则无法提交提现/报销')
+  }
+  await refreshWithdrawTax()
+  withdrawDialog.value = true
+}
+
+watch(
+  () => [withdrawForm.companyId, withdrawForm.amount] as const,
+  () => {
+    if (withdrawDialog.value) void refreshWithdrawTax()
+  },
+)
+
+async function onUploadVoucher(options: any) {
+  uploading.value = true
+  try {
+    const file = await workflowApi.uploadVoucher(options.file)
+    voucherFiles.value.push(file)
+    ElMessage.success('发票已上传')
+    options.onSuccess?.(file)
+  } catch (e: any) {
+    ElMessage.error(e.message || '上传失败')
+    options.onError?.(e)
+  } finally {
+    uploading.value = false
+  }
+}
+
+function removeVoucher(index: number) {
+  voucherFiles.value.splice(index, 1)
+}
+
+async function submitReimburse() {
+  if (!reimburseForm.companyId) {
+    ElMessage.warning('请选择所属公司')
+    return
+  }
+  if (!reimburseForm.amount || reimburseForm.amount <= 0) {
+    ElMessage.warning('请填写报销金额')
+    return
+  }
+  if (!reimburseForm.payMethodId) {
+    ElMessage.warning('请选择收款方式，便于财务线下打款')
+    return
+  }
+  if (!voucherFiles.value.length) {
+    ElMessage.warning('请上传发票/凭证')
+    return
+  }
+  const approval = await workflowApi.submit({
+    type: 'REIMBURSE_PERSONAL',
+    title: '个人报销',
+    amount: reimburseForm.amount,
+    companyId: reimburseForm.companyId,
+    remark: reimburseForm.remark,
+    voucherFileIds: voucherFiles.value.map((f) => f.id),
+    payload: { payMethodId: reimburseForm.payMethodId },
+  })
+  ElMessage.success(`${approvalFlowTip(approval)}。后续：上传回执 → 确认到账`)
+  reimburseDialog.value = false
+  voucherFiles.value = []
+  await Promise.all([loadBalance(), loadBoard(), loadApprovals()])
+}
+
+async function submitWithdraw() {
+  if (!withdrawForm.companyId) {
+    ElMessage.warning('请选择所属公司')
+    return
+  }
+  if (!withdrawForm.amount || withdrawForm.amount <= 0) {
+    ElMessage.warning('请填写提现金额')
+    return
+  }
+  if (!withdrawForm.payMethodId) {
+    ElMessage.warning('请选择收款方式，便于财务线下打款')
+    return
+  }
+  const available = Number(wallet.value?.available ?? wallet.value?.balance ?? 0)
+  if (withdrawForm.amount > available) {
+    ElMessage.warning(`可用余额不足，当前可用 ¥${fmt(available)}`)
+    return
+  }
+  const approval = await workflowApi.submit({
+    type: 'WALLET_WITHDRAW',
+    title: '钱包提现',
+    amount: withdrawForm.amount,
+    companyId: withdrawForm.companyId,
+    remark: withdrawForm.remark,
+    payload: {
+      taxMode: withdrawTaxMode.value,
+      taxRate: withdrawTaxMode.value === 'FLAT' ? withdrawTaxRate.value : undefined,
+      tax: withdrawTax.value,
+      net: withdrawNet.value,
+      taxBreakdown: withdrawTaxBreakdown.value,
+      payMethodId: withdrawForm.payMethodId,
+    },
+  })
+  ElMessage.success(`${approvalFlowTip(approval)}。后续：财务回执 → 确认到账`)
+  withdrawDialog.value = false
+  // 提交即冻结，立刻刷新可用余额，避免界面仍显示旧可用额
+  await Promise.all([loadBalance(), loadBoard(), loadApprovals()])
 }
 
 async function loadApprovals() {
@@ -166,23 +432,34 @@ async function loadApprovals() {
 
 async function loadTasks() {
   const uid = userStore.user?.id
+  const seq = ++taskLoadSeq
   if (!uid) {
     myTasks.value = []
     calendarTasks.value = []
     return
   }
   try {
-    if (seeAllProjects.value) {
+    // 非 admin/shareholder 即使残留 all 也强制走 related
+    const useAll = seeAllProjects.value && taskScope.value === 'all'
+    let list: any[] = []
+    if (useAll) {
       const res = await bizApi.taskPage({ page: 1, pageSize: 200 })
-      calendarTasks.value = res.list || []
+      list = res.list || []
     } else {
-      calendarTasks.value = (await bizApi.taskRelated()) || []
+      list = (await bizApi.taskRelated()) || []
     }
-    myTasks.value = calendarTasks.value.slice(0, 10)
+    if (seq !== taskLoadSeq) return
+    calendarTasks.value = list
+    myTasks.value = list.slice(0, 10)
   } catch {
+    if (seq !== taskLoadSeq) return
     myTasks.value = []
     calendarTasks.value = []
   }
+}
+
+function onTaskScopeChange() {
+  void loadTasks()
 }
 
 async function loadProjects() {
@@ -198,7 +475,21 @@ onMounted(async () => {
   try {
     const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadProjects()]
     if (canSeeWallet.value) {
-      jobs.push(loadBalance(), loadLedger())
+      jobs.push(
+        (async () => {
+          try {
+            companies.value = await sysApi.myCompanies()
+          } catch {
+            companies.value = []
+          }
+          try {
+            projects.value = (await bizApi.projectList()) || []
+          } catch {
+            projects.value = []
+          }
+          await Promise.all([loadBalance(), loadLedger(), loadBoard()])
+        })(),
+      )
     }
     await Promise.all(jobs)
   } finally {
@@ -266,7 +557,32 @@ onMounted(async () => {
           <h3>钱包流水</h3>
           <p class="sec-tip">按时间、金额或摘要核对到账与扣款</p>
         </div>
-        <el-button type="primary" @click="router.push('/workflow/center')">去发起报销</el-button>
+        <div class="page-actions">
+          <el-button type="primary" @click="openReimburse">去发起报销</el-button>
+          <el-button @click="openWithdraw">申请提现</el-button>
+        </div>
+      </div>
+      <div v-if="walletBoard" class="wallet-board">
+        <div class="wallet-board__metrics">
+          <div><span>余额</span><b>¥ {{ fmt(walletBoard.balance) }}</b></div>
+          <div><span>冻结</span><b>¥ {{ fmt(walletBoard.frozen) }}</b></div>
+          <div><span>可用</span><b>¥ {{ fmt(walletBoard.available) }}</b></div>
+          <div><span>本月入账</span><b class="in">¥ {{ fmt(walletBoard.monthIn) }}</b></div>
+          <div><span>本月出账</span><b class="out">¥ {{ fmt(walletBoard.monthOut) }}</b></div>
+          <div v-if="Number(walletBoard.pendingConfirmCount) > 0">
+            <span>待确认</span><b>{{ walletBoard.pendingConfirmCount }}</b>
+          </div>
+        </div>
+        <WalletBoardCharts
+          :period="boardPeriod"
+          :balance="walletBoard.balance"
+          :frozen="walletBoard.frozen"
+          :available="walletBoard.available"
+          :trend="walletBoard.trend"
+          :source-breakdown="walletBoard.sourceBreakdown"
+          :biz-label="bizLabel"
+          @update:period="onBoardPeriod"
+        />
       </div>
       <el-form class="filter-bar" @submit.prevent="searchLedger">
         <el-form-item label="发生时间">
@@ -281,6 +597,39 @@ onMounted(async () => {
             end-placeholder="结束日期"
             style="width: 260px"
           />
+        </el-form-item>
+        <el-form-item label="公司">
+          <el-select
+            v-model="ledgerQuery.companyId"
+            clearable
+            filterable
+            placeholder="全部"
+            style="width: 160px"
+            @change="ledgerQuery.projectId = undefined"
+          >
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="项目">
+          <ProjectCascadeSelect
+            v-model="ledgerQuery.projectId"
+            :projects="projects"
+            :company-id="ledgerQuery.companyId"
+            mode="filter"
+            top-placeholder="全部"
+            child-placeholder="全部小项目"
+            top-width="160px"
+            child-width="160px"
+          />
+        </el-form-item>
+        <el-form-item label="类型">
+          <el-select v-model="ledgerQuery.bizType" clearable placeholder="全部" style="width: 120px">
+            <el-option label="工资" value="SALARY" />
+            <el-option label="报销" value="REIMBURSE" />
+            <el-option label="分成" value="SETTLE" />
+            <el-option label="提现" value="WITHDRAW" />
+            <el-option label="回退" value="ROLLBACK" />
+          </el-select>
         </el-form-item>
         <el-form-item label="金额">
           <div class="amount-range">
@@ -319,8 +668,17 @@ onMounted(async () => {
         <el-table-column label="时间" width="150">
           <template #default="{ row }">{{ fmtTime(row.occurTime) }}</template>
         </el-table-column>
-        <el-table-column prop="bizNo" label="编号" width="170" show-overflow-tooltip />
-        <el-table-column label="摘要" min-width="220" show-overflow-tooltip>
+        <el-table-column prop="bizNo" label="编号" width="160" show-overflow-tooltip />
+        <el-table-column label="类型" width="90">
+          <template #default="{ row }">{{ bizLabel(row.bizType) }}</template>
+        </el-table-column>
+        <el-table-column label="公司" min-width="120" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.companyName || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="项目" min-width="120" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.projectName || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="摘要" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">
             {{ ledgerTitle(row) }}
           </template>
@@ -348,16 +706,27 @@ onMounted(async () => {
       <div class="sec-head">
         <div>
           <h3>任务日历</h3>
-          <p class="sec-tip">点日期查看当天到期任务</p>
+          <p class="sec-tip">点日期查看当天到期任务（与下方任务列表同一筛选）</p>
         </div>
-        <el-button
-          v-if="userStore.hasPermission('project:task:list')"
-          plain
-          type="primary"
-          @click="router.push('/project/task')"
-        >
-          去任务管理
-        </el-button>
+        <div class="sec-head-actions">
+          <el-radio-group
+            v-if="showTaskScopeToggle"
+            v-model="taskScope"
+            size="small"
+            @change="onTaskScopeChange"
+          >
+            <el-radio-button value="mine">我的</el-radio-button>
+            <el-radio-button value="all">全部</el-radio-button>
+          </el-radio-group>
+          <el-button
+            v-if="userStore.hasPermission('project:task:list')"
+            plain
+            type="primary"
+            @click="router.push('/project/task')"
+          >
+            去任务管理
+          </el-button>
+        </div>
       </div>
       <div class="cal-wrap">
         <el-calendar v-model="calendarDate">
@@ -428,15 +797,26 @@ onMounted(async () => {
 
       <section class="page-card">
         <div class="sec-head">
-          <h3>{{ seeAllProjects ? '全部任务' : '我的任务' }}</h3>
-          <el-button
-            v-if="userStore.hasPermission('project:task:list')"
-            plain
-            type="primary"
-            @click="router.push('/project/task')"
-          >
-            去任务管理
-          </el-button>
+          <h3>{{ taskSectionTitle }}</h3>
+          <div class="sec-head-actions">
+            <el-radio-group
+              v-if="showTaskScopeToggle"
+              v-model="taskScope"
+              size="small"
+              @change="onTaskScopeChange"
+            >
+              <el-radio-button value="mine">我的</el-radio-button>
+              <el-radio-button value="all">全部</el-radio-button>
+            </el-radio-group>
+            <el-button
+              v-if="userStore.hasPermission('project:task:list')"
+              plain
+              type="primary"
+              @click="router.push('/project/task')"
+            >
+              去任务管理
+            </el-button>
+          </div>
         </div>
         <div
           v-for="t in myTasks"
@@ -450,7 +830,7 @@ onMounted(async () => {
           </div>
           <em>{{ t.statusLabel || t.status || '—' }}</em>
         </div>
-        <div v-if="!myTasks.length" class="empty">{{ seeAllProjects ? '暂无任务' : '暂无相关任务' }}</div>
+        <div v-if="!myTasks.length" class="empty">{{ taskEmptyText }}</div>
       </section>
 
       <section class="page-card">
@@ -480,6 +860,95 @@ onMounted(async () => {
         <div v-if="!myProjects.length" class="empty">{{ seeAllProjects ? '暂无项目' : '暂无参与项目' }}</div>
       </section>
     </div>
+
+    <el-dialog v-model="reimburseDialog" title="个人报销" width="480px" @closed="voucherFiles = []">
+      <el-form label-width="88px">
+        <el-form-item label="所属公司" required>
+          <el-select v-model="reimburseForm.companyId" filterable placeholder="选择公司" style="width: 100%">
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="金额" required>
+          <el-input-number v-model="reimburseForm.amount" :min="0.01" :precision="2" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="收款方式" required>
+          <el-select
+            v-model="reimburseForm.payMethodId"
+            filterable
+            :placeholder="myPayMethods.length ? '选择收款方式' : '请先在员工档案配置'"
+            style="width: 100%"
+          >
+            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="Number(m.id)" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="说明">
+          <el-input v-model="reimburseForm.remark" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="发票凭证" required>
+          <el-upload :http-request="onUploadVoucher" :show-file-list="false" accept="image/*,.pdf">
+            <el-button :loading="uploading">上传发票</el-button>
+          </el-upload>
+          <div v-for="(f, i) in voucherFiles" :key="f.id" class="voucher-row">
+            <span>{{ f.originalName || f.name || f.id }}</span>
+            <el-button link type="danger" @click="removeVoucher(i)">移除</el-button>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="reimburseDialog = false">取消</el-button>
+        <el-button type="primary" @click="submitReimburse">提交审批</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="withdrawDialog" title="申请提现" width="480px">
+      <el-form label-width="88px">
+        <el-form-item label="所属公司" required>
+          <el-select v-model="withdrawForm.companyId" filterable placeholder="选择公司" style="width: 100%">
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="提现全额" required>
+          <el-input-number v-model="withdrawForm.amount" :min="0.01" :precision="2" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="计税方式">
+          <span v-if="withdrawTaxMode === 'TIER'">阶梯累进</span>
+          <span v-else>一口价 {{ (Number(withdrawTaxRate) * 100).toFixed(1) }}%</span>
+        </el-form-item>
+        <el-form-item label="税额">
+          <span>¥ {{ fmt(withdrawTax) }}</span>
+        </el-form-item>
+        <el-form-item v-if="withdrawTaxBreakdown.length" label="分档明细">
+          <ul class="tax-breakdown-mini">
+            <li v-for="(b, i) in withdrawTaxBreakdown" :key="i">
+              {{ b.minAmount }}~{{ b.maxAmount == null ? '∞' : b.maxAmount }}
+              · {{ (Number(b.taxRate) * 100).toFixed(1) }}%
+              · 税 ¥{{ fmt(b.tax) }}
+            </li>
+          </ul>
+        </el-form-item>
+        <el-form-item label="预计到手">
+          <strong>¥ {{ fmt(withdrawNet) }}</strong>
+        </el-form-item>
+        <el-form-item label="收款方式" required>
+          <el-select
+            v-model="withdrawForm.payMethodId"
+            filterable
+            :placeholder="myPayMethods.length ? '选择收款方式' : '请先在员工档案配置'"
+            style="width: 100%"
+          >
+            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="Number(m.id)" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="说明">
+          <el-input v-model="withdrawForm.remark" type="textarea" :rows="2" />
+        </el-form-item>
+        <p class="sec-tip">确认到账后：钱包扣提现全额，税额进入公司资金池，到手金额线下打款。</p>
+      </el-form>
+      <template #footer>
+        <el-button @click="withdrawDialog = false">取消</el-button>
+        <el-button type="primary" @click="submitWithdraw">提交审批</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -488,6 +957,46 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+.wallet-board {
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.35);
+}
+.wallet-board__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.wallet-board__metrics span {
+  display: block;
+  font-size: 12px;
+  color: var(--kk-text-muted);
+}
+.wallet-board__metrics b {
+  display: block;
+  margin-top: 4px;
+  font-size: 16px;
+}
+.voucher-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.tax-breakdown-mini {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--kk-text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .welcome-title {
@@ -608,6 +1117,15 @@ onMounted(async () => {
   align-items: flex-start;
   gap: 12px;
   margin-bottom: 14px;
+}
+
+.sec-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
 .sec-head h3 {

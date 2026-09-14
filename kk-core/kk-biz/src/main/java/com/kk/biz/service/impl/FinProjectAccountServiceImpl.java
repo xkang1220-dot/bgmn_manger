@@ -15,9 +15,12 @@ import com.kk.biz.mapper.PmProjectMapper;
 import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.HrWalletService;
 import com.kk.biz.support.BizNoGenerator;
+import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
+import com.kk.system.entity.SysDept;
 import com.kk.system.entity.SysUser;
 import com.kk.system.service.DataScopeService;
+import com.kk.system.service.SysDeptService;
 import com.kk.system.service.SysUserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -28,6 +31,7 @@ import cn.dev33.satoken.stp.StpUtil;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -45,6 +49,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     private final PmProjectMapper projectMapper;
     private final HrWalletService walletService;
     private final SysUserService userService;
+    private final SysDeptService deptService;
     private final BizNoGenerator bizNoGenerator;
     private final DataScopeService dataScopeService;
 
@@ -80,28 +85,118 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         if (project == null) {
             throw new BusinessException("项目不存在");
         }
+        String scale = project.getScale() == null ? ProjectScales.NORMAL : project.getScale();
+        if (!ProjectScales.isFinanceVisible(scale)) {
+            throw new BusinessException("常规项目不涉及财务账款");
+        }
         assertProjectVisible(project);
         FinProjectAccount account = getOrCreate(projectId);
-        fillExtra(List.of(account));
-        assertBalancedQuiet(account);
+        fillExtra(List.of(account), Map.of(project.getId(), project));
+        applyMajorShellAggregation(List.of(account), Map.of(project.getId(), project));
+        if (!Boolean.TRUE.equals(account.getMajorShell())) {
+            assertBalancedQuiet(account);
+        }
         return account;
     }
 
     @Override
-    public List<FinProjectAccount> listAccounts() {
+    public List<FinProjectAccount> listAccounts(Long companyId, String scale) {
         LambdaQueryWrapper<FinProjectAccount> wrapper = new LambdaQueryWrapper<FinProjectAccount>()
                 .orderByDesc(FinProjectAccount::getId);
         long loginId = StpUtil.getLoginIdAsLong();
+        Set<Long> companies = null;
         if (!dataScopeService.isGlobalAdmin(loginId)) {
-            Set<Long> companies = dataScopeService.visibleCompanyIds(loginId);
+            companies = dataScopeService.visibleCompanyIds(loginId);
             if (companies.isEmpty()) {
                 return List.of();
             }
             wrapper.in(FinProjectAccount::getCompanyId, companies);
         }
+        if (companyId != null) {
+            if (companies != null && !companies.contains(companyId)) {
+                return List.of();
+            }
+            wrapper.eq(FinProjectAccount::getCompanyId, companyId);
+        }
         List<FinProjectAccount> list = list(wrapper);
-        fillExtra(list);
+        if (list.isEmpty()) {
+            return list;
+        }
+        // 关联未删除项目，并只保留重点/重大（常规不进财务域）
+        Set<Long> projectIds = list.stream().map(FinProjectAccount::getProjectId).collect(Collectors.toSet());
+        Map<Long, PmProject> projectMap = projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
+                        .in(PmProject::getId, projectIds)).stream()
+                .collect(Collectors.toMap(PmProject::getId, p -> p, (a, b) -> a));
+        String scaleFilter = StringUtils.hasText(scale) ? scale.trim().toUpperCase() : null;
+        list = list.stream().filter(acc -> {
+            PmProject project = projectMap.get(acc.getProjectId());
+            if (project == null) {
+                return false; // 已删除或不存在
+            }
+            String projectScale = project.getScale() == null ? ProjectScales.NORMAL : project.getScale();
+            if (!ProjectScales.isFinanceVisible(projectScale)) {
+                return false;
+            }
+            if (scaleFilter != null && !scaleFilter.equals(projectScale)) {
+                return false;
+            }
+            // 外层只展示顶层；小项目走 children 接口
+            if (project.getParentId() != null) {
+                return false;
+            }
+            return true;
+        }).collect(Collectors.toList());
+        fillExtra(list, projectMap);
+        applyMajorShellAggregation(list, projectMap);
         return list;
+    }
+
+    @Override
+    public List<FinProjectAccount> listChildAccounts(Long parentProjectId) {
+        if (parentProjectId == null) {
+            throw new BusinessException("缺少父项目 ID");
+        }
+        PmProject parent = projectMapper.selectById(parentProjectId);
+        if (parent == null) {
+            throw new BusinessException("项目不存在");
+        }
+        if (!ProjectScales.isMajorShell(parent)) {
+            throw new BusinessException("仅重大项目可查看小项目账款");
+        }
+        assertProjectVisible(parent);
+        List<PmProject> children = projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
+                .eq(PmProject::getParentId, parentProjectId)
+                .orderByDesc(PmProject::getId));
+        if (children.isEmpty()) {
+            return List.of();
+        }
+        List<FinProjectAccount> accounts = new ArrayList<>();
+        Map<Long, PmProject> projectMap = new HashMap<>();
+        for (PmProject child : children) {
+            projectMap.put(child.getId(), child);
+            FinProjectAccount account = getOrCreate(child.getId());
+            accounts.add(account);
+        }
+        fillExtra(accounts, projectMap);
+        return accounts;
+    }
+
+    @Override
+    public void assertMutableProject(Long projectId) {
+        if (projectId == null) {
+            throw new BusinessException("缺少项目 ID");
+        }
+        PmProject project = projectMapper.selectById(projectId);
+        if (project == null) {
+            throw new BusinessException("项目不存在");
+        }
+        if (ProjectScales.isMajorShell(project)) {
+            throw new BusinessException("重大项目外壳不可动账，请先创建小项目并在小项目上操作");
+        }
+        String scale = project.getScale() == null ? ProjectScales.NORMAL : project.getScale();
+        if (!ProjectScales.isFinanceVisible(scale)) {
+            throw new BusinessException("常规项目不涉及财务账款");
+        }
     }
 
     @Override
@@ -132,6 +227,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void advanceFromCompany(Long projectId, Long poolId, BigDecimal amount, Long approvalId, String remark) {
+        assertMutableProject(projectId);
         requirePositive(amount);
         FinPool pool = requirePool(poolId, projectId);
         FinProjectAccount account = getOrCreate(projectId);
@@ -172,6 +268,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void reverseAdvance(Long projectId, Long poolId, BigDecimal amount, Long approvalId, String remark) {
+        assertMutableProject(projectId);
         requirePositive(amount);
         FinProjectAccount account = getOrCreate(projectId);
         if (nz(account.getBalance()).compareTo(amount) < 0) {
@@ -201,6 +298,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void expense(Long projectId, BigDecimal amount, Long approvalId, String title, String remark) {
+        assertMutableProject(projectId);
         requirePositive(amount);
         FinProjectAccount account = getOrCreate(projectId);
         if (nz(account.getBalance()).compareTo(amount) < 0) {
@@ -220,6 +318,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Transactional(rollbackFor = Exception.class)
     public void expenseToWallet(Long projectId, Long userId, BigDecimal amount, Long approvalId,
                                 String bizType, String title, String remark) {
+        assertMutableProject(projectId);
         requirePositive(amount);
         if (userId == null) {
             throw new BusinessException("缺少收款人，无法转入个人钱包");
@@ -251,6 +350,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void settleToWallets(Long projectId, Long poolId, Map<Long, BigDecimal> shares, Long approvalId, String remark) {
+        assertMutableProject(projectId);
         if (shares == null || shares.isEmpty()) {
             throw new BusinessException("分成明细不能为空");
         }
@@ -299,6 +399,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void holdReserve(Long projectId, BigDecimal reserveAmount) {
+        assertMutableProject(projectId);
         FinProjectAccount account = getOrCreate(projectId);
         BigDecimal target = reserveAmount == null ? BigDecimal.ZERO : reserveAmount;
         if (target.compareTo(BigDecimal.ZERO) < 0) {
@@ -330,6 +431,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void returnReserveToCompany(Long projectId, Long poolId, Long approvalId, String remark) {
+        assertMutableProject(projectId);
         FinProjectAccount account = getOrCreate(projectId);
         BigDecimal held = nz(account.getReserveHeld());
         BigDecimal available = nz(account.getBalance());
@@ -495,32 +597,126 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         return v == null ? BigDecimal.ZERO : v;
     }
 
-    private void fillExtra(List<FinProjectAccount> list) {
+    private void fillExtra(List<FinProjectAccount> list, Map<Long, PmProject> cachedProjects) {
         if (list == null || list.isEmpty()) {
             return;
         }
         Set<Long> projectIds = list.stream().map(FinProjectAccount::getProjectId).collect(Collectors.toSet());
-        Map<Long, PmProject> projectMap = projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
-                        .in(PmProject::getId, projectIds)).stream()
+        Map<Long, PmProject> projectMap = cachedProjects != null ? cachedProjects : projectMapper.selectList(
+                        new LambdaQueryWrapper<PmProject>().in(PmProject::getId, projectIds)).stream()
                 .collect(Collectors.toMap(PmProject::getId, p -> p, (a, b) -> a));
         Set<Long> ownerIds = new HashSet<>();
+        Set<Long> companyIds = new HashSet<>();
         projectMap.values().forEach(p -> {
             if (p.getOwnerId() != null) {
                 ownerIds.add(p.getOwnerId());
+            }
+            if (p.getCompanyId() != null) {
+                companyIds.add(p.getCompanyId());
+            }
+        });
+        list.forEach(a -> {
+            if (a.getCompanyId() != null) {
+                companyIds.add(a.getCompanyId());
             }
         });
         Map<Long, SysUser> userMap = ownerIds.isEmpty() ? Map.of()
                 : userService.listByIds(ownerIds).stream()
                 .collect(Collectors.toMap(SysUser::getId, u -> u, (a, b) -> a));
+        Map<Long, String> companyNameMap = companyIds.isEmpty() ? Map.of()
+                : deptService.listByIds(companyIds).stream()
+                .collect(Collectors.toMap(SysDept::getId, SysDept::getName, (a, b) -> a));
         for (FinProjectAccount account : list) {
             PmProject project = projectMap.get(account.getProjectId());
             if (project != null) {
                 account.setProjectName(project.getName());
+                account.setScale(project.getScale());
+                account.setParentId(project.getParentId());
+                account.setMajorShell(ProjectScales.isMajorShell(project));
+                if (account.getCompanyId() == null) {
+                    account.setCompanyId(project.getCompanyId());
+                }
                 SysUser owner = userMap.get(project.getOwnerId());
                 if (owner != null) {
                     account.setOwnerName(owner.getNickname() != null ? owner.getNickname() : owner.getUsername());
                 }
+            } else {
+                account.setMajorShell(false);
             }
+            if (account.getCompanyId() != null) {
+                account.setCompanyName(companyNameMap.get(account.getCompanyId()));
+            }
+        }
+    }
+
+    /**
+     * 重大外壳：展示小项目账款汇总；无小项目时保留外壳自身历史数字（只读）。
+     */
+    private void applyMajorShellAggregation(List<FinProjectAccount> list, Map<Long, PmProject> projectMap) {
+        if (list == null || list.isEmpty()) {
+            return;
+        }
+        Set<Long> shellIds = list.stream()
+                .map(FinProjectAccount::getProjectId)
+                .filter(id -> {
+                    PmProject p = projectMap.get(id);
+                    return ProjectScales.isMajorShell(p);
+                })
+                .collect(Collectors.toSet());
+        if (shellIds.isEmpty()) {
+            return;
+        }
+        List<PmProject> children = projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
+                .in(PmProject::getParentId, shellIds)
+                .select(PmProject::getId, PmProject::getParentId));
+        Map<Long, List<Long>> childrenByParent = new HashMap<>();
+        Set<Long> childIds = new HashSet<>();
+        for (PmProject child : children) {
+            if (child.getParentId() == null || child.getId() == null) {
+                continue;
+            }
+            childrenByParent.computeIfAbsent(child.getParentId(), k -> new ArrayList<>()).add(child.getId());
+            childIds.add(child.getId());
+        }
+        Map<Long, FinProjectAccount> childAccountMap = childIds.isEmpty() ? Map.of()
+                : list(new LambdaQueryWrapper<FinProjectAccount>().in(FinProjectAccount::getProjectId, childIds))
+                .stream().collect(Collectors.toMap(FinProjectAccount::getProjectId, a -> a, (a, b) -> a));
+        for (FinProjectAccount account : list) {
+            Long projectId = account.getProjectId();
+            if (!shellIds.contains(projectId)) {
+                account.setMajorShell(false);
+                continue;
+            }
+            account.setMajorShell(true);
+            List<Long> kids = childrenByParent.getOrDefault(projectId, List.of());
+            account.setChildCount(kids.size());
+            if (kids.isEmpty()) {
+                continue;
+            }
+            BigDecimal balance = BigDecimal.ZERO;
+            BigDecimal advance = BigDecimal.ZERO;
+            BigDecimal expense = BigDecimal.ZERO;
+            BigDecimal settle = BigDecimal.ZERO;
+            BigDecimal reserve = BigDecimal.ZERO;
+            BigDecimal reserveHeld = BigDecimal.ZERO;
+            for (Long childId : kids) {
+                FinProjectAccount childAcc = childAccountMap.get(childId);
+                if (childAcc == null) {
+                    continue;
+                }
+                balance = balance.add(nz(childAcc.getBalance()));
+                advance = advance.add(nz(childAcc.getAdvanceAmount()));
+                expense = expense.add(nz(childAcc.getExpenseAmount()));
+                settle = settle.add(nz(childAcc.getSettleAmount()));
+                reserve = reserve.add(nz(childAcc.getReserveAmount()));
+                reserveHeld = reserveHeld.add(nz(childAcc.getReserveHeld()));
+            }
+            account.setBalance(balance);
+            account.setAdvanceAmount(advance);
+            account.setExpenseAmount(expense);
+            account.setSettleAmount(settle);
+            account.setReserveAmount(reserve);
+            account.setReserveHeld(reserveHeld);
         }
     }
 

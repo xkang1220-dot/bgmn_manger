@@ -5,6 +5,7 @@ import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import { useUserStore } from '@/stores/user'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
+import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 
 const route = useRoute()
 const userStore = useUserStore()
@@ -76,7 +77,13 @@ function onStatClick(key: string) {
 }
 
 async function loadSummary() {
-  summary.value = await bizApi.taskSummary(query.projectId)
+  // 统计随筛选变：项目/标题/优先级/参与人；状态与逾期由卡片本身表达，不传入
+  summary.value = await bizApi.taskSummary({
+    projectId: query.projectId,
+    priority: query.priority,
+    participantId: query.participantId,
+    title: query.title || undefined,
+  })
 }
 
 async function load() {
@@ -194,9 +201,16 @@ onMounted(async () => {
         />
       </el-form-item>
       <el-form-item label="项目">
-        <el-select v-model="query.projectId" clearable placeholder="全部" class="filter-select--wide">
-          <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
-        </el-select>
+        <ProjectCascadeSelect
+          v-model="query.projectId"
+          :projects="projects"
+          mode="filter"
+          top-placeholder="全部"
+          child-placeholder="全部小项目"
+          class="filter-select--wide"
+          top-width="200px"
+          child-width="180px"
+        />
       </el-form-item>
       <el-form-item label="状态">
         <el-select v-model="query.status" clearable placeholder="全部" class="filter-select">

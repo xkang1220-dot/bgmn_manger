@@ -20,8 +20,16 @@ public class ProjectAccountController {
 
     @GetMapping("/list")
     @SaCheckPermission("finance:project:list")
-    public Result<List<FinProjectAccount>> list() {
-        return Result.ok(projectAccountService.listAccounts());
+    public Result<List<FinProjectAccount>> list(
+            @RequestParam(required = false) Long companyId,
+            @RequestParam(required = false) String scale) {
+        return Result.ok(projectAccountService.listAccounts(companyId, scale));
+    }
+
+    @GetMapping("/{projectId}/children")
+    @SaCheckPermission("finance:project:list")
+    public Result<List<FinProjectAccount>> children(@PathVariable Long projectId) {
+        return Result.ok(projectAccountService.listChildAccounts(projectId));
     }
 
     @GetMapping("/{projectId}")

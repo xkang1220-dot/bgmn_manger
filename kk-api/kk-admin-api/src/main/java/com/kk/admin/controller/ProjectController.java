@@ -34,8 +34,8 @@ public class ProjectController {
     public Result<PageResult<PmProject>> page(
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long pageSize,
-            String name, Integer status) {
-        return Result.ok(PageResult.of(projectService.pageProjects(page, pageSize, name, status)));
+            String name, Integer status, Long companyId) {
+        return Result.ok(PageResult.of(projectService.pageProjects(page, pageSize, name, status, companyId)));
     }
 
     @GetMapping("/list")
@@ -60,6 +60,12 @@ public class ProjectController {
         return Result.ok(projectService.getDetail(id));
     }
 
+    @GetMapping("/{id:\\d+}/children")
+    @SaCheckPermission("project:list")
+    public Result<List<PmProject>> children(@PathVariable Long id) {
+        return Result.ok(projectService.listChildren(id));
+    }
+
     @GetMapping("/{id:\\d+}/flows")
     @SaCheckPermission("project:list")
     public Result<List<PmProjectFlow>> flows(@PathVariable Long id) {
@@ -75,10 +81,22 @@ public class ProjectController {
 
     /**
      * 新建项目：常规档直存；重点/重大走审批（审批人/会签或签/超时以该公司审批配置为准）
+     * 小项目：parentId 指向重大外壳，规模固定 KEY，走 PROJECT_CREATE
      */
     @PostMapping
     @SaCheckPermission("project:add")
     public Result<?> create(@RequestBody PmProject project) {
+        if (project.getParentId() != null) {
+            PmProject parent = projectService.getById(project.getParentId());
+            if (parent == null) {
+                throw new BusinessException("父项目不存在");
+            }
+            if (!ProjectScales.isMajorShell(parent)) {
+                throw new BusinessException("仅重大项目可创建小项目");
+            }
+            project.setCompanyId(parent.getCompanyId());
+            project.setScale(ProjectScales.KEY);
+        }
         String scale = ProjectScales.normalize(project.getScale());
         project.setScale(scale);
         if (!ProjectScales.needsApproval(scale)) {
@@ -88,11 +106,12 @@ public class ProjectController {
         }
         ApprovalSubmitRequest req = new ApprovalSubmitRequest();
         req.setType(ApprovalTypes.PROJECT_CREATE);
-        req.setTitle("创建项目 · " + project.getName());
+        req.setTitle((project.getParentId() != null ? "创建小项目 · " : "创建项目 · ") + project.getName());
         Map<String, Object> payload = new HashMap<>();
         payload.put("name", project.getName());
         payload.put("ownerId", project.getOwnerId());
         payload.put("companyId", project.getCompanyId());
+        payload.put("parentId", project.getParentId());
         payload.put("status", project.getStatus() == null ? 1 : project.getStatus());
         payload.put("scale", scale);
         payload.put("description", project.getDescription());
@@ -144,6 +163,7 @@ public class ProjectController {
     @SaCheckPermission("project:remove")
     public Result<WfApproval> delete(@PathVariable Long id) {
         PmProject project = projectService.getDetail(id);
+        projectService.assertNoUndeletedChildren(id);
         ApprovalSubmitRequest req = new ApprovalSubmitRequest();
         req.setType(ApprovalTypes.PROJECT_DELETE);
         req.setTitle("删除项目 · " + project.getName());

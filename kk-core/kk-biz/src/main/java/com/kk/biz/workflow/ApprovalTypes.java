@@ -13,6 +13,8 @@ public final class ApprovalTypes {
     /** 变更项目规模（改到重点/重大，含重点↔重大） */
     public static final String PROJECT_SCALE_CHANGE = "PROJECT_SCALE_CHANGE";
     public static final String REIMBURSE_PERSONAL = "REIMBURSE_PERSONAL";
+    /** 个人钱包提现（含税：扣全额，税进公司资金池） */
+    public static final String WALLET_WITHDRAW = "WALLET_WITHDRAW";
     public static final String REIMBURSE_PROJECT = "REIMBURSE_PROJECT";
     public static final String PROJECT_ADVANCE = "PROJECT_ADVANCE";
     public static final String SHARE_CONFIG = "SHARE_CONFIG";
@@ -40,6 +42,7 @@ public final class ApprovalTypes {
             case PROJECT_DELETE -> "删除项目";
             case PROJECT_SCALE_CHANGE -> "变更项目规模";
             case REIMBURSE_PERSONAL -> "个人报销";
+            case WALLET_WITHDRAW -> "钱包提现";
             case REIMBURSE_PROJECT -> "项目报销";
             case PROJECT_ADVANCE -> "项目预支";
             case SHARE_CONFIG -> "分成配置";
@@ -60,7 +63,8 @@ public final class ApprovalTypes {
     public static boolean needMoneyConfirm(String type) {
         return REIMBURSE_PERSONAL.equals(type)
                 || REIMBURSE_PROJECT.equals(type)
-                || SALARY_APPLY.equals(type);
+                || SALARY_APPLY.equals(type)
+                || WALLET_WITHDRAW.equals(type);
     }
 
     /** @deprecated 审批人与会签/或签已由 wf_approval_flow 按公司配置，勿再按类型写死 */
@@ -75,6 +79,7 @@ public final class ApprovalTypes {
                 || PROJECT_SETTLE.equals(type)
                 || REIMBURSE_PROJECT.equals(type)
                 || REIMBURSE_PERSONAL.equals(type)
+                || WALLET_WITHDRAW.equals(type)
                 || SALARY_APPLY.equals(type)
                 || SALARY_MONTHLY.equals(type)
                 || LEDGER_REGISTER.equals(type)

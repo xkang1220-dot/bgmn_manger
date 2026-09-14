@@ -12,6 +12,7 @@ const BUILTIN_TYPES = [
   { type: 'SHARE_CONFIG', name: '资金配置' },
   { type: 'ROLLBACK', name: '资金回退' },
   { type: 'REIMBURSE_PERSONAL', name: '个人报销' },
+  { type: 'WALLET_WITHDRAW', name: '钱包提现' },
   { type: 'REIMBURSE_PROJECT', name: '项目报销' },
   { type: 'SALARY_APPLY', name: '工资申请' },
   { type: 'SALARY_MONTHLY', name: '月度工资' },

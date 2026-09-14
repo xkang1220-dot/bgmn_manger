@@ -59,11 +59,13 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
     private final FinPoolMapper poolMapper;
 
     @Override
-    public Page<PmProject> pageProjects(long page, long pageSize, String name, Integer status) {
+    public Page<PmProject> pageProjects(long page, long pageSize, String name, Integer status, Long companyId) {
         long userId = StpUtil.getLoginIdAsLong();
         LambdaQueryWrapper<PmProject> wrapper = new LambdaQueryWrapper<PmProject>()
                 .like(StringUtils.hasText(name), PmProject::getName, name)
                 .eq(status != null, PmProject::getStatus, status)
+                .eq(companyId != null, PmProject::getCompanyId, companyId)
+                .isNull(PmProject::getParentId)
                 .and(w -> w.isNull(PmProject::getApproveStatus).or().eq(PmProject::getApproveStatus, 1));
         applyVisibleScope(wrapper, userId);
         wrapper.orderByDesc(PmProject::getId);
@@ -82,6 +84,7 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
             return List.of();
         }
         LambdaQueryWrapper<PmProject> wrapper = new LambdaQueryWrapper<PmProject>()
+                .isNull(PmProject::getParentId)
                 .and(w -> w.isNull(PmProject::getApproveStatus).or().eq(PmProject::getApproveStatus, 1));
         applyVisibleScope(wrapper, userId);
         wrapper.orderByDesc(PmProject::getId);
@@ -93,7 +96,7 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
 
     @Override
     public List<PmProject> listVisible() {
-        return listMine(StpUtil.getLoginIdAsLong());
+        return listSelectable(StpUtil.getLoginIdAsLong());
     }
 
     @Override
@@ -107,6 +110,63 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         fillExtras(list);
         list.forEach(this::maskFinanceFields);
         return list;
+    }
+
+    /** 下拉可选：含小项目（任务/配薪等）；重大外壳仍返回，由调用方过滤 */
+    private List<PmProject> listSelectable(Long userId) {
+        if (userId == null) {
+            return List.of();
+        }
+        LambdaQueryWrapper<PmProject> wrapper = new LambdaQueryWrapper<PmProject>()
+                .and(w -> w.isNull(PmProject::getApproveStatus).or().eq(PmProject::getApproveStatus, 1));
+        applyVisibleScope(wrapper, userId);
+        wrapper.orderByDesc(PmProject::getId);
+        List<PmProject> list = list(wrapper);
+        fillExtras(list);
+        list.forEach(this::maskFinanceFields);
+        return list;
+    }
+
+    @Override
+    public List<PmProject> listChildren(Long parentId) {
+        if (parentId == null) {
+            return List.of();
+        }
+        PmProject parent = loadProject(parentId);
+        assertCanView(parent, StpUtil.getLoginIdAsLong());
+        if (!ProjectScales.isMajorShell(parent)) {
+            return List.of();
+        }
+        List<PmProject> list = list(new LambdaQueryWrapper<PmProject>()
+                .eq(PmProject::getParentId, parentId)
+                .and(w -> w.isNull(PmProject::getApproveStatus).or().eq(PmProject::getApproveStatus, 1))
+                .orderByDesc(PmProject::getId));
+        fillExtras(list);
+        list.forEach(this::maskFinanceFields);
+        return list;
+    }
+
+    @Override
+    public List<Long> resolveProjectFilterIds(Long projectId) {
+        if (projectId == null) {
+            return null;
+        }
+        PmProject project = getById(projectId);
+        if (project == null || (project.getDeleted() != null && project.getDeleted() == 1)) {
+            return List.of(-1L);
+        }
+        if (ProjectScales.isMajorShell(project)) {
+            List<Long> childIds = list(new LambdaQueryWrapper<PmProject>()
+                    .eq(PmProject::getParentId, projectId)
+                    .and(w -> w.isNull(PmProject::getApproveStatus).or().eq(PmProject::getApproveStatus, 1))
+                    .select(PmProject::getId))
+                    .stream()
+                    .map(PmProject::getId)
+                    .filter(Objects::nonNull)
+                    .toList();
+            return childIds.isEmpty() ? List.of(-1L) : childIds;
+        }
+        return List.of(projectId);
     }
 
     @Override
@@ -137,6 +197,7 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         if (project.getSettledAmount() == null) {
             project.setSettledAmount(BigDecimal.ZERO);
         }
+        applyParentRulesOnCreate(project);
         String scale = ProjectScales.normalize(project.getScale());
         project.setScale(scale);
         if (project.getApproveStatus() == null) {
@@ -167,7 +228,31 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
             syncCollaborationMembers(project.getId(), companyId, incomingMembers);
         }
         recordFlow(project.getId(), "CREATE", null, ProjectScales.label(scale), null,
-                "创建项目（" + ProjectScales.label(scale) + "）");
+                project.getParentId() != null
+                        ? "创建小项目（" + ProjectScales.label(scale) + "）"
+                        : "创建项目（" + ProjectScales.label(scale) + "）");
+    }
+
+    /** 校验并规范化 parentId / 小项目规模与公司 */
+    private void applyParentRulesOnCreate(PmProject project) {
+        Long parentId = project.getParentId();
+        if (parentId == null) {
+            return;
+        }
+        PmProject parent = getById(parentId);
+        if (parent == null) {
+            throw new BusinessException("父项目不存在");
+        }
+        if (!ProjectScales.isMajorShell(parent)) {
+            throw new BusinessException("仅重大项目可创建小项目");
+        }
+        if (parent.getParentId() != null) {
+            throw new BusinessException("小项目不可再挂子项目");
+        }
+        assertCanView(parent, StpUtil.getLoginIdAsLong());
+        project.setCompanyId(parent.getCompanyId());
+        project.setScale(ProjectScales.KEY);
+        project.setParentId(parentId);
     }
 
     @Override
@@ -187,6 +272,12 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
             throw new BusinessException("项目不存在");
         }
         assertCanView(existing, StpUtil.getLoginIdAsLong());
+        if (existing.getParentId() != null) {
+            // 小项目规模固定 KEY，忽略改档
+            project.setScale(ProjectScales.KEY);
+            project.setParentId(existing.getParentId());
+            project.setCompanyId(existing.getCompanyId());
+        }
         List<PmProjectMember> incomingMembers = project.getMembers();
         if (project.getOwnerId() != null) {
             assertUserInCompany(project.getOwnerId(), existing.getCompanyId());
@@ -195,6 +286,10 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         String oldScale = StringUtils.hasText(existing.getScale()) ? existing.getScale() : ProjectScales.NORMAL;
         String requestedScale = project.getScale() != null ? ProjectScales.normalize(project.getScale()) : oldScale;
         boolean scaleChanged = !Objects.equals(oldScale, requestedScale);
+        if (scaleChanged && ProjectScales.MAJOR.equals(oldScale) && !ProjectScales.MAJOR.equals(requestedScale)
+                && countChildren(existing.getId()) > 0) {
+            throw new BusinessException("仍有小项目时，不可将重大项目降为其他规模");
+        }
         boolean scaleNeedsApproval = scaleChanged && ProjectScales.needsApproval(requestedScale);
         if (scaleNeedsApproval) {
             assertNoPendingScaleChange(existing.getId());
@@ -212,7 +307,7 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
                 || !Objects.equals(existing.getEndDate(), project.getEndDate())
                 || !Objects.equals(existing.getActualEndDate(), project.getActualEndDate());
 
-        // 不可改公司/编号/财务；日期允许置空（updateById 默认跳过 null）
+        // 不可改公司/编号/财务/父级；日期允许置空（updateById 默认跳过 null）
         lambdaUpdate()
                 .eq(PmProject::getId, existing.getId())
                 .set(PmProject::getName, project.getName())
@@ -266,10 +361,16 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         if (existing == null) {
             throw new BusinessException("项目不存在");
         }
+        if (existing.getParentId() != null) {
+            throw new BusinessException("小项目规模固定为重点，不可变更");
+        }
         String from = StringUtils.hasText(existing.getScale()) ? existing.getScale() : ProjectScales.NORMAL;
         String to = ProjectScales.normalize(toScale);
         if (Objects.equals(from, to)) {
             return;
+        }
+        if (ProjectScales.MAJOR.equals(from) && !ProjectScales.MAJOR.equals(to) && countChildren(projectId) > 0) {
+            throw new BusinessException("仍有小项目时，不可将重大项目降为其他规模");
         }
         lambdaUpdate()
                 .eq(PmProject::getId, projectId)
@@ -555,6 +656,9 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         if (project == null) {
             throw new BusinessException("项目不存在");
         }
+        if (ProjectScales.isMajorShell(project)) {
+            throw new BusinessException("重大项目外壳不可配置分成，请在小项目上操作");
+        }
         Long companyId = project.getCompanyId();
         if (companyId == null) {
             throw new BusinessException("项目缺少所属公司，无法配置分成");
@@ -580,8 +684,27 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void deleteProject(Long id) {
+        assertNoUndeletedChildren(id);
         removeById(id);
         memberMapper.delete(new LambdaQueryWrapper<PmProjectMember>().eq(PmProjectMember::getProjectId, id));
+    }
+
+    @Override
+    public void assertNoUndeletedChildren(Long projectId) {
+        if (projectId == null) {
+            return;
+        }
+        if (countChildren(projectId) > 0) {
+            throw new BusinessException("请先处理全部小项目后再删除重大项目");
+        }
+    }
+
+    private long countChildren(Long parentId) {
+        if (parentId == null) {
+            return 0;
+        }
+        Long cnt = count(new LambdaQueryWrapper<PmProject>().eq(PmProject::getParentId, parentId));
+        return cnt == null ? 0 : cnt;
     }
 
     private PmProject loadProject(Long id) {
@@ -790,6 +913,7 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         Set<Long> poolIds = new HashSet<>();
         Set<Long> companyIds = new HashSet<>();
         Set<Long> projectIds = new HashSet<>();
+        Set<Long> parentIds = new HashSet<>();
         for (PmProject project : projects) {
             if (project.getId() != null) {
                 projectIds.add(project.getId());
@@ -803,7 +927,26 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
             if (project.getCompanyId() != null) {
                 companyIds.add(project.getCompanyId());
             }
+            if (project.getParentId() != null) {
+                parentIds.add(project.getParentId());
+            }
         }
+        Map<Long, Long> childCountMap = new HashMap<>();
+        if (!projectIds.isEmpty()) {
+            for (PmProject child : list(new LambdaQueryWrapper<PmProject>()
+                    .in(PmProject::getParentId, projectIds)
+                    .select(PmProject::getId, PmProject::getParentId))) {
+                if (child.getParentId() == null) {
+                    continue;
+                }
+                childCountMap.merge(child.getParentId(), 1L, Long::sum);
+            }
+        }
+        Map<Long, String> parentNameMap = parentIds.isEmpty() ? Map.of()
+                : list(new LambdaQueryWrapper<PmProject>()
+                        .in(PmProject::getId, parentIds)
+                        .select(PmProject::getId, PmProject::getName)).stream()
+                .collect(Collectors.toMap(PmProject::getId, PmProject::getName, (a, b) -> a));
         Map<Long, List<PmProjectMember>> membersByProject = new HashMap<>();
         Set<Long> memberUserIds = new HashSet<>();
         if (!projectIds.isEmpty()) {
@@ -843,6 +986,10 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
             if (project.getCompanyId() != null) {
                 project.setCompanyName(companyNameMap.get(project.getCompanyId()));
             }
+            if (project.getParentId() != null) {
+                project.setParentName(parentNameMap.get(project.getParentId()));
+            }
+            project.setChildCount(childCountMap.getOrDefault(project.getId(), 0L).intValue());
             List<PmProjectMember> members = membersByProject.getOrDefault(project.getId(), List.of());
             if (members.isEmpty()) {
                 project.setParticipantNames(List.of());

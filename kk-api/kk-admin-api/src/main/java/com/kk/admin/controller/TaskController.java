@@ -43,8 +43,9 @@ public class TaskController {
 
     @GetMapping("/summary")
     @SaCheckPermission("project:task:list")
-    public Result<Map<String, Object>> summary(Long projectId) {
-        return Result.ok(taskService.summary(projectId));
+    public Result<Map<String, Object>> summary(
+            Long projectId, Integer priority, Long participantId, String title) {
+        return Result.ok(taskService.summary(projectId, priority, participantId, title));
     }
 
     /** 当前登录用户相关任务：参与或自己创建 */

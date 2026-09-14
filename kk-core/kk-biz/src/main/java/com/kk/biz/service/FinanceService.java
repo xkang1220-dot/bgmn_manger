@@ -28,6 +28,13 @@ public interface FinanceService extends IService<FinPool> {
 
     Page<FinLedger> pageLedger(LedgerQuery query);
 
+    /**
+     * 个人中心钱包看板：余额指标、走势、入账构成、近期待确认等（仅本人）。
+     *
+     * @param period daily=近30天 / monthly=近12月
+     */
+    Map<String, Object> myWalletBoard(Long userId, String period);
+
     /** @deprecated 使用 {@link #pageLedger(LedgerQuery)} */
     @Deprecated
     default Page<FinLedger> pageLedger(long page, long pageSize, String bizType, String accountType, Long userId, Long poolId, Long projectId) {

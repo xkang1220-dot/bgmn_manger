@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import { approvalFlowTip } from '@/utils/approvalTip'
+import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 
 const query = reactive({
   page: 1,
@@ -26,12 +27,24 @@ const listLoading = ref(false)
 const saving = ref(false)
 const thresholdDialog = ref(false)
 const thresholdSaving = ref(false)
+const taxDialog = ref(false)
+const taxSaving = ref(false)
 const companies = ref<any[]>([])
 const thresholdForm = reactive({
   companyId: undefined as number | undefined,
   enabled: false,
   notifyThreshold: 5000,
   approveThreshold: 30000,
+})
+const taxForm = reactive({
+  companyId: undefined as number | undefined,
+  defaultTaxRate: 0.2,
+  taxMode: 'FLAT' as string,
+  tiers: [] as Array<{ minAmount: number; maxAmount: number | undefined; taxRatePercent: number }>,
+  trialAmount: 8000,
+  trialTax: 0,
+  trialNet: 0,
+  trialBreakdown: [] as any[],
 })
 const activeThreshold = ref<any>({ enabled: 0, notifyThreshold: 5000, approveThreshold: 30000 })
 
@@ -476,6 +489,172 @@ async function saveThreshold() {
   }
 }
 
+async function openTaxDialog() {
+  if (!companies.value.length) {
+    companies.value = await sysApi.myCompanies()
+  }
+  taxForm.companyId = taxForm.companyId
+    || thresholdForm.companyId
+    || companies.value[0]?.id
+    || pools.value.find((p) => p.companyId)?.companyId
+  // 弹窗状态挂在页面上，关闭不销毁；打开时丢掉未保存草稿与试算，避免「像缓存」
+  taxForm.tiers = []
+  taxForm.trialAmount = 8000
+  taxForm.trialTax = 0
+  taxForm.trialNet = 0
+  taxForm.trialBreakdown = []
+  taxForm.taxMode = 'FLAT'
+  await loadTaxForm()
+  taxDialog.value = true
+}
+
+async function loadTaxForm() {
+  if (!taxForm.companyId) return
+  const row = await bizApi.getWithdrawTaxTiers(Number(taxForm.companyId))
+  taxForm.defaultTaxRate = Number(row.defaultTaxRate ?? 0.2)
+  taxForm.taxMode = row.taxMode || 'FLAT'
+  const tiers = row.tiers || []
+  taxForm.tiers = tiers.length
+    ? tiers.map((t: any) => ({
+        minAmount: Number(t.minAmount ?? 0),
+        maxAmount: t.maxAmount == null ? undefined : Number(t.maxAmount),
+        taxRatePercent: Number(t.taxRate ?? 0) * 100,
+      }))
+    : []
+  await runTaxTrial()
+}
+
+async function onTaxCompanyChange() {
+  await loadTaxForm()
+}
+
+function addTaxTier() {
+  const last = taxForm.tiers[taxForm.tiers.length - 1]
+  const minAmount = last?.maxAmount != null ? Number(last.maxAmount) : (last ? Number(last.minAmount) + 5000 : 0)
+  if (last && last.maxAmount == null) {
+    last.maxAmount = minAmount
+  }
+  taxForm.tiers.push({
+    minAmount,
+    maxAmount: undefined,
+    taxRatePercent: last ? Number(last.taxRatePercent) : 20,
+  })
+}
+
+function removeTaxTier(index: number) {
+  taxForm.tiers.splice(index, 1)
+}
+
+function progressiveTaxClient(amount: number, tiers: typeof taxForm.tiers) {
+  if (!tiers.length) {
+    const rate = Number(taxForm.defaultTaxRate || 0.2)
+    const tax = Number((amount * rate).toFixed(2))
+    return {
+      tax,
+      net: Number((amount - tax).toFixed(2)),
+      breakdown: [{ minAmount: 0, maxAmount: null, taxRate: rate, taxableAmount: amount, tax }],
+    }
+  }
+  let taxSum = 0
+  const breakdown: any[] = []
+  for (const t of tiers) {
+    const min = Number(t.minAmount || 0)
+    const max = t.maxAmount == null || t.maxAmount === ('' as any) ? null : Number(t.maxAmount)
+    if (amount <= min) continue
+    const upper = max == null ? amount : Math.min(amount, max)
+    const taxable = upper - min
+    if (taxable <= 0) continue
+    const rate = Number(t.taxRatePercent || 0) / 100
+    const sliceTax = Number((taxable * rate).toFixed(2))
+    taxSum += sliceTax
+    breakdown.push({
+      minAmount: min,
+      maxAmount: max,
+      taxRate: rate,
+      taxableAmount: Number(taxable.toFixed(2)),
+      tax: sliceTax,
+    })
+  }
+  taxSum = Number(taxSum.toFixed(2))
+  return { tax: taxSum, net: Number((amount - taxSum).toFixed(2)), breakdown }
+}
+
+async function runTaxTrial() {
+  const amount = Number(taxForm.trialAmount || 0)
+  if (amount <= 0) {
+    taxForm.trialTax = 0
+    taxForm.trialNet = 0
+    taxForm.trialBreakdown = []
+    return
+  }
+  const local = progressiveTaxClient(amount, taxForm.tiers)
+  taxForm.trialTax = local.tax
+  taxForm.trialNet = local.net
+  taxForm.trialBreakdown = local.breakdown
+}
+
+async function saveTaxTiers() {
+  if (!taxForm.companyId) {
+    ElMessage.warning('请选择公司')
+    return
+  }
+  // 保存前强制最后一档无上限，避免填了上限导致保存被拒、重进变空
+  if (taxForm.tiers.length) {
+    taxForm.tiers[taxForm.tiers.length - 1].maxAmount = undefined
+  }
+  const tiers = taxForm.tiers.map((t, i) => {
+    const rawMax = t.maxAmount
+    const maxAmount =
+      i === taxForm.tiers.length - 1
+        ? null
+        : rawMax == null || rawMax === ('' as any) || Number.isNaN(Number(rawMax))
+          ? null
+          : Number(rawMax)
+    return {
+      minAmount: Number(t.minAmount || 0),
+      maxAmount,
+      taxRate: Number((Number(t.taxRatePercent || 0) / 100).toFixed(4)),
+      sort: i,
+    }
+  })
+  for (let i = 0; i < tiers.length; i++) {
+    const cur = tiers[i]
+    if (cur.taxRate < 0 || cur.taxRate > 1) {
+      ElMessage.warning(`第 ${i + 1} 档税率需在 0～100%`)
+      return
+    }
+    if (cur.maxAmount != null && cur.maxAmount <= cur.minAmount) {
+      ElMessage.warning(`第 ${i + 1} 档上限必须大于下限`)
+      return
+    }
+    if (i < tiers.length - 1 && cur.maxAmount == null) {
+      ElMessage.warning('非最后一档必须填写上限')
+      return
+    }
+    if (i < tiers.length - 1 && Number(cur.maxAmount) !== Number(tiers[i + 1].minAmount)) {
+      ElMessage.warning('档位须连续：上一档上限 = 下一档下限')
+      return
+    }
+  }
+  if (tiers.length && Number(tiers[0].minAmount) !== 0) {
+    ElMessage.warning('第一档下限必须从 0 开始')
+    return
+  }
+  taxSaving.value = true
+  try {
+    await bizApi.saveWithdrawTaxTiers({
+      companyId: Number(taxForm.companyId),
+      tiers,
+    })
+    await loadTaxForm()
+    ElMessage.success(tiers.length ? `已保存 ${tiers.length} 档阶梯税率` : '已清空阶梯，将回退系统默认一口价税率')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '保存失败，请确认有财务编辑权限且后端已重启')
+  } finally {
+    taxSaving.value = false
+  }
+}
+
 const thresholdBadge = ref('未配置')
 
 async function refreshThresholdBadge() {
@@ -543,6 +722,7 @@ onMounted(async () => {
       <div class="page-actions">
         <span class="threshold-badge">{{ thresholdBadge }}</span>
         <el-button @click="openThresholdDialog">出账阈值</el-button>
+        <el-button @click="openTaxDialog">提现税率</el-button>
         <el-button type="primary" @click="openDialog">登记流水</el-button>
       </div>
     </div>
@@ -762,9 +942,15 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-form-item label="关联项目">
-          <el-select v-model="form.projectId" clearable style="width: 100%">
-            <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
-          </el-select>
+          <ProjectCascadeSelect
+            v-model="form.projectId"
+            :projects="projects"
+            mode="filter"
+            top-placeholder="可选"
+            child-placeholder="小项目（可选）"
+            top-width="100%"
+            child-width="100%"
+          />
         </el-form-item>
         <el-form-item label="总额" required>
           <el-input-number v-model="form.amount" :min="0.01" :precision="2" style="width: 100%" />
@@ -860,6 +1046,73 @@ onMounted(async () => {
         <el-button type="primary" :loading="thresholdSaving" @click="saveThreshold">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="taxDialog" title="提现阶梯税率" width="640px" :close-on-click-modal="false">
+      <el-form label-width="88px">
+        <el-form-item label="公司" required>
+          <el-select v-model="taxForm.companyId" style="width: 100%" @change="onTaxCompanyChange">
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
+        <el-alert
+          type="info"
+          :closable="false"
+          :title="`超额累进：各档分别计税后相加。最后一档上限须留空。未配置时回退默认一口价 ${(Number(taxForm.defaultTaxRate) * 100).toFixed(1)}%。`"
+          style="margin-bottom: 12px"
+        />
+        <div class="tax-tier-table">
+          <div class="tax-tier-head">
+            <span>下限（含）</span>
+            <span>上限（不含）</span>
+            <span>税率 %</span>
+            <span />
+          </div>
+          <div v-for="(t, i) in taxForm.tiers" :key="i" class="tax-tier-row">
+            <el-input-number v-model="t.minAmount" :min="0" :precision="2" :controls="false" @change="runTaxTrial" />
+            <el-input-number
+              v-model="t.maxAmount"
+              :min="0"
+              :precision="2"
+              :controls="false"
+              placeholder="空=无上限"
+              @change="runTaxTrial"
+            />
+            <el-input-number
+              v-model="t.taxRatePercent"
+              :min="0"
+              :max="100"
+              :precision="2"
+              :controls="false"
+              @change="runTaxTrial"
+            />
+            <el-button link type="danger" @click="removeTaxTier(i); runTaxTrial()">删</el-button>
+          </div>
+          <el-button type="primary" link @click="addTaxTier(); runTaxTrial()">添加档位</el-button>
+        </div>
+        <el-divider content-position="left">试算</el-divider>
+        <el-form-item label="试算金额">
+          <el-input-number v-model="taxForm.trialAmount" :min="0.01" :precision="2" style="width: 220px" @change="runTaxTrial" />
+        </el-form-item>
+        <el-form-item label="税额">
+          <span>¥ {{ Number(taxForm.trialTax || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
+        </el-form-item>
+        <el-form-item label="到手">
+          <strong>¥ {{ Number(taxForm.trialNet || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</strong>
+        </el-form-item>
+        <ul v-if="taxForm.trialBreakdown.length" class="tax-breakdown">
+          <li v-for="(b, i) in taxForm.trialBreakdown" :key="i">
+            {{ b.minAmount }} ~ {{ b.maxAmount == null ? '∞' : b.maxAmount }}
+            · {{ (Number(b.taxRate) * 100).toFixed(1) }}%
+            · 计税基数 ¥{{ Number(b.taxableAmount).toFixed(2) }}
+            · 税 ¥{{ Number(b.tax).toFixed(2) }}
+          </li>
+        </ul>
+      </el-form>
+      <template #footer>
+        <el-button @click="taxDialog = false">关闭</el-button>
+        <el-button type="primary" :loading="taxSaving" @click="saveTaxTiers">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -875,6 +1128,33 @@ onMounted(async () => {
   color: var(--el-text-color-secondary);
   max-width: 280px;
   line-height: 1.3;
+}
+.tax-tier-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.tax-tier-head,
+.tax-tier-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 110px 40px;
+  gap: 8px;
+  align-items: center;
+}
+.tax-tier-head {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.tax-breakdown {
+  margin: 0 0 0 88px;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 .summary-row {
   display: grid;

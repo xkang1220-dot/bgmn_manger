@@ -127,6 +127,32 @@ public class HrWalletServiceImpl extends ServiceImpl<HrWalletMapper, HrWallet> i
         return getOrCreate(userId);
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public HrWallet consumeFrozen(Long userId, BigDecimal amount) {
+        if (userId == null) {
+            throw new BusinessException("缺少用户");
+        }
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("扣减金额无效");
+        }
+        HrWallet wallet = getOrCreate(userId);
+        if (wallet.getStatus() != null && wallet.getStatus() == 0) {
+            throw new BusinessException("该人员钱包已禁用");
+        }
+        boolean ok = lambdaUpdate()
+                .eq(HrWallet::getUserId, userId)
+                .apply("IFNULL(frozen,0) >= {0}", amount)
+                .apply("IFNULL(balance,0) >= {0}", amount)
+                .setSql("frozen = IFNULL(frozen,0) - " + amount.toPlainString()
+                        + ", balance = balance - " + amount.toPlainString())
+                .update();
+        if (!ok) {
+            throw new BusinessException("钱包冻结金额或余额不足，无法扣款");
+        }
+        return getOrCreate(userId);
+    }
+
     private void fillUser(HrWallet wallet) {
         fillUsers(List.of(wallet));
     }

@@ -68,6 +68,9 @@ public class FinLedger extends BaseEntity {
     private String userName;
 
     @TableField(exist = false)
+    private String companyName;
+
+    @TableField(exist = false)
     private String poolName;
 
     @TableField(exist = false)

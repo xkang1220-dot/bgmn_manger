@@ -47,4 +47,22 @@ public class FinProjectAccount extends BaseEntity {
 
     @TableField(exist = false)
     private String ownerName;
+
+    @TableField(exist = false)
+    private String companyName;
+
+    /** NORMAL / KEY / MAJOR */
+    @TableField(exist = false)
+    private String scale;
+
+    @TableField(exist = false)
+    private Long parentId;
+
+    /** 重大外壳：只读汇总，禁止动账 */
+    @TableField(exist = false)
+    private Boolean majorShell;
+
+    /** 未删小项目数量 */
+    @TableField(exist = false)
+    private Integer childCount;
 }

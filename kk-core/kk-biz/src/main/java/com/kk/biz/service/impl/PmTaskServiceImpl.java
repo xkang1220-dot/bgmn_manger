@@ -19,6 +19,7 @@ import com.kk.biz.mapper.PmTaskMapper;
 import com.kk.biz.mapper.PmTaskMemberMapper;
 import com.kk.biz.service.PmTaskService;
 import com.kk.biz.service.SysFileService;
+import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
 import com.kk.system.entity.SysUser;
 import com.kk.system.service.DataScopeService;
@@ -68,24 +69,11 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     public Page<PmTask> pageTasks(long page, long pageSize, Long projectId, Integer status, Integer priority,
                                   Long participantId, String title, Boolean overdue) {
         LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<PmTask>()
-                .eq(projectId != null, PmTask::getProjectId, projectId)
                 .eq(status != null, PmTask::getStatus, status)
                 .eq(priority != null, PmTask::getPriority, priority)
                 .like(StringUtils.hasText(title), PmTask::getTitle, title);
-        if (participantId != null) {
-            Set<Long> taskIds = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
-                            .eq(PmTaskMember::getUserId, participantId)
-                            .select(PmTaskMember::getTaskId))
-                    .stream()
-                    .map(PmTaskMember::getTaskId)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toSet());
-            if (taskIds.isEmpty()) {
-                wrapper.eq(PmTask::getId, -1L);
-            } else {
-                wrapper.in(PmTask::getId, taskIds);
-            }
-        }
+        applyProjectIdFilter(wrapper, projectId);
+        applyParticipantFilter(wrapper, participantId);
         if (Boolean.TRUE.equals(overdue)) {
             wrapper.lt(PmTask::getDueDate, LocalDate.now()).in(PmTask::getStatus, 0, 1);
         }
@@ -96,6 +84,24 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 .orderByDesc(PmTask::getId));
         fillExtras(result.getRecords());
         return result;
+    }
+
+    private void applyParticipantFilter(LambdaQueryWrapper<PmTask> wrapper, Long participantId) {
+        if (participantId == null) {
+            return;
+        }
+        Set<Long> taskIds = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
+                        .eq(PmTaskMember::getUserId, participantId)
+                        .select(PmTaskMember::getTaskId))
+                .stream()
+                .map(PmTaskMember::getTaskId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        if (taskIds.isEmpty()) {
+            wrapper.eq(PmTask::getId, -1L);
+        } else {
+            wrapper.in(PmTask::getId, taskIds);
+        }
     }
 
     @Override
@@ -111,10 +117,13 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     }
 
     @Override
-    public Map<String, Object> summary(Long projectId) {
+    public Map<String, Object> summary(Long projectId, Integer priority, Long participantId, String title) {
         LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<PmTask>()
                 .select(PmTask::getStatus, PmTask::getDueDate)
-                .eq(projectId != null, PmTask::getProjectId, projectId);
+                .eq(priority != null, PmTask::getPriority, priority)
+                .like(StringUtils.hasText(title), PmTask::getTitle, title);
+        applyProjectIdFilter(wrapper, projectId);
+        applyParticipantFilter(wrapper, participantId);
         applyVisibleScope(wrapper);
         List<PmTask> rows = list(wrapper);
         LocalDate today = LocalDate.now();
@@ -139,6 +148,34 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         map.put("cancelled", cancelled);
         map.put("overdue", overdue);
         return map;
+    }
+
+    private void applyProjectIdFilter(LambdaQueryWrapper<PmTask> wrapper, Long projectId) {
+        if (projectId == null) {
+            return;
+        }
+        PmProject project = projectMapper.selectById(projectId);
+        if (project == null) {
+            wrapper.eq(PmTask::getProjectId, -1L);
+            return;
+        }
+        if (ProjectScales.isMajorShell(project)) {
+            List<Long> childIds = projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
+                            .eq(PmProject::getParentId, projectId)
+                            .and(w -> w.isNull(PmProject::getApproveStatus).or().eq(PmProject::getApproveStatus, 1))
+                            .select(PmProject::getId))
+                    .stream()
+                    .map(PmProject::getId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+            if (childIds.isEmpty()) {
+                wrapper.eq(PmTask::getProjectId, -1L);
+            } else {
+                wrapper.in(PmTask::getProjectId, childIds);
+            }
+            return;
+        }
+        wrapper.eq(PmTask::getProjectId, projectId);
     }
 
     @Override
@@ -205,6 +242,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         PmProject project = projectMapper.selectById(task.getProjectId());
         if (project == null) {
             throw new BusinessException("项目不存在");
+        }
+        if (ProjectScales.isMajorShell(project)) {
+            throw new BusinessException("重大项目外壳不可挂任务，请在小项目上创建");
         }
         assertCanAccessProject(project);
         task.setCompanyId(project.getCompanyId());

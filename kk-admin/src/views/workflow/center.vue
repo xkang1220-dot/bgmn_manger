@@ -88,9 +88,14 @@ async function withdraw() {
 
 async function confirmReceived() {
   if (!detail.value) return
-  await ElMessageBox.confirm('确认钱已到账？确认后将正式动账')
+  const withdraw = detail.value.type === 'WALLET_WITHDRAW'
+  await ElMessageBox.confirm(
+    withdraw
+      ? '确认财务已打款到账？确认后将从钱包扣减提现全额，并把税额记入公司资金池'
+      : '确认钱已到账？确认后将正式动账',
+  )
   await workflowApi.confirm(detail.value.id)
-  ElMessage.success('已确认到账并完成动账')
+  ElMessage.success(withdraw ? '已确认，钱包已扣款' : '已确认到账并完成动账')
   await refreshDetail()
   await load()
 }
@@ -218,6 +223,7 @@ onMounted(load)
           <el-option label="删除项目" value="PROJECT_DELETE" />
           <el-option label="变更项目规模" value="PROJECT_SCALE_CHANGE" />
           <el-option label="个人报销" value="REIMBURSE_PERSONAL" />
+          <el-option label="钱包提现" value="WALLET_WITHDRAW" />
           <el-option label="项目报销" value="REIMBURSE_PROJECT" />
           <el-option label="项目预支" value="PROJECT_ADVANCE" />
           <el-option label="分成配置" value="SHARE_CONFIG" />
@@ -441,6 +447,26 @@ onMounted(load)
             </div>
           </template>
 
+          <template v-else-if="detail.type === 'WALLET_WITHDRAW'">
+            <div class="kv-grid">
+              <div><span>提现全额</span><b>¥{{ fmtMoney(payload.gross ?? detail.amount) }}</b></div>
+              <div><span>计税</span><b>{{ payload.taxMode === 'TIER' ? '阶梯累进' : `${Number(payload.taxRate ?? 0) * 100}%` }}</b></div>
+              <div><span>税额</span><b>¥{{ fmtMoney(payload.tax) }}</b></div>
+              <div><span>到手金额</span><b>¥{{ fmtMoney(payload.net) }}</b></div>
+              <div v-if="payload.payMethod">
+                <span>收款方式</span>
+                <b>
+                  {{ payload.payMethod.methodTypeLabel || payload.payMethod.methodType || '—' }}
+                  · {{ payload.payMethod.accountName || '' }}
+                  {{ payload.payMethod.accountNo || '' }}
+                  <template v-if="payload.payMethod.bankName">（{{ payload.payMethod.bankName }}）</template>
+                </b>
+              </div>
+              <div v-else><span>收款方式</span><b>未填写</b></div>
+              <div><span>说明</span><b>{{ detail.remark || payload.remark || '—' }}</b></div>
+            </div>
+          </template>
+
           <template v-else-if="['PROJECT_ADVANCE', 'REIMBURSE_PROJECT', 'REIMBURSE_PERSONAL', 'SALARY_APPLY', 'RESERVE_RETURN'].includes(detail.type)">
             <div class="kv-grid">
               <div><span>{{ detail.type === 'RESERVE_RETURN' ? '结余金额' : '金额' }}</span><b>¥{{ fmtMoney(detail.amount) }}</b></div>
@@ -538,7 +564,9 @@ onMounted(load)
           <el-upload v-if="detail.canUploadReceipt && canUploadReceipt" :show-file-list="false" :http-request="onUploadReceipt">
             <el-button :loading="uploading" type="warning">上传财务回执</el-button>
           </el-upload>
-          <el-button v-if="detail.canConfirm" type="success" @click="confirmReceived">确认到账</el-button>
+          <el-button v-if="detail.canConfirm" type="success" @click="confirmReceived">
+            {{ detail.type === 'WALLET_WITHDRAW' ? '确认提现完成' : '确认到账' }}
+          </el-button>
           <el-button v-if="detail.canRollback" @click="openRollback">发起回退</el-button>
         </div>
       </template>

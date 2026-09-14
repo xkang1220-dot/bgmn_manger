@@ -15,9 +15,19 @@ public interface FinProjectAccountService extends IService<FinProjectAccount> {
 
     FinProjectAccount getByProjectId(Long projectId);
 
-    List<FinProjectAccount> listAccounts();
+    /**
+     * 项目账款列表：仅未删除且规模为重点/重大的顶层项目；可选公司、规模筛选。
+     * 重大外壳金额为小项目汇总。
+     */
+    List<FinProjectAccount> listAccounts(Long companyId, String scale);
+
+    /** 重大外壳下的小项目账款列表 */
+    List<FinProjectAccount> listChildAccounts(Long parentProjectId);
 
     Page<FinLedger> pageProjectLedgers(long page, long pageSize, Long projectId, String bizType);
+
+    /** 重大外壳禁止动账 */
+    void assertMutableProject(Long projectId);
 
     /** 从公司总账预支到项目 */
     void advanceFromCompany(Long projectId, Long poolId, BigDecimal amount, Long approvalId, String remark);

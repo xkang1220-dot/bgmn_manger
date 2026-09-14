@@ -17,7 +17,8 @@ const query = reactive({
   page: 1,
   pageSize: 50,
   name: '',
-  status: undefined as number | undefined,
+  status: 1 as number | undefined,
+  companyId: undefined as number | undefined,
 })
 const list = ref<any[]>([])
 const total = ref(0)
@@ -44,6 +45,7 @@ const form = reactive<any>({
   name: '',
   code: '',
   companyId: undefined as number | undefined,
+  parentId: undefined as number | undefined,
   ownerId: undefined,
   participants: [] as { userId?: number; layer: string }[],
   status: 1,
@@ -53,6 +55,9 @@ const form = reactive<any>({
   actualEndDate: '',
   description: '',
 })
+
+const children = ref<any[]>([])
+const creatingChild = ref(false)
 
 const statusMap: Record<number, string> = { 0: '筹备', 1: '进行中', 2: '已完成', 3: '已关闭' }
 const scaleMap: Record<string, string> = { NORMAL: '常规', KEY: '重点', MAJOR: '重大' }
@@ -84,8 +89,16 @@ const statusFilters = [
 ]
 
 const inDetail = computed(() => activeProjectId.value != null && detail.value != null)
+const isMajorShell = computed(
+  () => !!detail.value && detail.value.scale === 'MAJOR' && !detail.value.parentId,
+)
+const isChildProject = computed(() => !!detail.value?.parentId)
 const saving = ref(false)
-const filteredEmpty = computed(() => !list.value.length && (!!query.name.trim() || query.status !== undefined))
+const filteredEmpty = computed(
+  () =>
+    !list.value.length &&
+    (!!query.name.trim() || query.status !== undefined || query.companyId !== undefined),
+)
 
 const statusKey = computed({
   get: () => (query.status === undefined ? 'all' : String(query.status)),
@@ -101,7 +114,14 @@ function statusTone(status?: number) {
 }
 
 async function load() {
-  const res = await bizApi.projectPage(query)
+  const params: Record<string, unknown> = {
+    page: query.page,
+    pageSize: query.pageSize,
+  }
+  if (query.name.trim()) params.name = query.name.trim()
+  if (query.status !== undefined) params.status = query.status
+  if (query.companyId != null) params.companyId = query.companyId
+  const res = await bizApi.projectPage(params)
   list.value = res.list
   total.value = res.total
 }
@@ -113,16 +133,18 @@ function onSearch() {
 
 function resetFilter() {
   query.name = ''
-  query.status = undefined
+  query.status = 1
+  query.companyId = undefined
   query.page = 1
   load()
 }
 
 async function enterProject(row: any) {
   activeProjectId.value = row.id
-  detailTab.value = 'board'
+  detailTab.value = row.scale === 'MAJOR' && !row.parentId ? 'children' : 'board'
   taskQuery.page = 1
   taskQuery.status = undefined
+  children.value = []
   await router.replace({ query: { ...route.query, id: String(row.id) } })
   await loadDetail(row.id)
 }
@@ -131,46 +153,53 @@ async function loadDetail(id: number) {
   loadingDetail.value = true
   try {
     detail.value = await bizApi.projectDetail(id)
-    await loadTaskSummary()
+    if (detail.value?.scale === 'MAJOR' && !detail.value?.parentId) {
+      await loadChildren()
+      if (detailTab.value === 'board' || detailTab.value === 'tasks') {
+        detailTab.value = 'children'
+      }
+    } else {
+      children.value = []
+      await loadTaskSummary()
+    }
     await loadActiveTabData()
   } finally {
     loadingDetail.value = false
   }
 }
 
+async function loadChildren() {
+  if (!activeProjectId.value) {
+    children.value = []
+    return
+  }
+  try {
+    children.value = (await bizApi.projectChildren(activeProjectId.value)) || []
+  } catch {
+    children.value = []
+  }
+}
+
 async function loadActiveTabData() {
-  if (detailTab.value === 'tasks') {
+  if (detailTab.value === 'children') {
+    await loadChildren()
+  } else if (detailTab.value === 'tasks') {
     await loadTasks()
   } else if (detailTab.value === 'flows') {
     await loadProjectFlows()
   }
 }
 
-async function loadProjectFlows() {
-  if (!activeProjectId.value) return
-  projectFlows.value = await bizApi.projectFlows(activeProjectId.value)
-}
-
-async function loadTaskSummary() {
-  if (!activeProjectId.value) return
-  taskSummary.value = await bizApi.taskSummary(activeProjectId.value)
-}
-
-async function loadTasks() {
-  if (!activeProjectId.value) return
-  const res = await bizApi.taskPage({
-    page: taskQuery.page,
-    pageSize: taskQuery.pageSize,
-    projectId: activeProjectId.value,
-    status: taskQuery.status,
-  })
-  tasks.value = res.list
-  taskTotal.value = res.total
-}
-
 function backToList() {
+  if (detail.value?.parentId) {
+    const parentId = detail.value.parentId
+    void enterProject({ id: parentId, scale: 'MAJOR', parentId: null })
+    return
+  }
   activeProjectId.value = null
   detail.value = null
+  children.value = []
+  creatingChild.value = false
   const q = { ...route.query }
   delete q.id
   router.replace({ query: q })
@@ -178,6 +207,7 @@ function backToList() {
 
 function open(row?: any) {
   isEdit.value = !!row
+  creatingChild.value = false
   if (row) {
     bizApi.projectDetail(row.id).then((d) => {
       Object.assign(form, {
@@ -186,6 +216,8 @@ function open(row?: any) {
         code: d.code,
         companyId: d.companyId,
         companyName: d.companyName,
+        parentId: d.parentId,
+        parentName: d.parentName,
         ownerId: d.ownerId,
         participants: (d.members || []).map((m: any) => ({
           userId: m.userId,
@@ -212,6 +244,8 @@ function open(row?: any) {
       code: '',
       companyId: only,
       companyName: undefined,
+      parentId: undefined,
+      parentName: undefined,
       ownerId: undefined,
       participants: [{ userId: undefined, layer: '' }] as { userId?: number; layer: string }[],
       status: 1,
@@ -225,6 +259,53 @@ function open(row?: any) {
     dialog.value = true
     void previewNextCode(only)
   }
+}
+
+function openCreateChild() {
+  if (!detail.value?.id) return
+  isEdit.value = false
+  creatingChild.value = true
+  Object.assign(form, {
+    id: undefined,
+    name: '',
+    code: '',
+    companyId: detail.value.companyId,
+    companyName: detail.value.companyName,
+    parentId: detail.value.id,
+    ownerId: undefined,
+    participants: [{ userId: undefined, layer: '' }] as { userId?: number; layer: string }[],
+    status: 1,
+    scale: 'KEY',
+    startDate: '',
+    endDate: '',
+    actualEndDate: '',
+    description: '',
+  })
+  loadOwners(detail.value.companyId)
+  dialog.value = true
+  void previewNextCode(detail.value.companyId)
+}
+
+async function loadProjectFlows() {
+  if (!activeProjectId.value) return
+  projectFlows.value = await bizApi.projectFlows(activeProjectId.value)
+}
+
+async function loadTaskSummary() {
+  if (!activeProjectId.value) return
+  taskSummary.value = await bizApi.taskSummary({ projectId: activeProjectId.value })
+}
+
+async function loadTasks() {
+  if (!activeProjectId.value) return
+  const res = await bizApi.taskPage({
+    page: taskQuery.page,
+    pageSize: taskQuery.pageSize,
+    projectId: activeProjectId.value,
+    status: taskQuery.status,
+  })
+  tasks.value = res.list
+  taskTotal.value = res.total
 }
 
 async function previewNextCode(companyId?: number | string | null) {
@@ -326,6 +407,7 @@ async function save() {
       }
     }
     dialog.value = false
+    creatingChild.value = false
     await load()
     if (activeProjectId.value) {
       await loadDetail(activeProjectId.value)
@@ -415,7 +497,7 @@ onMounted(async () => {
         </div>
       </div>
 
-      <el-form class="filter-bar" @submit.prevent="onSearch">
+      <el-form class="filter-bar" label-position="top" @submit.prevent="onSearch">
         <el-form-item label="状态">
           <el-radio-group v-model="statusKey">
             <el-radio-button v-for="item in statusFilters" :key="String(item.value)" :value="item.value === undefined ? 'all' : String(item.value)">
@@ -432,6 +514,18 @@ onMounted(async () => {
             @keyup.enter="onSearch"
             @clear="onSearch"
           />
+        </el-form-item>
+        <el-form-item label="跟进公司">
+          <el-select
+            v-model="query.companyId"
+            clearable
+            filterable
+            placeholder="全部公司"
+            class="filter-company"
+            @change="onSearch"
+          >
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
         </el-form-item>
         <el-form-item class="filter-actions">
           <el-button type="primary" native-type="submit">查询</el-button>
@@ -458,6 +552,7 @@ onMounted(async () => {
               <span class="scale-pill scale-pill--sm" :class="`scale-pill--${row.scale || 'NORMAL'}`">
                 {{ scaleMap[row.scale] || '常规' }}
               </span>
+              <span v-if="row.scale === 'MAJOR' && row.childCount" class="meta-chip">{{ row.childCount }} 个小项目</span>
             </div>
             <span class="project-code">{{ row.code || '未编号' }}</span>
           </div>
@@ -513,7 +608,7 @@ onMounted(async () => {
         <div class="project-hero__top">
           <button type="button" class="back-btn" @click="backToList">
             <el-icon><ArrowLeft /></el-icon>
-            返回项目墙
+            {{ isChildProject ? '返回重大项目' : '返回项目墙' }}
           </button>
         </div>
 
@@ -525,6 +620,7 @@ onMounted(async () => {
               <span class="scale-pill" :class="`scale-pill--${detail.scale || 'NORMAL'}`">
                 {{ scaleMap[detail.scale] || '常规' }}
               </span>
+              <span v-if="isChildProject" class="meta-chip">所属 · {{ detail.parentName || '重大项目' }}</span>
               <span class="project-code">{{ detail.code || '未编号' }}</span>
             </div>
             <div class="meta-chips">
@@ -540,7 +636,7 @@ onMounted(async () => {
             </div>
           </div>
 
-          <div class="metric-bar">
+          <div class="metric-bar" v-if="!isMajorShell">
             <div class="metric-item">
               <el-icon class="metric-icon" :size="18"><Tickets /></el-icon>
               <div class="metric-copy">
@@ -579,6 +675,14 @@ onMounted(async () => {
               </div>
             </div>
           </div>
+          <div v-else class="metric-bar">
+            <div class="metric-item">
+              <div class="metric-copy">
+                <span class="metric-label">小项目数</span>
+                <span class="metric-value">{{ children.length || detail.childCount || 0 }}</span>
+              </div>
+            </div>
+          </div>
 
           <div class="project-hero__ops">
             <el-button
@@ -607,7 +711,39 @@ onMounted(async () => {
 
       <section class="project-panel" v-loading="loadingDetail">
         <el-tabs v-model="detailTab" class="project-tabs">
-          <el-tab-pane label="看板" name="board">
+          <el-tab-pane v-if="isMajorShell" label="小项目" name="children">
+            <div class="panel-toolbar">
+              <p class="form-tip" style="margin: 0">重大项目为外壳：任务与账款在小项目内；此处管理小项目列表。</p>
+              <div class="panel-toolbar__right">
+                <el-button v-permission="'project:add'" size="small" type="primary" @click="openCreateChild">
+                  新建小项目
+                </el-button>
+              </div>
+            </div>
+            <div v-if="children.length" class="child-grid">
+              <article
+                v-for="row in children"
+                :key="row.id"
+                class="child-card"
+                role="button"
+                tabindex="0"
+                @click="enterProject(row)"
+                @keyup.enter="enterProject(row)"
+              >
+                <div class="child-card__head">
+                  <h4>{{ row.name }}</h4>
+                  <span class="status-pill status-pill--sm" :class="`status-pill--${row.status}`">
+                    {{ statusMap[row.status] }}
+                  </span>
+                </div>
+                <p>{{ row.code || '未编号' }} · 负责人 {{ row.ownerName || '—' }}</p>
+                <span class="project-card__go">进入详情</span>
+              </article>
+            </div>
+            <el-empty v-else description="暂无小项目，请先新建" />
+          </el-tab-pane>
+
+          <el-tab-pane v-if="!isMajorShell" label="看板" name="board">
             <TaskKanban
               v-if="activeProjectId && detailTab === 'board'"
               ref="kanbanRef"
@@ -618,7 +754,7 @@ onMounted(async () => {
             />
           </el-tab-pane>
 
-          <el-tab-pane label="任务列表" name="tasks">
+          <el-tab-pane v-if="!isMajorShell" label="任务列表" name="tasks">
             <div class="panel-toolbar">
               <div class="filter-pills">
                 <button
@@ -761,11 +897,22 @@ onMounted(async () => {
       </section>
     </template>
 
-    <el-dialog v-model="dialog" :title="isEdit ? '编辑项目' : '新建项目'" width="640px" :close-on-click-modal="false">
+    <el-dialog
+      v-model="dialog"
+      :title="isEdit ? '编辑项目' : creatingChild || form.parentId ? '新建小项目' : '新建项目'"
+      width="640px"
+      :close-on-click-modal="false"
+      @closed="creatingChild = false"
+    >
       <el-form label-width="110px">
+        <el-form-item v-if="creatingChild || form.parentId" label="所属重大">
+          <span class="info-value">{{
+            creatingChild ? (detail?.name || '—') : (detail?.parentName || form.parentName || '—')
+          }}</span>
+        </el-form-item>
         <el-form-item label="所属公司" required>
           <el-select
-            v-if="!isEdit"
+            v-if="!isEdit && !creatingChild && !form.parentId"
             v-model="form.companyId"
             filterable
             placeholder="选择公司"
@@ -774,7 +921,7 @@ onMounted(async () => {
           >
             <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
-          <span v-else class="info-value">{{ form.companyName || '—' }}</span>
+          <span v-else class="info-value">{{ form.companyName || detail?.companyName || '—' }}</span>
         </el-form-item>
         <el-form-item label="名称" required><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="编号">
@@ -839,15 +986,20 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-form-item label="规模" required>
-          <el-select v-model="form.scale" style="width: 100%" placeholder="选择规模">
-            <el-option
-              v-for="opt in scaleOptions"
-              :key="opt.value"
-              :value="opt.value"
-              :label="`${opt.label}（${opt.tip}）`"
-            />
-          </el-select>
-          <div class="form-tip">常规创建免审；改为重点/重大（含互切）需审批</div>
+          <template v-if="creatingChild || form.parentId">
+            <span class="info-value">重点（小项目固定）</span>
+          </template>
+          <template v-else>
+            <el-select v-model="form.scale" style="width: 100%" placeholder="选择规模" :disabled="!!form.parentId">
+              <el-option
+                v-for="opt in scaleOptions"
+                :key="opt.value"
+                :value="opt.value"
+                :label="`${opt.label}（${opt.tip}）`"
+              />
+            </el-select>
+            <div class="form-tip">常规创建免审；改为重点/重大（含互切）需审批。重大项目内再建小项目。</div>
+          </template>
         </el-form-item>
         <el-form-item label="说明"><el-input v-model="form.description" type="textarea" :rows="3" /></el-form-item>
       </el-form>
@@ -884,6 +1036,10 @@ onMounted(async () => {
 
 .filter-keyword--wide {
   width: 220px;
+}
+
+.filter-company {
+  width: 200px;
 }
 
 .project-grid {
@@ -1015,6 +1171,45 @@ onMounted(async () => {
   margin-left: auto;
   font-size: 12px;
   color: var(--kk-text-muted);
+}
+
+.child-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.child-card {
+  padding: 16px;
+  cursor: pointer;
+  background: var(--kk-glass-bg);
+  border: 1px solid var(--kk-glass-border);
+  border-radius: var(--kk-radius);
+  box-shadow: var(--kk-glass-shadow);
+  backdrop-filter: var(--kk-glass-blur);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
+}
+.child-card:hover {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+}
+.child-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.child-card__head h4 {
+  margin: 0;
+  font-size: 15px;
+}
+.child-card p {
+  margin: 8px 0 12px;
+  font-size: 12px;
+  color: var(--kk-text-muted);
+}
+.status-pill--sm {
+  font-size: 11px;
+  padding: 2px 8px;
 }
 
 .project-hero {

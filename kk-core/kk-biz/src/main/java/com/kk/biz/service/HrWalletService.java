@@ -19,4 +19,7 @@ public interface HrWalletService extends IService<HrWallet> {
 
     /** 解冻：扣减 frozen */
     HrWallet unfreeze(Long userId, BigDecimal amount);
+
+    /** 消耗已冻结金额：同时扣减 frozen 与 balance（提现确认等） */
+    HrWallet consumeFrozen(Long userId, BigDecimal amount);
 }

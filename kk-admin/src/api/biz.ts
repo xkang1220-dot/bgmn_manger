@@ -20,6 +20,31 @@ export const bizApi = {
   myWalletLedger(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/finance/wallet/mine/ledger', method: 'get', params })
   },
+  myWalletBoard(params?: { period?: string }) {
+    return request<any>({ url: '/finance/wallet/mine/board', method: 'get', params })
+  },
+  withdrawConfig(params?: { companyId?: number; amount?: number }) {
+    return request<{
+      taxMode?: string
+      taxRate?: number
+      defaultTaxRate?: number
+      tax?: number
+      net?: number
+      tiers?: any[]
+      breakdown?: any[]
+    }>({ url: '/finance/wallet/mine/withdraw-config', method: 'get', params })
+  },
+  getWithdrawTaxTiers(companyId: number) {
+    return request<{
+      companyId: number
+      taxMode: string
+      defaultTaxRate: number
+      tiers: any[]
+    }>({ url: '/finance/wallet-withdraw-tax', method: 'get', params: { companyId } })
+  },
+  saveWithdrawTaxTiers(data: { companyId: number; tiers: any[] }) {
+    return request<void>({ url: '/finance/wallet-withdraw-tax', method: 'put', data })
+  },
   walletUserLedger(userId: number, params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: `/finance/wallet/${userId}/ledger`, method: 'get', params })
   },
@@ -139,8 +164,13 @@ export const bizApi = {
   taskRelated() {
     return request<any[]>({ url: '/task/related', method: 'get' })
   },
-  taskSummary(projectId?: number) {
-    return request<any>({ url: '/task/summary', method: 'get', params: { projectId } })
+  taskSummary(params?: {
+    projectId?: number
+    priority?: number
+    participantId?: number
+    title?: string
+  }) {
+    return request<any>({ url: '/task/summary', method: 'get', params: params || {} })
   },
   taskDetail(id: number) {
     return request<any>({ url: `/task/${id}`, method: 'get' })
@@ -183,11 +213,17 @@ export const bizApi = {
   deleteTaskImage(fileId: number) {
     return request<void>({ url: `/task/image/${fileId}`, method: 'delete' })
   },
-  projectAccountList() {
-    return request<any[]>({ url: '/finance/project-account/list', method: 'get' })
+  projectAccountList(params?: { companyId?: number; scale?: string }) {
+    return request<any[]>({ url: '/finance/project-account/list', method: 'get', params })
+  },
+  projectAccountChildren(projectId: number) {
+    return request<any[]>({ url: `/finance/project-account/${projectId}/children`, method: 'get' })
   },
   projectAccountDetail(projectId: number) {
     return request<any>({ url: `/finance/project-account/${projectId}`, method: 'get' })
+  },
+  projectChildren(projectId: number) {
+    return request<any[]>({ url: `/project/${projectId}/children`, method: 'get' })
   },
   projectAccountLedger(projectId: number, params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: `/finance/project-account/${projectId}/ledger`, method: 'get', params })

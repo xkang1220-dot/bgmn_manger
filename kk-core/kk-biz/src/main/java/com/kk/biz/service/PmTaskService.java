@@ -18,7 +18,11 @@ public interface PmTaskService extends IService<PmTask> {
 
     PmTask getDetail(Long id);
 
-    Map<String, Object> summary(Long projectId);
+    /**
+     * 任务统计。与列表共用项目/标题/优先级/参与人筛选；
+     * 不含 status、overdue（这两项由统计卡片自身表达，避免点卡片后其它数变 0）。
+     */
+    Map<String, Object> summary(Long projectId, Integer priority, Long participantId, String title);
 
     /** 看板用：按项目拉取任务（不分页，排除已关闭） */
     List<PmTask> listBoardTasks(Long projectId);

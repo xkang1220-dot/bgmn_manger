@@ -5,6 +5,7 @@ import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
 import { approvalFlowTip } from '@/utils/approvalTip'
+import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 
 const users = ref<any[]>([])
 const projects = ref<any[]>([])
@@ -155,9 +156,15 @@ onMounted(loadBase)
 
     <el-form label-width="100px" style="max-width: 920px">
       <el-form-item label="项目">
-        <el-select v-model="form.projectId" filterable placeholder="选择项目" style="width: 360px">
-          <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
-        </el-select>
+        <ProjectCascadeSelect
+          v-model="form.projectId"
+          :projects="projects"
+          mode="pick"
+          top-placeholder="重点或重大"
+          child-placeholder="请选择小项目"
+          top-width="360px"
+          child-width="280px"
+        />
       </el-form-item>
 
       <el-form-item v-if="projectDetail" label="项目信息">

@@ -98,9 +98,9 @@ async function openReimburse() {
     myPayMethods.value = []
   }
   const def = myPayMethods.value.find((m) => Number(m.isDefault) === 1) || myPayMethods.value[0]
-  reimburseForm.payMethodId = def?.id
+  reimburseForm.payMethodId = def?.id != null ? Number(def.id) : undefined
   if (!myPayMethods.value.length) {
-    ElMessage.warning('未配置个人收款方式，可在员工档案中添加；仍可提交申请')
+    ElMessage.warning('请先在员工档案中配置个人收款方式，否则无法提交')
   }
   reimburseDialog.value = true
 }
@@ -133,6 +133,10 @@ async function submitReimburse() {
     ElMessage.warning('请填写报销金额')
     return
   }
+  if (!reimburseForm.payMethodId) {
+    ElMessage.warning('请选择收款方式，便于财务线下打款')
+    return
+  }
   if (!voucherFiles.value.length) {
     ElMessage.warning('请上传发票/凭证')
     return
@@ -144,7 +148,7 @@ async function submitReimburse() {
     companyId: reimburseForm.companyId,
     remark: reimburseForm.remark,
     voucherFileIds: voucherFiles.value.map((f) => f.id),
-    payload: reimburseForm.payMethodId ? { payMethodId: reimburseForm.payMethodId } : {},
+    payload: { payMethodId: reimburseForm.payMethodId },
   })
   ElMessage.success(`${approvalFlowTip(approval)}。后续：上传回执 → 确认到账`)
   reimburseDialog.value = false
@@ -220,9 +224,14 @@ onMounted(async () => {
         <el-form-item label="金额" required>
           <el-input-number v-model="reimburseForm.amount" :min="0.01" :precision="2" />
         </el-form-item>
-        <el-form-item label="收款方式">
-          <el-select v-model="reimburseForm.payMethodId" clearable filterable placeholder="未配置时可空" style="width: 100%">
-            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="m.id" />
+        <el-form-item label="收款方式" required>
+          <el-select
+            v-model="reimburseForm.payMethodId"
+            filterable
+            :placeholder="myPayMethods.length ? '选择收款方式' : '请先在员工档案配置'"
+            style="width: 100%"
+          >
+            <el-option v-for="m in myPayMethods" :key="m.id" :label="payMethodLabel(m)" :value="Number(m.id)" />
           </el-select>
         </el-form-item>
         <el-form-item label="发票" required>
