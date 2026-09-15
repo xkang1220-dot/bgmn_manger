@@ -2,15 +2,19 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
+import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
 import { approvalFlowTip } from '@/utils/approvalTip'
 
 const list = ref<any[]>([])
 const channels = ref<any[]>([])
+const pools = ref<any[]>([])
+const companies = ref<any[]>([])
 const dialog = ref(false)
 const uploading = ref(false)
 const form = reactive<any>({
   verifyMonth: '',
+  companyId: undefined as number | undefined,
   channelId: undefined,
   statementBalance: undefined as number | undefined,
   remark: '',
@@ -19,8 +23,30 @@ const voucherFiles = ref<any[]>([])
 
 const channelMap = computed(() => {
   const m = new Map<number, any>()
-  channels.value.forEach((c) => m.set(c.id, c))
+  channels.value.forEach((c) => {
+    if (c?.id != null) m.set(Number(c.id), c)
+  })
   return m
+})
+
+const poolCompanyById = computed(() => {
+  const m = new Map<number, number>()
+  for (const p of pools.value) {
+    if (p?.id != null && p.companyId != null) m.set(Number(p.id), Number(p.companyId))
+  }
+  return m
+})
+
+function channelCompanyId(c: any): number | undefined {
+  if (c?.companyId != null) return Number(c.companyId)
+  if (c?.poolId != null) return poolCompanyById.value.get(Number(c.poolId))
+  return undefined
+}
+
+const formChannels = computed(() => {
+  if (form.companyId == null) return []
+  const cid = Number(form.companyId)
+  return channels.value.filter((c) => channelCompanyId(c) === cid)
 })
 
 function fmt(n?: number) {
@@ -33,17 +59,40 @@ function fileUrl(file: any) {
 }
 
 async function load() {
-  list.value = await bizApi.monthVerifyList()
-  channels.value = await bizApi.payChannelList({ all: true })
+  const [verifyList, channelList, poolList, companyList] = await Promise.all([
+    bizApi.monthVerifyList(),
+    bizApi.payChannelList({ all: true }),
+    bizApi.poolList(),
+    sysApi.myCompanies().catch(() => [] as any[]),
+  ])
+  list.value = verifyList
+  channels.value = channelList
+  pools.value = poolList
+  companies.value = companyList
+}
+
+function syncChannelForCompany() {
+  const ok = formChannels.value.some((c) => Number(c.id) === Number(form.channelId))
+  form.channelId = ok ? form.channelId : formChannels.value[0]?.id
+}
+
+function onCompanyChange() {
+  form.channelId = undefined
+  syncChannelForCompany()
 }
 
 function openSubmit() {
   const now = new Date()
   form.verifyMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
-  form.channelId = channels.value[0]?.id
+  const prevOk = form.companyId != null
+    && companies.value.some((c) => Number(c.id) === Number(form.companyId))
+  form.companyId = companies.value.length === 1
+    ? companies.value[0].id
+    : (prevOk ? form.companyId : undefined)
   form.statementBalance = undefined
   form.remark = ''
   voucherFiles.value = []
+  syncChannelForCompany()
   dialog.value = true
 }
 
@@ -62,17 +111,30 @@ async function onUpload(options: any) {
 }
 
 async function submit() {
-  if (!form.verifyMonth || !form.channelId) {
-    ElMessage.warning('请选择月份和渠道')
+  if (!form.verifyMonth) {
+    ElMessage.warning('请选择核验月份')
+    return
+  }
+  if (!form.companyId) {
+    ElMessage.warning('请选择公司')
+    return
+  }
+  if (!form.channelId) {
+    ElMessage.warning('请选择收款渠道')
     return
   }
   if (!voucherFiles.value.length) {
     ElMessage.warning('请上传账户截图和流水凭证')
     return
   }
-  const ch = channelMap.value.get(form.channelId)
+  const ch = channelMap.value.get(Number(form.channelId))
   if (!ch?.poolId) {
     ElMessage.warning('所选渠道未绑定资金池，无法确定所属公司')
+    return
+  }
+  const cid = channelCompanyId(ch)
+  if (cid != null && Number(cid) !== Number(form.companyId)) {
+    ElMessage.warning('收款渠道与所选公司不匹配')
     return
   }
   const approval = await workflowApi.submit({
@@ -83,6 +145,7 @@ async function submit() {
     voucherFileIds: voucherFiles.value.map((f) => f.id),
     payload: {
       verifyMonth: form.verifyMonth,
+      companyId: form.companyId,
       channelId: form.channelId,
       systemBalance: ch?.balance,
       statementBalance: form.statementBalance,
@@ -150,10 +213,26 @@ onMounted(load)
         <el-form-item label="核验月份" required>
           <el-date-picker v-model="form.verifyMonth" type="month" value-format="YYYY-MM" style="width: 100%" />
         </el-form-item>
+        <el-form-item label="公司" required>
+          <el-select
+            v-model="form.companyId"
+            filterable
+            placeholder="请选择公司"
+            style="width: 100%"
+            @change="onCompanyChange"
+          >
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="收款渠道" required>
-          <el-select v-model="form.channelId" style="width: 100%">
+          <el-select
+            v-model="form.channelId"
+            style="width: 100%"
+            :disabled="!form.companyId"
+            :placeholder="form.companyId ? (formChannels.length ? '请选择渠道' : '该公司暂无收款渠道') : '请先选择公司'"
+          >
             <el-option
-              v-for="c in channels"
+              v-for="c in formChannels"
               :key="c.id"
               :label="`${c.name}（¥${fmt(c.balance)}）`"
               :value="c.id"

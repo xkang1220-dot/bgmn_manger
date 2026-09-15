@@ -72,6 +72,37 @@ const canSettleAmount = computed(() =>
   Math.max(0, Math.min(settleRemain.value, Number(account.value?.balance || 0))),
 )
 
+/** 从公司转入可用余额：打开弹窗后优先用资金池列表（与总账同口径） */
+const companyPoolBalance = computed(() => {
+  if (advancePoolSnapshot.value?.balance != null) {
+    return Number(advancePoolSnapshot.value.balance)
+  }
+  if (account.value?.companyPoolBalance != null && account.value?.companyPoolBalance !== '') {
+    return Number(account.value.companyPoolBalance)
+  }
+  if (shareDetail.value?.poolBalance != null && shareDetail.value?.poolBalance !== '') {
+    return Number(shareDetail.value.poolBalance)
+  }
+  return 0
+})
+const companyPoolId = computed(() =>
+  advancePoolSnapshot.value?.id
+    ?? account.value?.companyPoolId
+    ?? shareDetail.value?.poolId
+    ?? undefined,
+)
+const companyPoolLabel = computed(() => {
+  const poolName = advancePoolSnapshot.value?.name
+    || account.value?.companyPoolName
+    || shareDetail.value?.poolName
+  const company = account.value?.companyName || shareDetail.value?.companyName
+  if (poolName && company) return `${company} · ${poolName}`
+  return poolName || company || '公司总账'
+})
+
+/** 打开转入弹窗时从资金池列表核对到的快照 */
+const advancePoolSnapshot = ref<{ id?: number; name?: string; balance?: number } | null>(null)
+
 const settlePreview = computed(() => {
   if (!shareForm.members.length || !settleForm.amount) return []
   const amount = Number(settleForm.amount)
@@ -377,22 +408,101 @@ async function openLedgerDetail(row: any) {
   }
 }
 
+async function openAdvanceDialog() {
+  form.amount = 0
+  form.remark = ''
+  advancePoolSnapshot.value = null
+  if (activeId.value) {
+    // 1) 刷新账款详情（含公司资金池余额）
+    try {
+      account.value = await bizApi.projectAccountDetail(activeId.value)
+    } catch {
+      // ignore
+    }
+    // 2) 刷新资金配置（兼容旧字段 poolBalance）
+    try {
+      const detail = await bizApi.projectShareDetail(activeId.value)
+      shareDetail.value = detail
+      shareForm.budget = Number(detail?.budget || 0)
+      shareForm.reservePercent = Number(detail?.reservePercent ?? 0)
+      shareForm.settlePercent = Number(detail?.settlePercent ?? 100)
+      const members = detail?.members || []
+      shareForm.members = members.length
+        ? members.map((m: any) => ({
+            userId: m.userId,
+            layer: m.layer || '',
+            percent: Number(m.percent || 0),
+            remark: m.remark || '',
+          }))
+        : shareForm.members
+    } catch {
+      // 无资金配置权限时仍可打开
+    }
+    // 3) 用资金池列表再核对一次（与总账「公司余额」同源）
+    try {
+      const companyId = Number(account.value?.companyId || shareDetail.value?.companyId)
+      if (Number.isFinite(companyId) && companyId > 0) {
+        const pools = (await bizApi.poolList()) || []
+        const matched = pools.filter((p: any) => {
+          if (Number(p.companyId) !== companyId) return false
+          // status 空/未返回视为启用；仅显式 0 为禁用（与后端一致）
+          return p.status == null || p.status === '' || Number(p.status) !== 0
+        })
+        const preferredId = Number(account.value?.companyPoolId || shareDetail.value?.poolId || 0)
+        let pool = preferredId > 0 ? matched.find((p: any) => Number(p.id) === preferredId) : undefined
+        if (!pool) pool = matched.find((p: any) => Number(p.isDefault) === 1)
+        if (!pool) pool = matched[0]
+        if (pool) {
+          advancePoolSnapshot.value = {
+            id: Number(pool.id),
+            name: pool.name,
+            balance: Number(pool.balance || 0),
+          }
+        }
+      }
+    } catch {
+      // 无资金池列表权限时依赖账款详情 / 后端校验
+    }
+  }
+  advanceDialog.value = true
+}
+
 async function submitAdvance() {
   if (!activeId.value || form.amount <= 0) {
     ElMessage.warning('请填写金额')
     return
   }
-  const approval = await workflowApi.submit({
-    type: 'PROJECT_ADVANCE',
-    title: `项目预支 · ${account.value?.projectName || ''}`,
-    projectId: activeId.value,
-    amount: form.amount,
-    remark: form.remark,
-  })
-  ElMessage.success(approvalFlowTip(approval, '已提交：等审批通过后，钱从公司转到本项目'))
-  advanceDialog.value = false
-  form.amount = 0
-  form.remark = ''
+  const amount = Number(Number(form.amount).toFixed(2))
+  const available = Number(Number(companyPoolBalance.value).toFixed(2))
+  if (!(available > 0)) {
+    ElMessage.warning('公司余额为 0，无法转入')
+    return
+  }
+  if (amount > available) {
+    ElMessage.warning(`不能超过公司余额 ¥${fmt(available)}`)
+    return
+  }
+  if (!companyPoolId.value) {
+    ElMessage.warning('未找到该公司资金池，请先在总账确认资金池配置')
+    return
+  }
+  try {
+    const approval = await workflowApi.submit({
+      type: 'PROJECT_ADVANCE',
+      title: `项目预支 · ${account.value?.projectName || ''}`,
+      projectId: activeId.value,
+      poolId: companyPoolId.value,
+      amount,
+      remark: form.remark,
+    })
+    ElMessage.success(approvalFlowTip(approval, '已提交：等审批通过后，钱从公司转到本项目'))
+    advanceDialog.value = false
+    form.amount = 0
+    form.remark = ''
+    await loadDetail()
+  } catch {
+    // 错误提示由 request 拦截器统一弹出
+  }
 }
 
 function payMethodLabel(m: any) {
@@ -567,7 +677,7 @@ onMounted(async () => {
           </div>
           <div class="page-actions">
             <template v-if="!account.majorShell">
-              <el-button type="primary" @click="() => { form.amount = 0; form.remark = ''; advanceDialog = true }">从公司转入</el-button>
+              <el-button type="primary" @click="openAdvanceDialog">从公司转入</el-button>
               <el-button @click="openPayDialog('reimburse')">申请报销</el-button>
               <el-button @click="openPayDialog('salary')">申请发工资</el-button>
               <el-button v-if="Number(account.balance) > 0" @click="returnRemainder">预留回公司</el-button>
@@ -870,13 +980,22 @@ onMounted(async () => {
       <div class="dialog-box">
         <p>把公司总账的钱拨到这个项目里，之后才能报销、发工资、分钱。</p>
         <ul>
+          <li>公司余额：<b>¥{{ fmt(companyPoolBalance) }}</b>
+            <span v-if="companyPoolLabel" class="hint">（{{ companyPoolLabel }}）</span>
+          </li>
           <li>现在项目余额：<b>¥{{ fmt(account?.balance) }}</b></li>
           <li>审批通过后：公司总账减少，本项目余额增加。</li>
         </ul>
       </div>
       <el-form label-width="90px">
         <el-form-item label="转入金额" required>
-          <el-input-number v-model="form.amount" :min="0.01" :precision="2" style="width: 200px" />
+          <el-input-number
+            v-model="form.amount"
+            :min="0.01"
+            :precision="2"
+            :max="companyPoolBalance > 0 ? companyPoolBalance : undefined"
+            style="width: 200px"
+          />
         </el-form-item>
         <el-form-item label="说明"><el-input v-model="form.remark" placeholder="例如：项目启动拨款" /></el-form-item>
       </el-form>

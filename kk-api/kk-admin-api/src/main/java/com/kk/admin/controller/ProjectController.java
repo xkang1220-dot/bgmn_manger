@@ -5,8 +5,8 @@ import cn.dev33.satoken.stp.StpUtil;
 import com.kk.biz.dto.ApprovalSubmitRequest;
 import com.kk.biz.entity.PmProject;
 import com.kk.biz.entity.PmProjectFlow;
-import com.kk.biz.entity.WfApproval;
 import com.kk.biz.service.PmProjectService;
+import com.kk.biz.service.WfApprovalFlowService;
 import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.workflow.ApprovalTypes;
 import com.kk.biz.workflow.ProjectScales;
@@ -28,6 +28,7 @@ public class ProjectController {
 
     private final PmProjectService projectService;
     private final WfApprovalService approvalService;
+    private final WfApprovalFlowService approvalFlowService;
 
     @GetMapping("/page")
     @SaCheckPermission("project:list")
@@ -80,8 +81,9 @@ public class ProjectController {
     }
 
     /**
-     * 新建项目：常规档直存；重点/重大走审批（审批人/会签或签/超时以该公司审批配置为准）
-     * 小项目：parentId 指向重大外壳，规模固定 KEY，走 PROJECT_CREATE
+     * 新建项目：常规档直存；重点/重大走审批。
+     * 若该公司 PROJECT_CREATE 解析后恰为当前用户一人，则免审直存（含小项目）。
+     * 小项目：parentId 指向重大外壳，规模固定 KEY。
      */
     @PostMapping
     @SaCheckPermission("project:add")
@@ -100,6 +102,14 @@ public class ProjectController {
         String scale = ProjectScales.normalize(project.getScale());
         project.setScale(scale);
         if (!ProjectScales.needsApproval(scale)) {
+            project.setApproveStatus(1);
+            projectService.createProject(project);
+            return Result.ok(projectService.getDetail(project.getId()));
+        }
+        // 唯一审批人即本人：免审直存，与常规创建一致
+        Long companyId = project.getCompanyId();
+        long loginId = StpUtil.getLoginIdAsLong();
+        if (approvalFlowService.isSoleApprover(ApprovalTypes.PROJECT_CREATE, companyId, loginId)) {
             project.setApproveStatus(1);
             projectService.createProject(project);
             return Result.ok(projectService.getDetail(project.getId()));
@@ -158,12 +168,23 @@ public class ProjectController {
         return Result.ok(approvalService.submit(req));
     }
 
-    /** 删除项目：提交审批（审批人/会签或签以该公司审批配置为准） */
+    /**
+     * 删除项目：走 PROJECT_DELETE 审批；
+     * 若该公司该类型解析后恰为当前用户一人，则免审直接删除（与创建免审一致）。
+     */
     @DeleteMapping("/{id:\\d+}")
     @SaCheckPermission("project:remove")
-    public Result<WfApproval> delete(@PathVariable Long id) {
+    @Transactional(rollbackFor = Exception.class)
+    public Result<?> delete(@PathVariable Long id) {
         PmProject project = projectService.getDetail(id);
         projectService.assertNoUndeletedChildren(id);
+        long loginId = StpUtil.getLoginIdAsLong();
+        if (approvalFlowService.isSoleApprover(ApprovalTypes.PROJECT_DELETE, project.getCompanyId(), loginId)) {
+            projectService.recordFlow(id, "DELETE", null, null, null, "唯一审批人免审删除", loginId);
+            approvalService.cancelPendingByProject(id, "项目已删除，审批自动关闭");
+            projectService.deleteProject(id);
+            return Result.ok();
+        }
         ApprovalSubmitRequest req = new ApprovalSubmitRequest();
         req.setType(ApprovalTypes.PROJECT_DELETE);
         req.setTitle("删除项目 · " + project.getName());

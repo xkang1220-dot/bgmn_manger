@@ -225,6 +225,7 @@ onMounted(load)
           <el-option label="个人报销" value="REIMBURSE_PERSONAL" />
           <el-option label="钱包提现" value="WALLET_WITHDRAW" />
           <el-option label="项目报销" value="REIMBURSE_PROJECT" />
+          <el-option label="项目余额申请" value="PROJECT_BALANCE_APPLY" />
           <el-option label="项目预支" value="PROJECT_ADVANCE" />
           <el-option label="分成配置" value="SHARE_CONFIG" />
           <el-option label="项目分钱" value="PROJECT_SETTLE" />
@@ -467,7 +468,7 @@ onMounted(load)
             </div>
           </template>
 
-          <template v-else-if="['PROJECT_ADVANCE', 'REIMBURSE_PROJECT', 'REIMBURSE_PERSONAL', 'SALARY_APPLY', 'RESERVE_RETURN'].includes(detail.type)">
+          <template v-else-if="['PROJECT_ADVANCE', 'REIMBURSE_PROJECT', 'REIMBURSE_PERSONAL', 'SALARY_APPLY', 'PROJECT_BALANCE_APPLY', 'RESERVE_RETURN'].includes(detail.type)">
             <div class="kv-grid">
               <div><span>{{ detail.type === 'RESERVE_RETURN' ? '结余金额' : '金额' }}</span><b>¥{{ fmtMoney(detail.amount) }}</b></div>
               <div v-if="detail.projectName"><span>项目</span><b>{{ detail.projectName }}</b></div>
@@ -483,7 +484,7 @@ onMounted(load)
               <div v-else-if="['REIMBURSE_PROJECT', 'REIMBURSE_PERSONAL', 'SALARY_APPLY'].includes(detail.type)">
                 <span>收款方式</span><b>未填写</b>
               </div>
-              <div><span>说明</span><b>{{ detail.remark || payload.remark || (detail.type === 'RESERVE_RETURN' ? '项目结余退回公司总账' : '—') }}</b></div>
+              <div><span>说明</span><b>{{ detail.remark || payload.remark || (detail.type === 'RESERVE_RETURN' ? '项目结余退回公司总账' : detail.type === 'PROJECT_BALANCE_APPLY' ? '审批通过后从项目结余转入个人钱包' : '—') }}</b></div>
             </div>
           </template>
 

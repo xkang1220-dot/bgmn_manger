@@ -14,6 +14,7 @@ import com.kk.biz.mapper.FinProjectAccountMapper;
 import com.kk.biz.mapper.PmProjectMapper;
 import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.HrWalletService;
+import com.kk.biz.service.PmProjectService;
 import com.kk.biz.support.BizNoGenerator;
 import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
@@ -23,6 +24,8 @@ import com.kk.system.service.DataScopeService;
 import com.kk.system.service.SysDeptService;
 import com.kk.system.service.SysUserService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -52,6 +55,11 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     private final SysDeptService deptService;
     private final BizNoGenerator bizNoGenerator;
     private final DataScopeService dataScopeService;
+
+    /** 与项目服务单向依赖；字段注入 + @Lazy，避免构造器循环 */
+    @Lazy
+    @Autowired
+    private PmProjectService projectService;
 
     @Override
     public FinProjectAccount getOrCreate(Long projectId) {
@@ -96,7 +104,56 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         if (!Boolean.TRUE.equals(account.getMajorShell())) {
             assertBalancedQuiet(account);
         }
+        fillCompanyPoolBalance(account, project);
         return account;
+    }
+
+    /**
+     * 解析可转入的公司资金池余额：项目绑定池 → 公司默认池 → 公司任一启用池。
+     * 与总账「公司余额」同口径时，单公司通常只有一个主池。
+     */
+    private void fillCompanyPoolBalance(FinProjectAccount account, PmProject project) {
+        if (account == null || project == null) {
+            return;
+        }
+        FinPool pool = null;
+        if (project.getPoolId() != null) {
+            pool = poolMapper.selectById(project.getPoolId());
+            if (pool != null && pool.getStatus() != null && pool.getStatus() == 0) {
+                pool = null;
+            }
+        }
+        Long companyId = project.getCompanyId() != null ? project.getCompanyId() : account.getCompanyId();
+        if (pool == null && companyId != null) {
+            pool = poolMapper.selectOne(new LambdaQueryWrapper<FinPool>()
+                    .eq(FinPool::getIsDefault, 1)
+                    .eq(FinPool::getCompanyId, companyId)
+                    .and(w -> w.isNull(FinPool::getStatus).or().ne(FinPool::getStatus, 0))
+                    .last("LIMIT 1"));
+            if (pool == null) {
+                pool = poolMapper.selectOne(new LambdaQueryWrapper<FinPool>()
+                        .eq(FinPool::getCompanyId, companyId)
+                        .and(w -> w.isNull(FinPool::getStatus).or().ne(FinPool::getStatus, 0))
+                        .orderByAsc(FinPool::getId)
+                        .last("LIMIT 1"));
+            }
+        }
+        if (pool == null) {
+            account.setCompanyPoolId(null);
+            account.setCompanyPoolName(null);
+            account.setCompanyPoolBalance(BigDecimal.ZERO);
+            return;
+        }
+        // 资金池必须与项目同公司
+        if (companyId != null && pool.getCompanyId() != null && !companyId.equals(pool.getCompanyId())) {
+            account.setCompanyPoolId(null);
+            account.setCompanyPoolName(null);
+            account.setCompanyPoolBalance(BigDecimal.ZERO);
+            return;
+        }
+        account.setCompanyPoolId(pool.getId());
+        account.setCompanyPoolName(pool.getName());
+        account.setCompanyPoolBalance(pool.getBalance() == null ? BigDecimal.ZERO : pool.getBalance());
     }
 
     @Override
@@ -178,6 +235,66 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
             accounts.add(account);
         }
         fillExtra(accounts, projectMap);
+        return accounts;
+    }
+
+    @Override
+    public List<FinProjectAccount> listBalanceApplyCandidates() {
+        List<PmProject> visible = projectService.listVisible();
+        if (visible == null || visible.isEmpty()) {
+            return List.of();
+        }
+        Map<Long, PmProject> mutable = new HashMap<>();
+        for (PmProject project : visible) {
+            if (project == null || project.getId() == null) {
+                continue;
+            }
+            if (ProjectScales.isMajorShell(project)) {
+                continue;
+            }
+            String scale = project.getScale() == null ? ProjectScales.NORMAL : project.getScale();
+            if (!ProjectScales.isFinanceVisible(scale)) {
+                continue;
+            }
+            mutable.put(project.getId(), project);
+        }
+        if (mutable.isEmpty()) {
+            return List.of();
+        }
+        Map<Long, FinProjectAccount> existing = list(new LambdaQueryWrapper<FinProjectAccount>()
+                .in(FinProjectAccount::getProjectId, mutable.keySet()))
+                .stream()
+                .collect(Collectors.toMap(FinProjectAccount::getProjectId, a -> a, (a, b) -> a));
+        List<FinProjectAccount> accounts = new ArrayList<>();
+        for (PmProject project : mutable.values()) {
+            FinProjectAccount account = existing.get(project.getId());
+            if (account == null) {
+                account = new FinProjectAccount();
+                account.setProjectId(project.getId());
+                account.setCompanyId(project.getCompanyId());
+                account.setBalance(BigDecimal.ZERO);
+                account.setAdvanceAmount(BigDecimal.ZERO);
+                account.setExpenseAmount(BigDecimal.ZERO);
+                account.setSettleAmount(BigDecimal.ZERO);
+                account.setReserveAmount(BigDecimal.ZERO);
+                account.setReserveHeld(BigDecimal.ZERO);
+                account.setStatus(1);
+            }
+            accounts.add(account);
+        }
+        fillExtra(accounts, mutable);
+        // 无结余的不展示，避免点开再报错
+        accounts.removeIf(a -> nz(a.getBalance()).compareTo(BigDecimal.ZERO) <= 0);
+        accounts.sort((a, b) -> {
+            String na = a.getProjectName() == null ? "" : a.getProjectName();
+            String nb = b.getProjectName() == null ? "" : b.getProjectName();
+            int byName = na.compareTo(nb);
+            if (byName != 0) {
+                return byName;
+            }
+            return Long.compare(a.getProjectId() == null ? 0L : a.getProjectId(),
+                    b.getProjectId() == null ? 0L : b.getProjectId());
+        });
         return accounts;
     }
 

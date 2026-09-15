@@ -36,6 +36,7 @@ const ledgerQuery = reactive({
 
 const reimburseDialog = ref(false)
 const withdrawDialog = ref(false)
+const balanceApplyDialog = ref(false)
 const reimburseForm = reactive({
   amount: 0,
   remark: '',
@@ -48,6 +49,12 @@ const withdrawForm = reactive({
   companyId: undefined as number | undefined,
   payMethodId: undefined as number | undefined,
 })
+const balanceApplyForm = reactive({
+  projectId: undefined as number | undefined,
+  amount: 0,
+  remark: '',
+})
+const balanceApplyProjects = ref<any[]>([])
 const voucherFiles = ref<any[]>([])
 const uploading = ref(false)
 const myPayMethods = ref<any[]>([])
@@ -86,6 +93,7 @@ function bizLabel(v?: string) {
     SALARY: '工资',
     REIMBURSE: '报销',
     WITHDRAW: '提现',
+    PAYOUT: '项目余额',
     ROLLBACK: '回退',
   } as Record<string, string>)[v || ''] || v || '—'
 }
@@ -312,6 +320,57 @@ async function openWithdraw() {
   }
   await refreshWithdrawTax()
   withdrawDialog.value = true
+}
+
+const selectedBalanceProject = computed(() =>
+  balanceApplyProjects.value.find((p) => Number(p.projectId) === Number(balanceApplyForm.projectId)),
+)
+
+async function openBalanceApply() {
+  balanceApplyForm.projectId = undefined
+  balanceApplyForm.amount = 0
+  balanceApplyForm.remark = ''
+  try {
+    balanceApplyProjects.value = (await bizApi.balanceApplyProjects()) || []
+  } catch (e: any) {
+    balanceApplyProjects.value = []
+    ElMessage.error(e.message || '加载可申请项目失败')
+  }
+  if (!balanceApplyProjects.value.length) {
+    ElMessage.warning('暂无可申请余额的项目（需为重点/重大且有结余）')
+  }
+  balanceApplyDialog.value = true
+}
+
+async function submitBalanceApply() {
+  if (!balanceApplyForm.projectId) {
+    ElMessage.warning('请选择项目')
+    return
+  }
+  if (!balanceApplyForm.amount || balanceApplyForm.amount <= 0) {
+    ElMessage.warning('请填写申请金额')
+    return
+  }
+  const bal = Number(selectedBalanceProject.value?.balance || 0)
+  if (bal <= 0) {
+    ElMessage.warning('该项目结余为 0，无法申请')
+    return
+  }
+  if (balanceApplyForm.amount > bal) {
+    ElMessage.warning(`不能超过项目结余 ¥${fmt(bal)}`)
+    return
+  }
+  const projectName = selectedBalanceProject.value?.projectName || ''
+  const approval = await workflowApi.submit({
+    type: 'PROJECT_BALANCE_APPLY',
+    title: `项目余额申请 · ${projectName}`,
+    projectId: balanceApplyForm.projectId,
+    amount: balanceApplyForm.amount,
+    remark: balanceApplyForm.remark,
+  })
+  ElMessage.success(`${approvalFlowTip(approval)}。审批通过后项目结余将直接转入你的个人钱包`)
+  balanceApplyDialog.value = false
+  await Promise.all([loadBalance(), loadBoard(), loadApprovals()])
 }
 
 watch(
@@ -559,6 +618,7 @@ onMounted(async () => {
         </div>
         <div class="page-actions">
           <el-button type="primary" @click="openReimburse">去发起报销</el-button>
+          <el-button @click="openBalanceApply">申请项目余额</el-button>
           <el-button @click="openWithdraw">申请提现</el-button>
         </div>
       </div>
@@ -626,6 +686,7 @@ onMounted(async () => {
           <el-select v-model="ledgerQuery.bizType" clearable placeholder="全部" style="width: 120px">
             <el-option label="工资" value="SALARY" />
             <el-option label="报销" value="REIMBURSE" />
+            <el-option label="项目余额" value="PAYOUT" />
             <el-option label="分成" value="SETTLE" />
             <el-option label="提现" value="WITHDRAW" />
             <el-option label="回退" value="ROLLBACK" />
@@ -947,6 +1008,43 @@ onMounted(async () => {
       <template #footer>
         <el-button @click="withdrawDialog = false">取消</el-button>
         <el-button type="primary" @click="submitWithdraw">提交审批</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="balanceApplyDialog" title="申请项目余额" width="480px">
+      <el-form label-width="88px">
+        <el-form-item label="项目" required>
+          <el-select
+            v-model="balanceApplyForm.projectId"
+            filterable
+            placeholder="选择有结余的重点/重大项目"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="p in balanceApplyProjects"
+              :key="p.projectId"
+              :label="`${p.projectName || p.projectId}（结余 ¥${fmt(p.balance)}）`"
+              :value="Number(p.projectId)"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="selectedBalanceProject" label="项目结余">
+          <span>¥ {{ fmt(selectedBalanceProject.balance) }}</span>
+          <span v-if="selectedBalanceProject.companyName" class="sec-tip" style="margin-left: 8px">
+            {{ selectedBalanceProject.companyName }}
+          </span>
+        </el-form-item>
+        <el-form-item label="申请金额" required>
+          <el-input-number v-model="balanceApplyForm.amount" :min="0.01" :precision="2" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="说明">
+          <el-input v-model="balanceApplyForm.remark" type="textarea" :rows="2" placeholder="无需发票，说明用途即可" />
+        </el-form-item>
+        <p class="sec-tip">流程：提交 → 财务审批通过 → 项目结余直接转入个人钱包（公司总账不变，无需回执）。</p>
+      </el-form>
+      <template #footer>
+        <el-button @click="balanceApplyDialog = false">取消</el-button>
+        <el-button type="primary" @click="submitBalanceApply">提交审批</el-button>
       </template>
     </el-dialog>
   </div>

@@ -23,6 +23,9 @@ export const bizApi = {
   myWalletBoard(params?: { period?: string }) {
     return request<any>({ url: '/finance/wallet/mine/board', method: 'get', params })
   },
+  balanceApplyProjects() {
+    return request<any[]>({ url: '/finance/wallet/mine/balance-apply-projects', method: 'get' })
+  },
   withdrawConfig(params?: { companyId?: number; amount?: number }) {
     return request<{
       taxMode?: string

@@ -13,8 +13,8 @@ import java.util.Map;
 
 public interface PmTaskService extends IService<PmTask> {
 
-    Page<PmTask> pageTasks(long page, long pageSize, Long projectId, Integer status, Integer priority,
-                           Long participantId, String title, Boolean overdue);
+    Page<PmTask> pageTasks(long page, long pageSize, Long projectId, Integer status, String statuses,
+                           Integer priority, Long participantId, String title, Boolean overdue);
 
     PmTask getDetail(Long id);
 

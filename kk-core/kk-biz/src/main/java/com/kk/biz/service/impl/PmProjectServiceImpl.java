@@ -185,7 +185,49 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         assertCanView(project, StpUtil.getLoginIdAsLong());
         fillExtras(List.of(project));
         project.setMembers(loadMembers(id));
+        fillCompanyPoolBalance(project);
         return project;
+    }
+
+    /** 解析项目关联资金池（或公司默认池）余额，供「从公司转入」展示 */
+    private void fillCompanyPoolBalance(PmProject project) {
+        if (project == null) {
+            return;
+        }
+        FinPool pool = null;
+        if (project.getPoolId() != null) {
+            pool = poolMapper.selectById(project.getPoolId());
+            if (pool != null && pool.getStatus() != null && pool.getStatus() == 0) {
+                pool = null;
+            }
+        }
+        if (pool == null && project.getCompanyId() != null) {
+            pool = poolMapper.selectOne(new LambdaQueryWrapper<FinPool>()
+                    .eq(FinPool::getIsDefault, 1)
+                    .eq(FinPool::getCompanyId, project.getCompanyId())
+                    .and(w -> w.isNull(FinPool::getStatus).or().ne(FinPool::getStatus, 0))
+                    .last("LIMIT 1"));
+            if (pool == null) {
+                pool = poolMapper.selectOne(new LambdaQueryWrapper<FinPool>()
+                        .eq(FinPool::getCompanyId, project.getCompanyId())
+                        .and(w -> w.isNull(FinPool::getStatus).or().ne(FinPool::getStatus, 0))
+                        .orderByAsc(FinPool::getId)
+                        .last("LIMIT 1"));
+            }
+        }
+        if (pool == null) {
+            project.setPoolBalance(BigDecimal.ZERO);
+            return;
+        }
+        if (project.getCompanyId() != null && pool.getCompanyId() != null
+                && !project.getCompanyId().equals(pool.getCompanyId())) {
+            project.setPoolBalance(BigDecimal.ZERO);
+            return;
+        }
+        // 响应里带上解析到的资金池，便于前端提交；不落库
+        project.setPoolId(pool.getId());
+        project.setPoolName(pool.getName());
+        project.setPoolBalance(pool.getBalance() == null ? BigDecimal.ZERO : pool.getBalance());
     }
 
     @Override
@@ -685,6 +727,9 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
     @Transactional(rollbackFor = Exception.class)
     public void deleteProject(Long id) {
         assertNoUndeletedChildren(id);
+        // 项目逻辑删除时同步逻辑删除下属任务，避免任务列表残留「项目不存在」孤儿
+        // 关联待审单由调用方（审批生效 / 免审删除）先 cancelPendingByProject，避免与审批服务循环依赖
+        taskMapper.delete(new LambdaQueryWrapper<PmTask>().eq(PmTask::getProjectId, id));
         removeById(id);
         memberMapper.delete(new LambdaQueryWrapper<PmProjectMember>().eq(PmProjectMember::getProjectId, id));
     }
@@ -697,6 +742,18 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         if (countChildren(projectId) > 0) {
             throw new BusinessException("请先处理全部小项目后再删除重大项目");
         }
+    }
+
+    @Override
+    public void assertCanView(Long projectId, Long userId) {
+        if (projectId == null) {
+            throw new BusinessException("缺少项目 ID");
+        }
+        PmProject project = getById(projectId);
+        if (project == null) {
+            throw new BusinessException("项目不存在");
+        }
+        assertCanView(project, userId);
     }
 
     private long countChildren(Long parentId) {
@@ -772,6 +829,7 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
     private void maskFinanceFields(PmProject project) {
         project.setPoolId(null);
         project.setPoolName(null);
+        project.setPoolBalance(null);
         project.setBudget(null);
         project.setSettledAmount(null);
         project.setReserveAmount(null);
@@ -981,6 +1039,7 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
                 FinPool pool = poolMap.get(project.getPoolId());
                 if (pool != null) {
                     project.setPoolName(pool.getName());
+                    project.setPoolBalance(pool.getBalance() == null ? BigDecimal.ZERO : pool.getBalance());
                 }
             }
             if (project.getCompanyId() != null) {

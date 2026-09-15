@@ -9,6 +9,7 @@ import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 const query = reactive({
   page: 1,
   pageSize: 20,
+  companyId: undefined as number | undefined,
   bizType: '',
   channelId: undefined as number | undefined,
   keyword: '',
@@ -63,6 +64,80 @@ const form = reactive<any>({
 const voucherFiles = ref<any[]>([])
 const detailVisible = ref(false)
 const detailRow = ref<LedgerRow | null>(null)
+const companyBalanceVisible = ref(false)
+const projectBalanceVisible = ref(false)
+const assetsDetailVisible = ref(false)
+
+const companyBalances = computed(() => {
+  const fromApi = summary.value?.companyBalances
+  if (Array.isArray(fromApi) && fromApi.length) {
+    return fromApi.filter((r: any) => Number(r.poolCount ?? 0) > 0 || Number(r.balance ?? r.poolBalance ?? 0) !== 0)
+  }
+  const poolSource = (Array.isArray(summary.value?.pools) && summary.value.pools.length)
+    ? summary.value.pools
+    : pools.value
+  return aggregateCompanyPoolBalances(poolSource)
+})
+
+const projectBalances = computed(() => {
+  const fromApi = summary.value?.projectBalances
+  if (Array.isArray(fromApi)) return fromApi
+  return []
+})
+
+const companyAssets = computed(() => {
+  const fromApi = summary.value?.companyAssets
+  if (Array.isArray(fromApi) && fromApi.length) {
+    return fromApi.map((r: any) => ({
+      ...r,
+      poolBalance: Number(r.poolBalance ?? r.balance ?? 0),
+      projectBalance: Number(r.projectBalance ?? 0),
+      companyProjectTotal: Number(r.companyProjectTotal
+        ?? (Number(r.poolBalance ?? r.balance ?? 0) + Number(r.projectBalance ?? 0))),
+    }))
+  }
+  const balances = companyBalances.value
+  if (!balances.length) return []
+  return balances.map((r: any) => {
+    const poolBalance = Number(r.poolBalance ?? r.balance ?? 0)
+    const projectBalance = Number(r.projectBalance ?? 0)
+    return {
+      ...r,
+      poolBalance,
+      projectBalance,
+      companyProjectTotal: poolBalance + projectBalance,
+    }
+  })
+})
+
+const assetsCompanyPoolSum = computed(() =>
+  companyAssets.value.reduce((s: number, r: any) => s + Number(r.poolBalance ?? 0), 0),
+)
+const assetsCompanyProjectSum = computed(() =>
+  companyAssets.value.reduce((s: number, r: any) => s + Number(r.projectBalance ?? 0), 0),
+)
+
+/** 从资金池列表按公司汇总（后端未下发明细时的兜底） */
+function aggregateCompanyPoolBalances(poolList: any[] | undefined) {
+  if (!Array.isArray(poolList) || !poolList.length) return []
+  const map = new Map<number, { companyId: number; companyName?: string; balance: number; poolCount: number }>()
+  for (const p of poolList) {
+    const cid = p?.companyId
+    if (cid == null) continue
+    const id = Number(cid)
+    const row = map.get(id) || {
+      companyId: id,
+      companyName: p.companyName,
+      balance: 0,
+      poolCount: 0,
+    }
+    row.balance += Number(p.balance ?? 0)
+    row.poolCount += 1
+    if (!row.companyName && p.companyName) row.companyName = p.companyName
+    map.set(id, row)
+  }
+  return [...map.values()].sort((a, b) => b.balance - a.balance)
+}
 
 interface LedgerRow {
   key: string
@@ -72,6 +147,8 @@ interface LedgerRow {
   title: string
   projectName?: string
   channelName?: string
+  companyId?: number
+  companyName?: string
   amount: number
   grossAmount?: number
   feeAmount?: number
@@ -91,6 +168,7 @@ const TYPE_LABEL: Record<string, string> = {
   SALARY: '工资',
   ROLLBACK: '回退',
   FEE: '手续费',
+  PAYOUT: '项目余额',
 }
 
 const TYPE_TAG: Record<string, string> = {
@@ -101,14 +179,17 @@ const TYPE_TAG: Record<string, string> = {
   ADVANCE: '',
   RESERVE: 'info',
   REIMBURSE: 'warning',
+  SALARY: 'success',
+  PAYOUT: 'primary',
   ROLLBACK: 'danger',
 }
 
 function emptyForm() {
+  const poolId = pools.value.find((p) => p.isDefault === 1)?.id ?? pools.value[0]?.id
   Object.assign(form, {
     bizType: 'INCOME',
-    poolId: pools.value.find((p) => p.isDefault === 1)?.id ?? pools.value[0]?.id,
-    channelId: channels.value[0]?.id,
+    poolId,
+    channelId: pickChannelForPool(poolId),
     projectId: undefined,
     amount: 0,
     feeMode: '',
@@ -118,6 +199,25 @@ function emptyForm() {
     voucherFileIds: [],
   })
   voucherFiles.value = []
+}
+
+/** 登记弹窗：仅展示当前资金池下的收款渠道 */
+const formChannels = computed(() => {
+  if (form.poolId == null) return channels.value
+  return channels.value.filter((c) => Number(c.poolId) === Number(form.poolId))
+})
+
+function pickChannelForPool(poolId?: number | null) {
+  if (poolId == null) return undefined
+  const matched = channels.value.filter((c) => Number(c.poolId) === Number(poolId))
+  return matched[0]?.id
+}
+
+function syncFormChannel() {
+  const ok = formChannels.value.some((c) => Number(c.id) === Number(form.channelId))
+  if (!ok) {
+    form.channelId = pickChannelForPool(form.poolId)
+  }
 }
 
 function bizLabel(v: string) {
@@ -168,6 +268,16 @@ function cleanTitle(row: any) {
     || '—'
 }
 
+function resolveLedgerCompany(row: any): { companyId?: number; companyName?: string } {
+  const companyId = ledgerCompanyId(row)
+  if (companyId == null) return {}
+  const companyName = row.companyName
+    || companies.value.find((c) => Number(c.id) === companyId)?.name
+    || pools.value.find((p) => Number(p.companyId) === companyId)?.companyName
+    || undefined
+  return { companyId, companyName }
+}
+
 /** 只展示公司侧流水，同一笔业务合并成一行 */
 function buildCompanyRows(rows: any[]): LedgerRow[] {
   const poolRows = rows.filter((r) => r.accountType === 'POOL')
@@ -187,6 +297,7 @@ function buildCompanyRows(rows: any[]): LedgerRow[] {
   const result: LedgerRow[] = []
 
   for (const row of alone) {
+    const company = resolveLedgerCompany(row)
     result.push({
       key: `s-${row.id}`,
       occurTime: row.occurTime,
@@ -194,6 +305,8 @@ function buildCompanyRows(rows: any[]): LedgerRow[] {
       bizType: row.bizType,
       title: cleanTitle(row),
       projectName: row.projectName,
+      companyId: company.companyId,
+      companyName: company.companyName,
       amount: Number(row.amount),
       afterBalance: Number(row.afterBalance),
       counterpart: row.projectName || '—',
@@ -214,6 +327,7 @@ function buildCompanyRows(rows: any[]): LedgerRow[] {
     } else if (head.bizType === 'ADVANCE' || head.bizType === 'RESERVE') {
       counterpart = head.projectName ? `项目 · ${head.projectName}` : '项目'
     }
+    const company = resolveLedgerCompany(head)
     result.push({
       key: `b-${batchId}`,
       occurTime: head.occurTime,
@@ -221,6 +335,8 @@ function buildCompanyRows(rows: any[]): LedgerRow[] {
       bizType: head.bizType,
       title: cleanTitle(head),
       projectName: head.projectName,
+      companyId: company.companyId,
+      companyName: company.companyName,
       amount: Number(head.amount),
       afterBalance: Number(head.afterBalance),
       counterpart,
@@ -231,11 +347,42 @@ function buildCompanyRows(rows: any[]): LedgerRow[] {
   return result.sort((a, b) => String(b.occurTime).localeCompare(String(a.occurTime)))
 }
 
+function ledgerCompanyId(row: any): number | undefined {
+  if (row?.companyId != null) return Number(row.companyId)
+  const pool = pools.value.find((p) => Number(p.id) === Number(row?.poolId))
+  if (pool?.companyId != null) return Number(pool.companyId)
+  return undefined
+}
+
+function companyLabel(row: { companyId?: number; companyName?: string } | null | undefined) {
+  if (!row) return '—'
+  if (row.companyName) return row.companyName
+  if (row.companyId != null) return `公司#${row.companyId}`
+  return '—'
+}
+
+const filteredChannels = computed(() => {
+  if (query.companyId == null) return channels.value
+  const cid = Number(query.companyId)
+  return channels.value.filter((c) => {
+    if (c.companyId != null) return Number(c.companyId) === cid
+    const pool = pools.value.find((p) => Number(p.id) === Number(c.poolId))
+    return pool != null && Number(pool.companyId) === cid
+  })
+})
+
 const companyRows = computed(() => buildCompanyRows(rawList.value))
 const pagedRows = computed(() => {
   const start = (query.page - 1) * query.pageSize
   return companyRows.value.slice(start, start + query.pageSize)
 })
+
+function onCompanyChange() {
+  if (query.channelId != null && !filteredChannels.value.some((c) => Number(c.id) === Number(query.channelId))) {
+    query.channelId = undefined
+  }
+  onFilter()
+}
 
 async function load() {
   listLoading.value = true
@@ -245,6 +392,7 @@ async function load() {
       page: 1,
       pageSize: 500,
       accountType: 'POOL',
+      companyId: query.companyId,
       bizType: query.bizType || undefined,
       channelId: query.channelId,
       keyword: query.keyword || undefined,
@@ -253,10 +401,16 @@ async function load() {
       startTime: dateRange[0] ? `${dateRange[0]} 00:00:00` : undefined,
       endTime: dateRange[1] ? `${dateRange[1]} 23:59:59` : undefined,
     })
-    rawList.value = res.list
-    const needWallet = !query.bizType || ['SETTLE', 'TRANSFER', 'EXPENSE', 'REIMBURSE', 'SALARY', 'ROLLBACK'].includes(query.bizType)
+    let poolList = res.list || []
+    // 兼容旧后端未接 companyId：再按公司兜底过滤一次
+    if (query.companyId != null) {
+      const cid = Number(query.companyId)
+      poolList = poolList.filter((r: any) => ledgerCompanyId(r) === cid)
+    }
+    rawList.value = poolList
+    const needWallet = !query.bizType || ['SETTLE', 'TRANSFER', 'EXPENSE', 'REIMBURSE', 'SALARY', 'PAYOUT', 'ROLLBACK'].includes(query.bizType)
     const relatedIds = needWallet
-      ? [...new Set(res.list.map((r: any) => r.relatedId).filter(Boolean))]
+      ? [...new Set(poolList.map((r: any) => r.relatedId).filter(Boolean))]
       : []
     if (relatedIds.length) {
       const walletRes = await bizApi.ledgerPage({
@@ -267,7 +421,7 @@ async function load() {
       })
       const need = new Set(relatedIds)
       const extras = walletRes.list.filter((r: any) => need.has(r.relatedId))
-      rawList.value = [...res.list, ...extras]
+      rawList.value = [...poolList, ...extras]
     }
     query.page = 1
   } catch {
@@ -280,9 +434,58 @@ async function load() {
 async function loadSummary() {
   try {
     summary.value = await bizApi.summary()
+    // 明细兜底：summary.pools 若缺公司名，用已加载的资金池补齐
+    if ((!summary.value?.companyBalances || !summary.value.companyBalances.length)
+        && Array.isArray(summary.value?.pools)
+        && summary.value.pools.length
+        && !pools.value.length) {
+      try {
+        pools.value = await bizApi.poolList()
+      } catch {
+        /* ignore */
+      }
+    }
+    if (Array.isArray(summary.value?.pools) && summary.value.pools.length) {
+      const nameById = new Map(pools.value.map((p: any) => [Number(p.id), p.companyName]))
+      const companyNameByCompanyId = new Map(
+        pools.value
+          .filter((p: any) => p.companyId != null && p.companyName)
+          .map((p: any) => [Number(p.companyId), p.companyName]),
+      )
+      for (const p of summary.value.pools) {
+        if (!p.companyName) {
+          p.companyName = nameById.get(Number(p.id)) || companyNameByCompanyId.get(Number(p.companyId))
+        }
+      }
+    }
   } catch {
     summary.value = {}
   }
+}
+
+function openCompanyBalances() {
+  companyBalanceVisible.value = true
+}
+
+function openProjectBalances() {
+  projectBalanceVisible.value = true
+}
+
+function openAssetsDetail() {
+  assetsDetailVisible.value = true
+}
+
+function assetsCompanySummary({ columns }: { columns: any[]; data: any[] }) {
+  return columns.map((col, index) => {
+    if (index === 0) return '合计'
+    const key = col.property
+    if (key === 'poolBalance') return fmtMoney(assetsCompanyPoolSum.value)
+    if (key === 'projectBalance') return fmtMoney(assetsCompanyProjectSum.value)
+    if (key === 'companyProjectTotal') {
+      return fmtMoney(assetsCompanyPoolSum.value + assetsCompanyProjectSum.value)
+    }
+    return ''
+  })
 }
 
 function openDialog() {
@@ -300,9 +503,7 @@ async function ensureFormOptions() {
   if (!form.poolId) {
     form.poolId = pools.value.find((p) => p.isDefault === 1)?.id ?? pools.value[0]?.id
   }
-  if (!form.channelId) {
-    form.channelId = channels.value.find((c) => !form.poolId || c.poolId === form.poolId)?.id
-  }
+  syncFormChannel()
 }
 
 async function onUploadVoucher(options: any) {
@@ -355,6 +556,11 @@ async function save() {
   }
   if (form.bizType === 'INCOME' && !form.channelId) {
     ElMessage.warning('入账请选择收款渠道')
+    return
+  }
+  if (form.bizType === 'INCOME' && form.channelId && !formChannels.value.some((c) => Number(c.id) === Number(form.channelId))) {
+    ElMessage.warning('收款渠道与资金池不匹配，请重新选择')
+    syncFormChannel()
     return
   }
   if (!form.poolId) {
@@ -430,7 +636,10 @@ async function refreshActiveThreshold() {
 }
 
 watch([() => form.poolId, () => form.bizType, () => dialog.value], () => {
-  if (dialog.value) void refreshActiveThreshold()
+  if (dialog.value) {
+    syncFormChannel()
+    void refreshActiveThreshold()
+  }
 })
 
 async function openThresholdDialog() {
@@ -688,6 +897,7 @@ function onFilter() {
 
 function resetFilter() {
   query.page = 1
+  query.companyId = undefined
   query.bizType = ''
   query.channelId = undefined
   query.keyword = ''
@@ -698,6 +908,11 @@ function resetFilter() {
 }
 
 onMounted(async () => {
+  try {
+    companies.value = await sysApi.myCompanies()
+  } catch {
+    companies.value = []
+  }
   try {
     pools.value = await bizApi.poolList()
   } catch {
@@ -728,7 +943,13 @@ onMounted(async () => {
     </div>
 
     <div class="summary-row">
-      <div class="summary-card summary-card--indigo">
+      <div
+        class="summary-card summary-card--indigo summary-card--clickable"
+        role="button"
+        tabindex="0"
+        @click="openAssetsDetail"
+        @keyup.enter="openAssetsDetail"
+      >
         <div class="summary-body">
           <div class="summary-label">系统内资金</div>
           <div class="summary-value">{{ fmtMoney(summary.assetsTotal) }}</div>
@@ -737,22 +958,46 @@ onMounted(async () => {
             + 项目 {{ fmtMoney(summary.projectTotal) }}
             + 个人 {{ fmtMoney(summary.walletTotal) }}
           </div>
+          <div class="summary-hint">
+            <template v-if="companyAssets.length > 1">共 {{ companyAssets.length }} 家公司，点击查看明细</template>
+            <template v-else>点击查看各公司明细</template>
+          </div>
         </div>
         <el-icon class="summary-glyph" :size="52"><Coin /></el-icon>
       </div>
-      <div class="summary-card summary-card--violet">
+      <div
+        class="summary-card summary-card--violet summary-card--clickable"
+        role="button"
+        tabindex="0"
+        @click="openCompanyBalances"
+        @keyup.enter="openCompanyBalances"
+      >
         <div class="summary-body">
           <div class="summary-label">公司余额</div>
           <div class="summary-value sm">{{ fmtMoney(summary.poolTotal) }}</div>
-          <div class="summary-hint">还在公司账上，可入账 / 出账 / 预支到项目</div>
+          <div class="summary-hint">
+            <template v-if="companyBalances.length > 1">共 {{ companyBalances.length }} 家公司，点击查看明细</template>
+            <template v-else-if="companyBalances.length === 1">{{ companyBalances[0].companyName || '当前公司' }} · 点击查看明细</template>
+            <template v-else>还在公司账上，可入账 / 出账 / 预支到项目</template>
+          </div>
         </div>
         <el-icon class="summary-glyph" :size="52"><OfficeBuilding /></el-icon>
       </div>
-      <div class="summary-card summary-card--amber">
+      <div
+        class="summary-card summary-card--amber summary-card--clickable"
+        role="button"
+        tabindex="0"
+        @click="openProjectBalances"
+        @keyup.enter="openProjectBalances"
+      >
         <div class="summary-body">
           <div class="summary-label">项目余额合计</div>
           <div class="summary-value sm">{{ fmtMoney(summary.projectTotal) }}</div>
-          <div class="summary-hint">已预支到各项目、尚未花完或分完</div>
+          <div class="summary-hint">
+            <template v-if="projectBalances.length > 1">共 {{ projectBalances.length }} 个项目，点击查看明细</template>
+            <template v-else-if="projectBalances.length === 1">{{ projectBalances[0].projectName || '当前项目' }} · 点击查看明细</template>
+            <template v-else>已预支到各项目、尚未花完或分完 · 点击查看</template>
+          </div>
         </div>
         <el-icon class="summary-glyph" :size="52"><FolderOpened /></el-icon>
       </div>
@@ -768,6 +1013,18 @@ onMounted(async () => {
 
     <div class="page-card">
       <el-form class="filter-bar" @submit.prevent="onFilter">
+      <el-form-item label="公司">
+        <el-select
+          v-model="query.companyId"
+          clearable
+          filterable
+          placeholder="全部公司"
+          class="filter-select--wide"
+          @change="onCompanyChange"
+        >
+          <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+        </el-select>
+      </el-form-item>
       <el-form-item label="类型">
         <el-select v-model="query.bizType" clearable placeholder="全部" class="filter-select">
           <el-option label="入账" value="INCOME" />
@@ -775,12 +1032,15 @@ onMounted(async () => {
           <el-option label="手续费" value="FEE" />
           <el-option label="项目分钱" value="SETTLE" />
           <el-option label="项目预支" value="ADVANCE" />
+          <el-option label="报销" value="REIMBURSE" />
+          <el-option label="工资" value="SALARY" />
+          <el-option label="项目余额" value="PAYOUT" />
           <el-option label="回退" value="ROLLBACK" />
         </el-select>
       </el-form-item>
       <el-form-item label="收款渠道">
         <el-select v-model="query.channelId" clearable placeholder="全部" class="filter-select--wide">
-          <el-option v-for="c in channels" :key="c.id" :label="c.name" :value="c.id" />
+          <el-option v-for="c in filteredChannels" :key="c.id" :label="c.name" :value="c.id" />
         </el-select>
       </el-form-item>
       <el-form-item label="发生时间">
@@ -883,11 +1143,98 @@ onMounted(async () => {
 
     </div>
 
+    <el-drawer v-model="assetsDetailVisible" title="系统内资金明细" size="560px" append-to-body>
+      <div class="company-balance-head">
+        <span>系统内资金合计</span>
+        <strong>{{ fmtMoney(summary.assetsTotal) }}</strong>
+      </div>
+      <div class="assets-total-cards">
+        <div class="assets-total-card">
+          <span>公司余额合计</span>
+          <b>{{ fmtMoney(summary.poolTotal) }}</b>
+        </div>
+        <div class="assets-total-card">
+          <span>项目余额合计</span>
+          <b>{{ fmtMoney(summary.projectTotal) }}</b>
+        </div>
+        <div class="assets-total-card">
+          <span>个人钱包合计</span>
+          <b>{{ fmtMoney(summary.walletTotal) }}</b>
+        </div>
+      </div>
+      <h4 class="detail-sec">按公司（公司余额 + 项目余额）</h4>
+      <el-table :data="companyAssets" stripe empty-text="暂无公司资金数据" show-summary :summary-method="assetsCompanySummary">
+        <el-table-column label="公司" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.companyName || `公司#${row.companyId}` }}</template>
+        </el-table-column>
+        <el-table-column label="公司余额" width="120" align="right" prop="poolBalance">
+          <template #default="{ row }">{{ fmtMoney(row.poolBalance) }}</template>
+        </el-table-column>
+        <el-table-column label="项目余额" width="120" align="right" prop="projectBalance">
+          <template #default="{ row }">{{ fmtMoney(row.projectBalance) }}</template>
+        </el-table-column>
+        <el-table-column label="小计" width="120" align="right" prop="companyProjectTotal">
+          <template #default="{ row }">
+            <span class="balance-text">{{ fmtMoney(row.companyProjectTotal) }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <p class="company-balance-note assets-wallet-note">
+        个人钱包 ¥{{ fmtMoney(summary.walletTotal).replace(/^¥/, '') }} 为全系统合计，不按公司拆分。
+      </p>
+    </el-drawer>
+
+    <el-drawer v-model="companyBalanceVisible" title="公司余额明细" size="480px" append-to-body>
+      <div class="company-balance-head">
+        <span>合计</span>
+        <strong>{{ fmtMoney(summary.poolTotal) }}</strong>
+      </div>
+      <el-table :data="companyBalances" stripe empty-text="暂无公司资金池">
+        <el-table-column label="公司" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.companyName || `公司#${row.companyId}` }}</template>
+        </el-table-column>
+        <el-table-column label="资金池数" width="90" align="center">
+          <template #default="{ row }">{{ row.poolCount ?? '—' }}</template>
+        </el-table-column>
+        <el-table-column label="余额" width="140" align="right">
+          <template #default="{ row }">
+            <span class="balance-text">{{ fmtMoney(row.balance) }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
+
+    <el-drawer v-model="projectBalanceVisible" title="项目余额明细" size="560px" append-to-body>
+      <div class="company-balance-head">
+        <span>合计</span>
+        <strong>{{ fmtMoney(summary.projectTotal) }}</strong>
+      </div>
+      <el-table :data="projectBalances" stripe empty-text="暂无项目余额">
+        <el-table-column label="项目" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span>{{ row.projectName || `项目#${row.projectId}` }}</span>
+            <span v-if="row.projectCode" class="muted"> · {{ row.projectCode }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="公司" min-width="120" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.companyName || (row.companyId != null ? `公司#${row.companyId}` : '—') }}</template>
+        </el-table-column>
+        <el-table-column label="余额" width="130" align="right">
+          <template #default="{ row }">
+            <span class="balance-text">{{ fmtMoney(row.balance) }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <p class="company-balance-note">按项目列出已预支尚未花完或分完的余额；子项目会单独列出。</p>
+    </el-drawer>
+
     <el-drawer v-model="detailVisible" title="流水详细" size="520px" append-to-body>
       <template v-if="detailRow">
         <el-descriptions :column="1" border>
           <el-descriptions-item label="时间">{{ fmtTime(detailRow.occurTime) }}</el-descriptions-item>
           <el-descriptions-item label="编号">{{ detailRow.bizNo || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="公司">{{ companyLabel(detailRow) }}</el-descriptions-item>
+          <el-descriptions-item label="项目">{{ detailRow.projectName || '—' }}</el-descriptions-item>
           <el-descriptions-item label="类型">{{ bizLabel(detailRow.bizType) }}</el-descriptions-item>
           <el-descriptions-item label="摘要">{{ detailRow.title || '—' }}</el-descriptions-item>
           <el-descriptions-item label="对方 / 说明">{{ detailRow.counterpart || '—' }}</el-descriptions-item>
@@ -932,14 +1279,20 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-form-item v-if="form.bizType === 'INCOME'" label="收款渠道" required>
-          <el-select v-model="form.channelId" style="width: 100%" placeholder="支付宝/银行卡等">
+          <el-select
+            v-model="form.channelId"
+            style="width: 100%"
+            placeholder="支付宝/银行卡等"
+            :disabled="!formChannels.length"
+          >
             <el-option
-              v-for="c in channels.filter((x) => !form.poolId || x.poolId === form.poolId)"
+              v-for="c in formChannels"
               :key="c.id"
               :label="`${c.name}（${c.channelTypeLabel || c.channelType}）`"
               :value="c.id"
             />
           </el-select>
+          <div v-if="form.poolId && !formChannels.length" class="form-tip">该资金池暂无收款渠道，请先在「收款渠道」中配置</div>
         </el-form-item>
         <el-form-item label="关联项目">
           <ProjectCascadeSelect
@@ -1194,6 +1547,18 @@ onMounted(async () => {
 .summary-card--cyan::before { background: #a5f3fc; }
 .summary-card--violet::before { background: #ddd6fe; }
 .summary-card--amber::before { background: #fde68a; }
+.summary-card--clickable {
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.summary-card--clickable:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--kk-glass-shadow), 0 0 0 1px rgba(124, 58, 237, 0.12);
+}
+.summary-card--clickable:focus-visible {
+  outline: 2px solid rgba(124, 58, 237, 0.35);
+  outline-offset: 2px;
+}
 .summary-card--indigo .summary-glyph { color: var(--kk-primary); }
 .summary-card--cyan .summary-glyph { color: #0891b2; }
 .summary-card--violet .summary-glyph { color: #7c3aed; }
@@ -1237,6 +1602,68 @@ onMounted(async () => {
   color: var(--kk-text-muted);
   line-height: 1.4;
 }
+.company-balance-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: var(--kk-radius, 18px);
+  background: var(--kk-glass-bg, rgba(255, 255, 255, 0.46));
+  border: 1px solid var(--kk-glass-border, rgba(255, 255, 255, 0.72));
+  box-shadow: var(--kk-glass-shadow);
+  font-size: 14px;
+  color: var(--kk-text-secondary);
+}
+.company-balance-head strong {
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--kk-text);
+}
+.company-balance-sub {
+  margin: -8px 0 14px;
+  font-size: 12px;
+  color: var(--kk-text-muted);
+  line-height: 1.4;
+}
+.company-balance-note {
+  display: inline;
+  opacity: 0.85;
+}
+.assets-total-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.assets-total-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--kk-glass-bg, rgba(255, 255, 255, 0.46));
+  border: 1px solid var(--kk-glass-border, rgba(255, 255, 255, 0.72));
+  box-shadow: var(--kk-glass-shadow);
+}
+.assets-total-card span {
+  font-size: 12px;
+  color: var(--kk-text-muted);
+}
+.assets-total-card b {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--kk-text);
+}
+.assets-wallet-note {
+  display: block;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--kk-text-muted);
+  line-height: 1.45;
+}
 @media (max-width: 1100px) {
   .summary-row {
     grid-template-columns: 1fr 1fr;
@@ -1269,6 +1696,12 @@ onMounted(async () => {
   color: var(--kk-text);
 }
 .muted {
+  color: var(--kk-text-muted);
+}
+.form-tip {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
   color: var(--kk-text-muted);
 }
 .voucher-count {

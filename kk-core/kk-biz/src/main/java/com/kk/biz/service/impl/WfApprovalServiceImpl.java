@@ -15,6 +15,7 @@ import com.kk.biz.entity.FinLedger;
 import com.kk.biz.entity.FinLedgerThreshold;
 import com.kk.biz.entity.FinMonthVerify;
 import com.kk.biz.entity.FinPool;
+import com.kk.biz.entity.FinProjectAccount;
 import com.kk.biz.entity.HrPayMethod;
 import com.kk.biz.entity.HrWallet;
 import com.kk.biz.entity.PmProject;
@@ -59,6 +60,7 @@ import com.kk.system.service.SysNotificationService;
 import com.kk.system.service.SysUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -114,8 +116,10 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
     private final FinLedgerThresholdService ledgerThresholdService;
     private final FaAssetService faAssetService;
     private final WalletWithdrawTaxService walletWithdrawTaxService;
+    /** 与项目服务单向依赖；字段注入 + @Lazy，避免构造器循环 */
     @Lazy
-    private final PmProjectService projectService;
+    @Autowired
+    private PmProjectService projectService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -575,6 +579,31 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         return count;
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int cancelPendingByProject(Long projectId, String reason) {
+        if (projectId == null) {
+            return 0;
+        }
+        String remark = StringUtils.hasText(reason) ? reason : "项目已删除，审批自动关闭";
+        List<WfApproval> list = list(new LambdaQueryWrapper<WfApproval>()
+                .eq(WfApproval::getProjectId, projectId)
+                .eq(WfApproval::getStatus, "PENDING"));
+        if (list.isEmpty()) {
+            return 0;
+        }
+        int count = 0;
+        for (WfApproval approval : list) {
+            approval.setStatus("WITHDRAWN");
+            updateById(approval);
+            closePendingTasks(approval.getId(), remark);
+            releaseWithdrawFreeze(approval, null, remark);
+            addLog(approval.getId(), null, "CANCEL", remark);
+            count++;
+        }
+        return count;
+    }
+
     private void onApproved(WfApproval approval, boolean timeout) {
         approval.setStatus(timeout ? "TIMEOUT_PASS" : "APPROVED");
         approval.setPassTime(LocalDateTime.now());
@@ -636,9 +665,10 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                         approval.getRemark());
                 syncReserveAfterFundChange(approval.getProjectId());
             }
-            case ApprovalTypes.REIMBURSE_PROJECT, ApprovalTypes.SALARY_APPLY -> {
+            case ApprovalTypes.REIMBURSE_PROJECT, ApprovalTypes.SALARY_APPLY, ApprovalTypes.PROJECT_BALANCE_APPLY -> {
                 assertExpenseWithinQuota(approval.getProjectId(), approval.getAmount());
-                String bizType = ApprovalTypes.SALARY_APPLY.equals(type) ? "SALARY" : "REIMBURSE";
+                String bizType = ApprovalTypes.SALARY_APPLY.equals(type) ? "SALARY"
+                        : ApprovalTypes.PROJECT_BALANCE_APPLY.equals(type) ? "PAYOUT" : "REIMBURSE";
                 projectAccountService.expenseToWallet(
                         approval.getProjectId(),
                         approval.getApplicantId(),
@@ -786,12 +816,11 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (approval.getProjectId() == null) {
             throw new BusinessException("缺少项目ID");
         }
-        projectService.assertNoUndeletedChildren(approval.getProjectId());
         projectService.recordFlow(approval.getProjectId(), "DELETE", null, null,
                 approval.getId(), "删除项目", approval.getApplicantId());
-        projectMapper.deleteById(approval.getProjectId());
-        memberMapper.delete(new LambdaQueryWrapper<PmProjectMember>()
-                .eq(PmProjectMember::getProjectId, approval.getProjectId()));
+        // 先关掉其他待审（当前单已是 APPROVED，不会被关掉），再删项目与任务
+        cancelPendingByProject(approval.getProjectId(), "项目已删除，审批自动关闭");
+        projectService.deleteProject(approval.getProjectId());
     }
 
     private void effectPersonalReimburse(WfApproval approval) {
@@ -1309,7 +1338,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                         tax.negate(), poolBefore, pool.getBalance(), null, walletLedger, approval.getId(),
                         "提现税费回退扣公司", "回退原单 " + origin.getBizNo());
             }
-        } else if (List.of(ApprovalTypes.REIMBURSE_PROJECT, ApprovalTypes.SALARY_APPLY).contains(originType)) {
+        } else if (List.of(ApprovalTypes.REIMBURSE_PROJECT, ApprovalTypes.SALARY_APPLY,
+                ApprovalTypes.PROJECT_BALANCE_APPLY).contains(originType)) {
             if (origin.getApplicantId() == null) {
                 throw new BusinessException("原单缺少申请人，无法回退个人钱包");
             }
@@ -1732,7 +1762,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             projectService.assertNoUndeletedChildren(request.getProjectId());
         }
         if (List.of(ApprovalTypes.PROJECT_ADVANCE, ApprovalTypes.REIMBURSE_PROJECT,
-                ApprovalTypes.SALARY_APPLY, ApprovalTypes.PROJECT_SETTLE,
+                ApprovalTypes.SALARY_APPLY, ApprovalTypes.PROJECT_BALANCE_APPLY,
+                ApprovalTypes.PROJECT_SETTLE,
                 ApprovalTypes.RESERVE_RETURN, ApprovalTypes.SHARE_CONFIG).contains(type)) {
             if (request.getProjectId() == null) {
                 throw new BusinessException("请选择项目");
@@ -1741,9 +1772,34 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
         // 预留回笼金额取自项目已占用预留，提交时可不填金额
         if (List.of(ApprovalTypes.PROJECT_ADVANCE, ApprovalTypes.REIMBURSE_PROJECT,
-                ApprovalTypes.SALARY_APPLY, ApprovalTypes.PROJECT_SETTLE).contains(type)) {
+                ApprovalTypes.SALARY_APPLY, ApprovalTypes.PROJECT_BALANCE_APPLY,
+                ApprovalTypes.PROJECT_SETTLE).contains(type)) {
             if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
                 throw new BusinessException("请填写金额");
+            }
+        }
+        if (ApprovalTypes.PROJECT_ADVANCE.equals(type)) {
+            BigDecimal amount = request.getAmount().setScale(2, RoundingMode.HALF_UP);
+            request.setAmount(amount);
+            Long poolId = request.getPoolId();
+            Long companyId = null;
+            if (request.getProjectId() != null) {
+                PmProject project = projectMapper.selectById(request.getProjectId());
+                if (project != null) {
+                    companyId = project.getCompanyId();
+                    if (poolId == null) {
+                        poolId = project.getPoolId();
+                    }
+                }
+            }
+            FinPool pool = resolvePool(poolId, companyId);
+            if (pool.getStatus() != null && pool.getStatus() == 0) {
+                throw new BusinessException("公司账户已禁用，无法转入");
+            }
+            request.setPoolId(pool.getId());
+            BigDecimal poolBal = nz(pool.getBalance());
+            if (amount.compareTo(poolBal) > 0) {
+                throw new BusinessException("不能超过公司余额 ¥" + poolBal.toPlainString());
             }
         }
         if (ApprovalTypes.SALARY_MONTHLY.equals(type)) {
@@ -1779,6 +1835,20 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                 throw new BusinessException("可用余额不足，当前可用 ¥" + available.toPlainString());
             }
             // 税额在 resolveApprovalCompanyId 之后由 applyWithdrawTaxPayload 写入
+        }
+        if (ApprovalTypes.PROJECT_BALANCE_APPLY.equals(type)) {
+            // 与个人中心候选列表同源：申请人须可见该项目，防止仅凭公司权限冒领任意项目结余
+            projectService.assertCanView(request.getProjectId(), applicantId);
+            BigDecimal amount = request.getAmount().setScale(2, RoundingMode.HALF_UP);
+            request.setAmount(amount);
+            FinProjectAccount account = projectAccountService.getOne(
+                    new LambdaQueryWrapper<FinProjectAccount>()
+                            .eq(FinProjectAccount::getProjectId, request.getProjectId())
+                            .last("LIMIT 1"));
+            BigDecimal bal = account == null ? BigDecimal.ZERO : nz(account.getBalance());
+            if (bal.compareTo(amount) < 0) {
+                throw new BusinessException("项目可用余额不足，当前结余 ¥" + bal.toPlainString());
+            }
         }
         if (ApprovalTypes.REIMBURSE_PERSONAL.equals(type)
                 || ApprovalTypes.REIMBURSE_PROJECT.equals(type)) {
@@ -2086,6 +2156,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         a.setCanRollback(List.of("APPROVED", "TIMEOUT_PASS").contains(a.getStatus())
                 && ApprovalTypes.canMoneyRollback(a.getType())
                 && a.getAmount() != null && a.getAmount().compareTo(java.math.BigDecimal.ZERO) > 0
+                && (!ApprovalTypes.needMoneyConfirm(a.getType())
+                || Integer.valueOf(3).equals(a.getConfirmStatus()))
                 && (Objects.equals(a.getApplicantId(), loginId)
                 || dataScopeService.isGlobalAdmin(loginId)
                 || canFinanceHandle(loginId, a.getCompanyId())));

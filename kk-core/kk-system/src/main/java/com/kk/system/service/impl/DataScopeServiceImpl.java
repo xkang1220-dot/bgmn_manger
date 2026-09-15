@@ -143,6 +143,14 @@ public class DataScopeServiceImpl implements DataScopeService {
     }
 
     @Override
+    public Set<Long> memberUserIdsInCompany(Long companyId) {
+        if (companyId == null) {
+            return Set.of();
+        }
+        return listUserIdsInCompany(companyId);
+    }
+
+    @Override
     public boolean hasRoleInCompany(Long userId, String roleCode, Long companyId) {
         if (userId == null || !StringUtils.hasText(roleCode)) {
             return false;

@@ -14,10 +14,12 @@ import com.kk.biz.dto.WithdrawTaxTierSaveRequest;
 import com.kk.biz.entity.FinLedger;
 import com.kk.biz.entity.FinLedgerThreshold;
 import com.kk.biz.entity.FinPool;
+import com.kk.biz.entity.FinProjectAccount;
 import com.kk.biz.entity.FinWalletWithdrawTaxTier;
 import com.kk.biz.entity.HrWallet;
 import com.kk.biz.entity.PmProject;
 import com.kk.biz.service.FinanceService;
+import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.HrWalletService;
 import com.kk.biz.service.PmProjectService;
 import com.kk.biz.service.SysFileService;
@@ -47,6 +49,7 @@ public class FinanceController {
     private final HrWalletService walletService;
     private final SysFileService fileService;
     private final PmProjectService projectService;
+    private final FinProjectAccountService projectAccountService;
     private final WalletWithdrawTaxService walletWithdrawTaxService;
 
     @Value("${wallet.withdraw.tax-rate:0.2}")
@@ -133,6 +136,13 @@ public class FinanceController {
         return Result.ok(board);
     }
 
+    /** 个人中心「申请项目余额」可选项目（含结余） */
+    @GetMapping("/wallet/mine/balance-apply-projects")
+    @SaCheckPermission("finance:wallet:list")
+    public Result<List<FinProjectAccount>> balanceApplyProjects() {
+        return Result.ok(projectAccountService.listBalanceApplyCandidates());
+    }
+
     @GetMapping("/wallet/mine/withdraw-config")
     @SaCheckPermission("finance:wallet:list")
     public Result<Map<String, Object>> withdrawConfig(
@@ -203,7 +213,7 @@ public class FinanceController {
     public Result<PageResult<FinLedger>> ledgerPage(
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long pageSize,
-            String bizType, String accountType, Long userId, Long poolId, Long projectId, Long channelId,
+            String bizType, String accountType, Long userId, Long companyId, Long poolId, Long projectId, Long channelId,
             BigDecimal minAmount, BigDecimal maxAmount,
             @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime startTime,
             @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime endTime,
@@ -214,6 +224,7 @@ public class FinanceController {
         q.setBizType(bizType);
         q.setAccountType(accountType);
         q.setUserId(userId);
+        q.setCompanyId(companyId);
         q.setPoolId(poolId);
         q.setProjectId(projectId);
         q.setChannelId(channelId);

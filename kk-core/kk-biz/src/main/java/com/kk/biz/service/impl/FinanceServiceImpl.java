@@ -679,8 +679,232 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         LambdaQueryWrapper<PmProject> projectCountWrapper = new LambdaQueryWrapper<>();
         applyProjectCompanyFilter(projectCountWrapper);
         map.put("projectCount", projectMapper.selectCount(projectCountWrapper));
+        fillPoolCompanyNames(pools);
         map.put("pools", pools);
+        List<Map<String, Object>> companyAssets = buildCompanyAssetBalances(pools);
+        map.put("companyAssets", companyAssets);
+        // 公司余额明细：只展示有资金池的公司
+        map.put("companyBalances", companyAssets.stream()
+                .filter(r -> asInt(r.get("poolCount")) > 0)
+                .sorted((a, b) -> toBigDecimal(b.get("balance")).compareTo(toBigDecimal(a.get("balance"))))
+                .collect(Collectors.toList()));
+        map.put("projectBalances", buildProjectBalances());
         return map;
+    }
+
+    /** 项目余额明细：按项目列出账款余额（含公司归属） */
+    private List<Map<String, Object>> buildProjectBalances() {
+        LambdaQueryWrapper<FinProjectAccount> wrapper = new LambdaQueryWrapper<FinProjectAccount>()
+                .orderByDesc(FinProjectAccount::getBalance)
+                .orderByDesc(FinProjectAccount::getId);
+        if (!isLoginGlobalAdmin()) {
+            Set<Long> companies = visibleCompanies();
+            if (companies.isEmpty()) {
+                return List.of();
+            }
+            wrapper.in(FinProjectAccount::getCompanyId, companies);
+        }
+        List<FinProjectAccount> accounts = projectAccountMapper.selectList(wrapper);
+        if (accounts.isEmpty()) {
+            return List.of();
+        }
+        Set<Long> projectIds = accounts.stream()
+                .map(FinProjectAccount::getProjectId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        Map<Long, PmProject> projectMap = projectIds.isEmpty() ? Map.of()
+                : projectMapper.selectList(new LambdaQueryWrapper<PmProject>().in(PmProject::getId, projectIds))
+                .stream().collect(Collectors.toMap(PmProject::getId, p -> p, (a, b) -> a));
+        Set<Long> companyIds = new HashSet<>();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (FinProjectAccount acc : accounts) {
+            PmProject project = projectMap.get(acc.getProjectId());
+            if (project == null) {
+                continue;
+            }
+            String scale = project.getScale() == null ? ProjectScales.NORMAL : project.getScale();
+            if (!ProjectScales.isFinanceVisible(scale)) {
+                continue;
+            }
+            BigDecimal bal = acc.getBalance() == null ? BigDecimal.ZERO : acc.getBalance();
+            // 明细默认展示有余额的项目；全 0 时也保留几条便于确认
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("projectId", acc.getProjectId());
+            row.put("projectName", project.getName());
+            row.put("projectCode", project.getCode());
+            row.put("parentId", project.getParentId());
+            row.put("scale", scale);
+            row.put("companyId", acc.getCompanyId() != null ? acc.getCompanyId() : project.getCompanyId());
+            row.put("balance", bal);
+            row.put("advanceAmount", acc.getAdvanceAmount() == null ? BigDecimal.ZERO : acc.getAdvanceAmount());
+            if (row.get("companyId") != null) {
+                companyIds.add((Long) row.get("companyId"));
+            }
+            rows.add(row);
+        }
+        Map<Long, String> companyNameMap = companyIds.isEmpty() ? Map.of()
+                : deptService.listByIds(companyIds).stream()
+                .collect(Collectors.toMap(SysDept::getId, SysDept::getName, (a, b) -> a));
+        for (Map<String, Object> row : rows) {
+            Long cid = (Long) row.get("companyId");
+            if (cid != null) {
+                row.put("companyName", companyNameMap.get(cid));
+            }
+        }
+        boolean anyPositive = rows.stream()
+                .anyMatch(r -> toBigDecimal(r.get("balance")).compareTo(BigDecimal.ZERO) != 0);
+        if (anyPositive) {
+            rows = rows.stream()
+                    .filter(r -> toBigDecimal(r.get("balance")).compareTo(BigDecimal.ZERO) != 0)
+                    .collect(Collectors.toList());
+        }
+        rows.sort((a, b) -> toBigDecimal(b.get("balance")).compareTo(toBigDecimal(a.get("balance"))));
+        return rows;
+    }
+
+    /**
+     * 按公司汇总：公司余额 + 项目余额；个人钱包不按公司拆分（见 summary.walletTotal）。
+     */
+    private List<Map<String, Object>> buildCompanyAssetBalances(List<FinPool> pools) {
+        Map<Long, Map<String, Object>> byCompany = new LinkedHashMap<>();
+
+        // 1) 公司资金池
+        if (pools != null) {
+            for (FinPool pool : pools) {
+                Long companyId = pool.getCompanyId();
+                if (companyId == null) {
+                    continue;
+                }
+                Map<String, Object> row = companyAssetRow(byCompany, companyId, pool.getCompanyName());
+                BigDecimal bal = pool.getBalance() == null ? BigDecimal.ZERO : pool.getBalance();
+                row.put("poolBalance", ((BigDecimal) row.get("poolBalance")).add(bal));
+                row.put("poolCount", ((Integer) row.get("poolCount")) + 1);
+            }
+        }
+
+        // 2) 项目账款（按公司）
+        QueryWrapper<FinProjectAccount> projectWrapper = new QueryWrapper<FinProjectAccount>()
+                .select("company_id AS companyId", "IFNULL(SUM(balance), 0) AS total");
+        if (!isLoginGlobalAdmin()) {
+            Set<Long> companies = visibleCompanies();
+            if (companies.isEmpty()) {
+                projectWrapper.eq("id", -1);
+            } else {
+                projectWrapper.in("company_id", companies);
+            }
+        }
+        projectWrapper.groupBy("company_id");
+        for (Map<String, Object> agg : projectAccountMapper.selectMaps(projectWrapper)) {
+            Long companyId = toLong(agg.get("companyId"));
+            if (companyId == null) {
+                companyId = toLong(agg.get("company_id"));
+            }
+            if (companyId == null) {
+                continue;
+            }
+            Map<String, Object> row = companyAssetRow(byCompany, companyId, null);
+            row.put("projectBalance", new BigDecimal(String.valueOf(agg.getOrDefault("total", "0"))));
+        }
+
+        // 补全可见公司行（个人钱包不按公司拆，仅顶部 summary.walletTotal 一个总数）
+        for (Long companyId : visibleCompanies()) {
+            companyAssetRow(byCompany, companyId, null);
+        }
+
+        // 补公司名 + 合计字段（小计 = 公司余额 + 项目余额）
+        Set<Long> needNames = byCompany.values().stream()
+                .filter(r -> !StringUtils.hasText((String) r.get("companyName")))
+                .map(r -> (Long) r.get("companyId"))
+                .collect(Collectors.toSet());
+        if (!needNames.isEmpty()) {
+            Map<Long, String> nameMap = deptService.listByIds(needNames).stream()
+                    .collect(Collectors.toMap(SysDept::getId, SysDept::getName, (a, b) -> a));
+            for (Map<String, Object> row : byCompany.values()) {
+                if (!StringUtils.hasText((String) row.get("companyName"))) {
+                    row.put("companyName", nameMap.get(row.get("companyId")));
+                }
+            }
+        }
+        for (Map<String, Object> row : byCompany.values()) {
+            BigDecimal poolBal = toBigDecimal(row.get("poolBalance"));
+            BigDecimal projectBal = toBigDecimal(row.get("projectBalance"));
+            BigDecimal subtotal = poolBal.add(projectBal);
+            row.put("balance", poolBal); // 公司余额明细兼容
+            row.put("walletBalance", BigDecimal.ZERO); // 个人钱包不按公司拆
+            row.put("companyProjectTotal", subtotal);
+            row.put("assetsTotal", subtotal);
+        }
+        return byCompany.values().stream()
+                .filter(r -> asInt(r.get("poolCount")) > 0
+                        || toBigDecimal(r.get("projectBalance")).compareTo(BigDecimal.ZERO) != 0
+                        || toBigDecimal(r.get("assetsTotal")).compareTo(BigDecimal.ZERO) != 0)
+                .sorted((a, b) -> toBigDecimal(b.get("assetsTotal")).compareTo(toBigDecimal(a.get("assetsTotal"))))
+                .collect(Collectors.toList());
+    }
+
+    private static int asInt(Object value) {
+        if (value instanceof Number n) {
+            return n.intValue();
+        }
+        if (value == null) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value));
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    private static BigDecimal toBigDecimal(Object value) {
+        if (value instanceof BigDecimal bd) {
+            return bd;
+        }
+        if (value instanceof Number n) {
+            return BigDecimal.valueOf(n.doubleValue());
+        }
+        if (value == null) {
+            return BigDecimal.ZERO;
+        }
+        try {
+            return new BigDecimal(String.valueOf(value));
+        } catch (Exception ignored) {
+            return BigDecimal.ZERO;
+        }
+    }
+
+    private Map<String, Object> companyAssetRow(Map<Long, Map<String, Object>> byCompany,
+                                                Long companyId, String companyName) {
+        Map<String, Object> row = byCompany.computeIfAbsent(companyId, id -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("companyId", id);
+            m.put("companyName", companyName);
+            m.put("poolBalance", BigDecimal.ZERO);
+            m.put("projectBalance", BigDecimal.ZERO);
+            m.put("walletBalance", BigDecimal.ZERO);
+            m.put("poolCount", 0);
+            m.put("balance", BigDecimal.ZERO);
+            m.put("assetsTotal", BigDecimal.ZERO);
+            return m;
+        });
+        if (!StringUtils.hasText((String) row.get("companyName")) && StringUtils.hasText(companyName)) {
+            row.put("companyName", companyName);
+        }
+        return row;
+    }
+
+    private Long toLong(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number n) {
+            return n.longValue();
+        }
+        try {
+            return Long.parseLong(String.valueOf(value));
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private Long transfer(LedgerCreateRequest request) {

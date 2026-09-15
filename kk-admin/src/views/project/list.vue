@@ -63,8 +63,8 @@ const statusMap: Record<number, string> = { 0: '筹备', 1: '进行中', 2: '已
 const scaleMap: Record<string, string> = { NORMAL: '常规', KEY: '重点', MAJOR: '重大' }
 const scaleOptions = [
   { value: 'NORMAL', label: '常规', tip: '创建免审' },
-  { value: 'KEY', label: '重点', tip: '创建需审批' },
-  { value: 'MAJOR', label: '重大', tip: '创建需审批' },
+  { value: 'KEY', label: '重点', tip: '创建需审批；唯一审批人本人可免审' },
+  { value: 'MAJOR', label: '重大', tip: '创建需审批；唯一审批人本人可免审' },
 ]
 const taskStatusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭' }
 const taskStatusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'> = {
@@ -402,6 +402,8 @@ async function save() {
       const res = await bizApi.saveProject(payload, false)
       if (res?.type === 'PROJECT_CREATE' || res?.bizNo) {
         ElMessage.success(approvalFlowTip(res))
+      } else if ((form.scale === 'KEY' || form.scale === 'MAJOR') && res?.id) {
+        ElMessage.success('你是唯一审批人，已直接创建成功')
       } else {
         ElMessage.success('创建成功')
       }
@@ -421,17 +423,25 @@ async function remove(id: number) {
   const project = list.value.find((p) => p.id === id) || detail.value
   const companyId = project?.companyId
   let confirmText = '删除项目需提交审批，确认提交？'
+  let soleSelf = false
   if (companyId) {
     try {
       const desc = await workflowApi.flowDescribe('PROJECT_DELETE', companyId)
-      confirmText = `${desc.tip}，确认提交删除审批？`
+      soleSelf = !!desc?.soleApproverSelf
+      confirmText = soleSelf
+        ? `${desc.tip}，确认删除？`
+        : `${desc.tip}，确认提交删除审批？`
     } catch {
       /* 配置缺失时仍允许点确认，提交接口会给出明确错误 */
     }
   }
   await ElMessageBox.confirm(confirmText)
-  const approval = await bizApi.deleteProject(id)
-  ElMessage.success(approvalFlowTip(approval, '已提交删除审批'))
+  const res = await bizApi.deleteProject(id)
+  if (res?.type === 'PROJECT_DELETE' || res?.bizNo) {
+    ElMessage.success(approvalFlowTip(res, '已提交删除审批'))
+  } else {
+    ElMessage.success(soleSelf ? '你是唯一审批人，已直接删除成功' : '删除成功')
+  }
   if (activeProjectId.value === id) backToList()
   await load()
 }
@@ -998,7 +1008,8 @@ onMounted(async () => {
                 :label="`${opt.label}（${opt.tip}）`"
               />
             </el-select>
-            <div class="form-tip">常规创建免审；改为重点/重大（含互切）需审批。重大项目内再建小项目。</div>
+            <div v-if="!isEdit" class="form-tip">常规创建免审；重点/重大需审批，若你是该公司唯一审批人则直接创建。重大项目内再建小项目。</div>
+            <div v-else class="form-tip">规模不变或降到常规直存；改为重点/重大（含互切）需审批。</div>
           </template>
         </el-form-item>
         <el-form-item label="说明"><el-input v-model="form.description" type="textarea" :rows="3" /></el-form-item>

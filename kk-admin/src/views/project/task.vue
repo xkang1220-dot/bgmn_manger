@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
@@ -14,12 +14,16 @@ function currentUserId() {
   return userStore.user?.id as number | undefined
 }
 
+/** 默认：待办 + 进行中 */
+const OPEN_STATUSES = [0, 1]
+
 const query = reactive({
   page: 1,
   pageSize: 10,
   title: '',
   projectId: undefined as number | undefined,
   status: undefined as number | undefined,
+  statuses: [...OPEN_STATUSES] as number[] | undefined,
   priority: undefined as number | undefined,
   participantId: currentUserId(),
   overdue: undefined as boolean | undefined,
@@ -48,6 +52,46 @@ const priorityType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger
   3: 'info',
 }
 
+const statusFilterOptions = [
+  { value: 'open', label: '待办与进行中' },
+  { value: '0', label: '待办' },
+  { value: '1', label: '进行中' },
+  { value: '2', label: '已完成' },
+  { value: '3', label: '已关闭' },
+]
+
+const statusFilterKey = computed({
+  get: (): string | undefined => {
+    if (query.overdue) return undefined
+    if (query.statuses?.length === 2 && query.statuses.includes(0) && query.statuses.includes(1) && query.status == null) {
+      return 'open'
+    }
+    if (query.status !== undefined && query.status !== null) return String(query.status)
+    return undefined
+  },
+  set: (v: string | undefined | null) => {
+    query.overdue = undefined
+    if (v === 'open') {
+      query.status = undefined
+      query.statuses = [...OPEN_STATUSES]
+    } else if (v === '' || v == null) {
+      query.status = undefined
+      query.statuses = undefined
+    } else {
+      const n = Number(v)
+      if (Number.isNaN(n)) {
+        query.status = undefined
+        query.statuses = [...OPEN_STATUSES]
+      } else {
+        query.status = n
+        query.statuses = undefined
+      }
+    }
+    query.page = 1
+    load()
+  },
+})
+
 const statCards = [
   { key: 'todo', label: '待办', icon: 'Clock', tone: 'slate' },
   { key: 'doing', label: '进行中', icon: 'Loading', tone: 'amber' },
@@ -61,12 +105,17 @@ function isStatActive(key: string) {
   if (key === 'todo') return query.status === 0 && !query.overdue
   if (key === 'doing') return query.status === 1 && !query.overdue
   if (key === 'done') return query.status === 2 && !query.overdue
+  if (key === 'total') return !query.overdue && query.status == null && !query.statuses?.length
   return false
 }
 
 function onStatClick(key: string) {
   if (key === 'total') {
-    resetQuery()
+    query.status = undefined
+    query.statuses = undefined
+    query.overdue = undefined
+    query.page = 1
+    load()
     return
   }
   if (key === 'overdue') {
@@ -78,18 +127,38 @@ function onStatClick(key: string) {
 
 async function loadSummary() {
   // 统计随筛选变：项目/标题/优先级/参与人；状态与逾期由卡片本身表达，不传入
-  summary.value = await bizApi.taskSummary({
-    projectId: query.projectId,
-    priority: query.priority,
-    participantId: query.participantId,
-    title: query.title || undefined,
-  })
+  const params: {
+    projectId?: number
+    priority?: number
+    participantId?: number
+    title?: string
+  } = {}
+  if (query.projectId != null) params.projectId = query.projectId
+  if (query.priority != null) params.priority = query.priority
+  if (query.participantId != null) params.participantId = query.participantId
+  if (query.title.trim()) params.title = query.title.trim()
+  summary.value = await bizApi.taskSummary(params)
 }
 
 async function load() {
   listLoading.value = true
   try {
-    const res = await bizApi.taskPage(query)
+    const params: Record<string, unknown> = {
+      page: query.page,
+      pageSize: query.pageSize,
+    }
+    if (query.title.trim()) params.title = query.title.trim()
+    if (query.projectId != null) params.projectId = query.projectId
+    if (query.priority != null) params.priority = query.priority
+    if (query.participantId != null) params.participantId = query.participantId
+    if (query.overdue) {
+      params.overdue = true
+    } else if (query.statuses?.length) {
+      params.statuses = query.statuses.join(',')
+    } else if (query.status !== undefined && query.status !== null) {
+      params.status = query.status
+    }
+    const res = await bizApi.taskPage(params)
     list.value = res.list
     total.value = res.total
     await loadSummary()
@@ -109,6 +178,7 @@ function resetQuery() {
     title: '',
     projectId: undefined,
     status: undefined,
+    statuses: [...OPEN_STATUSES],
     priority: undefined,
     participantId: currentUserId(),
     overdue: undefined,
@@ -118,6 +188,7 @@ function resetQuery() {
 
 function filterByStatus(status?: number) {
   query.status = status
+  query.statuses = undefined
   query.overdue = undefined
   query.page = 1
   load()
@@ -125,6 +196,7 @@ function filterByStatus(status?: number) {
 
 function filterOverdue() {
   query.status = undefined
+  query.statuses = undefined
   query.overdue = true
   query.page = 1
   load()
@@ -205,6 +277,7 @@ onMounted(async () => {
           v-model="query.projectId"
           :projects="projects"
           mode="filter"
+          exclude-completed
           top-placeholder="全部"
           child-placeholder="全部小项目"
           class="filter-select--wide"
@@ -213,8 +286,8 @@ onMounted(async () => {
         />
       </el-form-item>
       <el-form-item label="状态">
-        <el-select v-model="query.status" clearable placeholder="全部" class="filter-select">
-          <el-option v-for="(label, value) in statusMap" :key="value" :label="label" :value="Number(value)" />
+        <el-select v-model="statusFilterKey" clearable placeholder="全部" class="filter-select--wide">
+          <el-option v-for="item in statusFilterOptions" :key="item.value" :label="item.label" :value="item.value" />
         </el-select>
       </el-form-item>
       <el-form-item label="优先级">

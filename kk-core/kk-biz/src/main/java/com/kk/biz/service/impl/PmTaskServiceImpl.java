@@ -66,17 +66,24 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     );
 
     @Override
-    public Page<PmTask> pageTasks(long page, long pageSize, Long projectId, Integer status, Integer priority,
-                                  Long participantId, String title, Boolean overdue) {
+    public Page<PmTask> pageTasks(long page, long pageSize, Long projectId, Integer status, String statuses,
+                                  Integer priority, Long participantId, String title, Boolean overdue) {
         LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<PmTask>()
-                .eq(status != null, PmTask::getStatus, status)
                 .eq(priority != null, PmTask::getPriority, priority)
                 .like(StringUtils.hasText(title), PmTask::getTitle, title);
-        applyProjectIdFilter(wrapper, projectId);
-        applyParticipantFilter(wrapper, participantId);
+        // 逾期本身限定待办/进行中，避免再与 status/statuses 叠加成空结果
         if (Boolean.TRUE.equals(overdue)) {
             wrapper.lt(PmTask::getDueDate, LocalDate.now()).in(PmTask::getStatus, 0, 1);
+        } else {
+            List<Integer> statusList = parseStatuses(statuses);
+            if (!statusList.isEmpty()) {
+                wrapper.in(PmTask::getStatus, statusList);
+            } else if (status != null) {
+                wrapper.eq(PmTask::getStatus, status);
+            }
         }
+        applyProjectIdFilter(wrapper, projectId);
+        applyParticipantFilter(wrapper, participantId);
         applyVisibleScope(wrapper);
         Page<PmTask> result = page(new Page<>(page, pageSize), wrapper
                 .orderByAsc(PmTask::getPriority)
@@ -84,6 +91,25 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 .orderByDesc(PmTask::getId));
         fillExtras(result.getRecords());
         return result;
+    }
+
+    private List<Integer> parseStatuses(String statuses) {
+        if (!StringUtils.hasText(statuses)) {
+            return List.of();
+        }
+        List<Integer> list = new ArrayList<>();
+        for (String part : statuses.split(",")) {
+            String s = part.trim();
+            if (s.isEmpty()) {
+                continue;
+            }
+            try {
+                list.add(Integer.parseInt(s));
+            } catch (NumberFormatException ignored) {
+                // skip invalid token
+            }
+        }
+        return list;
     }
 
     private void applyParticipantFilter(LambdaQueryWrapper<PmTask> wrapper, Long participantId) {

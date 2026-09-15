@@ -24,6 +24,12 @@ public interface WfApprovalFlowService extends IService<WfApprovalFlow> {
 
     List<Long> resolveAssigneeIds(WfApprovalFlow flow, Long companyId);
 
+    /**
+     * 该公司该类型解析后是否恰为一人，且等于 userId（用于「唯一审批人免审」）。
+     * 无人或多人时返回 false。
+     */
+    boolean isSoleApprover(String type, Long companyId, Long userId);
+
     /** 按公司+类型描述当前启用配置（提交前提示用） */
     Map<String, Object> describeEnabled(String type, Long companyId);
 }

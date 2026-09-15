@@ -63,8 +63,12 @@ public interface PmProjectService extends IService<PmProject> {
     void saveShareConfig(Long projectId, Long poolId, java.math.BigDecimal budget,
                          java.util.List<com.kk.biz.entity.PmProjectMember> members);
 
+    /** 逻辑删除项目，并同步逻辑删除其下任务 */
     void deleteProject(Long id);
 
     /** 删除前校验：重大外壳下不可有未删小项目 */
     void assertNoUndeletedChildren(Long projectId);
+
+    /** 校验用户是否可见该项目（负责人/参与/数据范围） */
+    void assertCanView(Long projectId, Long userId);
 }

@@ -50,6 +50,7 @@ export const workflowApi = {
       passModeLabel: string
       timeoutLabel: string
       assigneeCount: number
+      soleApproverSelf?: boolean
     }>({ url: '/workflow/flow/describe', method: 'get', params: { type, companyId } })
   },
   saveFlow(data: any) {

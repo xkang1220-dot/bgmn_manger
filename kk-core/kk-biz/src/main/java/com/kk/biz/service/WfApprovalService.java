@@ -45,4 +45,10 @@ public interface WfApprovalService {
 
     /** 扫描超时自动通过 */
     int autoPassTimeout();
+
+    /**
+     * 项目删除后：关闭该项目下全部待审批单（状态改为 WITHDRAWN，待办取消）。
+     * @return 关闭条数
+     */
+    int cancelPendingByProject(Long projectId, String reason);
 }

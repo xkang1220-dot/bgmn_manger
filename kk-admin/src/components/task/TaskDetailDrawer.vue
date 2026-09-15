@@ -83,7 +83,7 @@ function emptyForm() {
   return {
     id: undefined,
     title: '',
-    projectId: props.defaultProjectId || undefined,
+    projectId: props.defaultProjectId != null ? Number(props.defaultProjectId) : undefined,
     participantIds: selfId != null ? [selfId] : ([] as number[]),
     status: 0,
     priority: 2,
@@ -151,7 +151,7 @@ async function loadDetail(id: number) {
   syncingDetail.value = true
   try {
     if (!projects.value.length) {
-      projects.value = await bizApi.projectList()
+      projects.value = (await bizApi.projectList()) || []
     }
     const [full, commentList, flowList] = await Promise.all([
       bizApi.taskDetail(id),
@@ -212,6 +212,7 @@ async function loadProjectCandidates(projectId?: number) {
     return
   }
   const d = await bizApi.projectDetail(projectId)
+  upsertProjectOption(d)
   const map = new Map<number, any>()
   if (d.ownerId != null) {
     map.set(Number(d.ownerId), {
@@ -250,10 +251,42 @@ async function loadProjectCandidates(projectId?: number) {
   }
 }
 
-async function ensureOptions() {
-  if (!projects.value.length) {
-    projects.value = await bizApi.projectList()
+/** 保证级联下拉能回显：把当前项目（及重大父项）并入 options，避免列表缓存缺项显示空白 */
+function upsertProjectOption(d: any) {
+  if (!d?.id) return
+  const patch = (row: any) => {
+    const id = Number(row.id)
+    const next = {
+      id,
+      name: row.name,
+      scale: row.scale,
+      status: row.status,
+      parentId: row.parentId ?? null,
+      companyId: row.companyId,
+    }
+    const idx = projects.value.findIndex((p) => Number(p.id) === id)
+    if (idx >= 0) {
+      projects.value[idx] = { ...projects.value[idx], ...next }
+    } else {
+      projects.value = [...projects.value, next]
+    }
   }
+  patch(d)
+  if (d.parentId != null && !projects.value.some((p) => Number(p.id) === Number(d.parentId))) {
+    patch({
+      id: d.parentId,
+      name: d.parentName || `项目${d.parentId}`,
+      scale: 'MAJOR',
+      status: 1,
+      parentId: null,
+      companyId: d.companyId,
+    })
+  }
+}
+
+async function ensureOptions() {
+  // 每次打开都刷新，避免新建项目后抽屉仍用旧列表导致默认项目空白
+  projects.value = (await bizApi.projectList()) || []
   await loadProjectCandidates(form.projectId)
 }
 
@@ -684,8 +717,8 @@ function canDeleteComment(c: any) {
             <ProjectCascadeSelect
               v-model="form.projectId"
               :projects="projects"
-              mode="pick"
-              top-placeholder="重点或重大"
+              mode="task"
+              top-placeholder="进行中的项目"
               child-placeholder="请选择小项目"
               top-width="100%"
               child-width="100%"

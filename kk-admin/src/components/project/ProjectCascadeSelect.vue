@@ -6,8 +6,14 @@ const props = withDefaults(
     modelValue?: number
     projects?: any[]
     companyId?: number
-    /** filter：可选重大后不选小项目；pick：重大必须再选小项目，且不含常规/重大外壳作最终值 */
-    mode?: 'filter' | 'pick'
+    /**
+     * filter：筛选用，可选重大外壳本身
+     * pick：动账/配薪，重点+重大（必选小项目），不含常规
+     * task：建任务，常规+重点+重大（重大必选小项目），默认仅进行中
+     */
+    mode?: 'filter' | 'pick' | 'task'
+    /** 隐藏已完成/已关闭项目（status=2/3）；已选中的仍保留便于回显 */
+    excludeCompleted?: boolean
     clearable?: boolean
     disabled?: boolean
     topWidth?: string
@@ -18,6 +24,7 @@ const props = withDefaults(
   {
     projects: () => [],
     mode: 'filter',
+    excludeCompleted: false,
     clearable: true,
     disabled: false,
     topWidth: '180px',
@@ -49,6 +56,14 @@ const companyProjects = computed(() => {
   return list.filter((p) => Number(p.companyId) === Number(props.companyId))
 })
 
+function selectedKeepTopId() {
+  const selectedId = props.modelValue == null ? null : Number(props.modelValue)
+  if (selectedId == null) return null
+  const selected = companyProjects.value.find((p) => Number(p.id) === selectedId)
+  if (!selected) return null
+  return Number(isTop(selected) ? selected.id : selected.parentId)
+}
+
 const topOptions = computed(() => {
   const tops = companyProjects.value.filter(isTop)
   if (props.mode === 'pick') {
@@ -56,6 +71,23 @@ const topOptions = computed(() => {
     return tops.filter((p) => {
       const scale = String(p.scale || '').toUpperCase()
       return scale === 'KEY' || scale === 'MAJOR'
+    })
+  }
+  if (props.mode === 'task') {
+    // 建任务：与项目管理「进行中」一致，含常规；已选中的项目始终保留便于回显
+    const keepTopId = selectedKeepTopId()
+    return tops.filter((p) => {
+      if (keepTopId != null && Number(p.id) === keepTopId) return true
+      return Number(p.status) === 1
+    })
+  }
+  // filter：默认全量；excludeCompleted 时隐藏已完成/已关闭，已选中的始终保留
+  if (props.excludeCompleted) {
+    const keepTopId = selectedKeepTopId()
+    return tops.filter((p) => {
+      if (keepTopId != null && Number(p.id) === keepTopId) return true
+      const status = Number(p.status)
+      return status !== 2 && status !== 3
     })
   }
   return tops
@@ -67,7 +99,23 @@ const selectedTop = computed(() =>
 
 const childOptions = computed(() => {
   if (!topId.value || !isMajorShell(selectedTop.value)) return []
-  return companyProjects.value.filter((p) => Number(p.parentId) === Number(topId.value))
+  const children = companyProjects.value.filter((p) => Number(p.parentId) === Number(topId.value))
+  const selectedId = props.modelValue == null ? null : Number(props.modelValue)
+  if (props.mode === 'task') {
+    // 重大已是进行中时，小项目仍可选（筹备/进行中）；已关闭排除
+    return children.filter((p) => {
+      if (selectedId != null && Number(p.id) === selectedId) return true
+      return Number(p.status) !== 3
+    })
+  }
+  if (props.excludeCompleted) {
+    return children.filter((p) => {
+      if (selectedId != null && Number(p.id) === selectedId) return true
+      const status = Number(p.status)
+      return status !== 2 && status !== 3
+    })
+  }
+  return children
 })
 
 const showChild = computed(() => !!topId.value && isMajorShell(selectedTop.value))
@@ -139,7 +187,7 @@ function onTopChange(v: number | undefined) {
     return
   }
   if (isMajorShell(top)) {
-    // filter：重大本身可作条件；pick：等选小项目
+    // filter：重大本身可作条件；pick/task：等选小项目
     emitValue(props.mode === 'filter' ? v : undefined)
     return
   }
@@ -151,7 +199,7 @@ function onChildChange(v: number | undefined) {
     emitValue(v)
     return
   }
-  // 清空小项目：filter 回退到重大；pick 清空最终值
+  // 清空小项目：filter 回退到重大；pick/task 清空最终值
   if (props.mode === 'filter' && topId.value != null && isMajorShell(selectedTop.value)) {
     emitValue(topId.value)
   } else {
@@ -175,7 +223,7 @@ function onChildChange(v: number | undefined) {
         v-for="p in topOptions"
         :key="p.id"
         :label="scaleTag(p) ? `${p.name}（${scaleTag(p)}）` : p.name"
-        :value="p.id"
+        :value="Number(p.id)"
       />
     </el-select>
     <el-select
@@ -184,11 +232,11 @@ function onChildChange(v: number | undefined) {
       :clearable="clearable"
       :disabled="disabled"
       filterable
-      :placeholder="mode === 'pick' ? '请选择小项目' : childPlaceholder"
+      :placeholder="mode === 'pick' || mode === 'task' ? '请选择小项目' : childPlaceholder"
       :style="{ width: childWidth }"
       @change="onChildChange"
     >
-      <el-option v-for="p in childOptions" :key="p.id" :label="p.name" :value="p.id" />
+      <el-option v-for="p in childOptions" :key="p.id" :label="p.name" :value="Number(p.id)" />
     </el-select>
   </div>
 </template>

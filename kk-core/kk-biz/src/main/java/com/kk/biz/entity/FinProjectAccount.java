@@ -65,4 +65,16 @@ public class FinProjectAccount extends BaseEntity {
     /** 未删小项目数量 */
     @TableField(exist = false)
     private Integer childCount;
+
+    /** 可转入用的公司资金池 ID（项目 pool 或公司默认池） */
+    @TableField(exist = false)
+    private Long companyPoolId;
+
+    /** 可转入用的公司资金池名称 */
+    @TableField(exist = false)
+    private String companyPoolName;
+
+    /** 可转入用的公司资金池余额（与「从公司转入」上限一致） */
+    @TableField(exist = false)
+    private BigDecimal companyPoolBalance;
 }

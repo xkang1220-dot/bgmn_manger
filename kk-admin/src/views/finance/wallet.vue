@@ -42,6 +42,7 @@ function bizLabel(v: string) {
     RESERVE: '预留',
     SALARY: '工资',
     REIMBURSE: '报销',
+    PAYOUT: '项目余额',
     ROLLBACK: '回退',
   } as any)[v] || v
 }

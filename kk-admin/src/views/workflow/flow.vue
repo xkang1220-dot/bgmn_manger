@@ -14,6 +14,7 @@ const BUILTIN_TYPES = [
   { type: 'REIMBURSE_PERSONAL', name: '个人报销' },
   { type: 'WALLET_WITHDRAW', name: '钱包提现' },
   { type: 'REIMBURSE_PROJECT', name: '项目报销' },
+  { type: 'PROJECT_BALANCE_APPLY', name: '项目余额申请' },
   { type: 'SALARY_APPLY', name: '工资申请' },
   { type: 'SALARY_MONTHLY', name: '月度工资' },
   { type: 'PROJECT_ADVANCE', name: '项目预支' },
@@ -72,9 +73,16 @@ async function loadCompanies() {
 async function load() {
   if (!filterCompanyId.value) {
     list.value = []
+    users.value = []
     return
   }
-  list.value = await workflowApi.flowList(filterCompanyId.value)
+  // 列表要解析指定审批人姓名，需与配置同公司加载用户
+  const [flows, userRows] = await Promise.all([
+    workflowApi.flowList(filterCompanyId.value),
+    sysApi.userList({ companyId: filterCompanyId.value }),
+  ])
+  list.value = flows
+  users.value = userRows || []
 }
 
 async function loadUsers() {
@@ -238,7 +246,7 @@ function roleNames(codes?: string[]) {
 function userNames(ids?: number[]) {
   if (!ids?.length) return '—'
   return ids.map((id) => {
-    const u = users.value.find((x) => x.id === id)
+    const u = users.value.find((x) => Number(x.id) === Number(id))
     return u ? (u.nickname || u.username) : `#${id}`
   }).join('、')
 }

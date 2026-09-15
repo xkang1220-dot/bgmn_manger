@@ -22,6 +22,12 @@ public interface DataScopeService {
      */
     Set<Long> visibleUserIdsInCompany(Long userId, Long companyId);
 
+    /**
+     * 该公司组织内成员用户 ID（仅按部门归属，不含管理员强插、不含数据范围扩张）。
+     * 用于财务按公司分摊个人钱包等场景，避免一人被重复计入多家公司。
+     */
+    Set<Long> memberUserIdsInCompany(Long companyId);
+
     boolean hasRoleInCompany(Long userId, String roleCode, Long companyId);
 
     List<Long> listUserIdsByRoleCodeInCompany(String roleCode, Long companyId);

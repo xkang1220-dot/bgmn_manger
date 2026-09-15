@@ -271,6 +271,16 @@ public class WfApprovalFlowServiceImpl extends ServiceImpl<WfApprovalFlowMapper,
     }
 
     @Override
+    public boolean isSoleApprover(String type, Long companyId, Long userId) {
+        if (userId == null || companyId == null || !StringUtils.hasText(type)) {
+            return false;
+        }
+        WfApprovalFlow flow = requireEnabled(type, companyId);
+        List<Long> assignees = resolveAssigneeIds(flow, companyId);
+        return assignees.size() == 1 && Objects.equals(assignees.get(0), userId);
+    }
+
+    @Override
     public Map<String, Object> describeEnabled(String type, Long companyId) {
         if (companyId == null) {
             throw new BusinessException("请选择所属公司");
@@ -299,11 +309,17 @@ public class WfApprovalFlowServiceImpl extends ServiceImpl<WfApprovalFlowMapper,
                     .distinct()
                     .collect(Collectors.toList());
         }
-        String tip = "将按审批配置提交：" + passModeLabel + "，" + timeoutLabel;
-        if (!assigneeNames.isEmpty()) {
-            tip += "；审批人：" + String.join("、", assigneeNames);
+        boolean soleApproverSelf = assigneeIds.size() == 1 && Objects.equals(assigneeIds.get(0), loginId);
+        String tip;
+        if (soleApproverSelf) {
+            tip = "你是该公司唯一审批人，将直接生效（免审）";
         } else {
-            tip += "（共 " + assigneeIds.size() + " 人）";
+            tip = "将按审批配置提交：" + passModeLabel + "，" + timeoutLabel;
+            if (!assigneeNames.isEmpty()) {
+                tip += "；审批人：" + String.join("、", assigneeNames);
+            } else {
+                tip += "（共 " + assigneeIds.size() + " 人）";
+            }
         }
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("type", flow.getType());
@@ -314,6 +330,7 @@ public class WfApprovalFlowServiceImpl extends ServiceImpl<WfApprovalFlowMapper,
         map.put("timeoutLabel", timeoutLabel);
         map.put("assigneeCount", assigneeIds.size());
         map.put("assigneeNames", assigneeNames);
+        map.put("soleApproverSelf", soleApproverSelf);
         map.put("tip", tip);
         return map;
     }

@@ -30,9 +30,10 @@ public class TaskController {
     public Result<PageResult<PmTask>> page(
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long pageSize,
-            Long projectId, Integer status, Integer priority, Long participantId, String title, Boolean overdue) {
+            Long projectId, Integer status, String statuses,
+            Integer priority, Long participantId, String title, Boolean overdue) {
         return Result.ok(PageResult.of(
-                taskService.pageTasks(page, pageSize, projectId, status, priority, participantId, title, overdue)));
+                taskService.pageTasks(page, pageSize, projectId, status, statuses, priority, participantId, title, overdue)));
     }
 
     @GetMapping("/board")

@@ -26,6 +26,11 @@ public interface FinProjectAccountService extends IService<FinProjectAccount> {
 
     Page<FinLedger> pageProjectLedgers(long page, long pageSize, Long projectId, String bizType);
 
+    /**
+     * 个人可申请余额的项目：可见范围内、重点/重大可动账项目（不含重大外壳），附带结余。
+     */
+    List<FinProjectAccount> listBalanceApplyCandidates();
+
     /** 重大外壳禁止动账 */
     void assertMutableProject(Long projectId);
 

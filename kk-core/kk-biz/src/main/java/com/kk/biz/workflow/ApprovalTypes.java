@@ -16,6 +16,8 @@ public final class ApprovalTypes {
     /** 个人钱包提现（含税：扣全额，税进公司资金池） */
     public static final String WALLET_WITHDRAW = "WALLET_WITHDRAW";
     public static final String REIMBURSE_PROJECT = "REIMBURSE_PROJECT";
+    /** 从项目结余申请余额到个人钱包（无需发票；审批通过即入账） */
+    public static final String PROJECT_BALANCE_APPLY = "PROJECT_BALANCE_APPLY";
     public static final String PROJECT_ADVANCE = "PROJECT_ADVANCE";
     public static final String SHARE_CONFIG = "SHARE_CONFIG";
     public static final String PROJECT_SETTLE = "PROJECT_SETTLE";
@@ -44,6 +46,7 @@ public final class ApprovalTypes {
             case REIMBURSE_PERSONAL -> "个人报销";
             case WALLET_WITHDRAW -> "钱包提现";
             case REIMBURSE_PROJECT -> "项目报销";
+            case PROJECT_BALANCE_APPLY -> "项目余额申请";
             case PROJECT_ADVANCE -> "项目预支";
             case SHARE_CONFIG -> "分成配置";
             case PROJECT_SETTLE -> "项目分钱";
@@ -78,6 +81,7 @@ public final class ApprovalTypes {
         return PROJECT_ADVANCE.equals(type)
                 || PROJECT_SETTLE.equals(type)
                 || REIMBURSE_PROJECT.equals(type)
+                || PROJECT_BALANCE_APPLY.equals(type)
                 || REIMBURSE_PERSONAL.equals(type)
                 || WALLET_WITHDRAW.equals(type)
                 || SALARY_APPLY.equals(type)

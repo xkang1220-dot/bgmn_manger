@@ -5,7 +5,8 @@ import com.kk.common.exception.BusinessException;
 import org.springframework.util.StringUtils;
 
 /**
- * 项目规模：常规免审创建；重点/重大创建与改到该档需审批。
+ * 项目规模：常规免审创建；重点/重大创建与改到该档需审批
+ * （创建时若该公司 PROJECT_CREATE 唯一审批人为本人则可免审）。
  * 重大外壳（parentId 空 + MAJOR）只汇总，不可动账/配薪；小项目固定 KEY。
  */
 public final class ProjectScales {

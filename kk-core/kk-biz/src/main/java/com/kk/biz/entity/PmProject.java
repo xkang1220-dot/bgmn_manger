@@ -85,6 +85,10 @@ public class PmProject extends BaseEntity {
     @TableField(exist = false)
     private String poolName;
 
+    /** 关联资金池当前余额（资金配置/预支用） */
+    @TableField(exist = false)
+    private BigDecimal poolBalance;
+
     @TableField(exist = false)
     private List<PmProjectMember> members;
 

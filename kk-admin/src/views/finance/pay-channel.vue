@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
+import { sysApi } from '@/api/system'
 import { useUserStore } from '@/stores/user'
 
 const userStore = useUserStore()
@@ -9,6 +10,10 @@ const canEdit = computed(() => userStore.hasPermission('finance:channel:edit'))
 
 const list = ref<any[]>([])
 const pools = ref<any[]>([])
+const companies = ref<any[]>([])
+const filter = reactive({
+  companyId: undefined as number | undefined,
+})
 const dialog = ref(false)
 const isEdit = ref(false)
 const saving = ref(false)
@@ -35,8 +40,36 @@ const TYPE_OPTS = [
 
 const TYPE_MAP = Object.fromEntries(TYPE_OPTS.map((o) => [o.value, o]))
 
-const totalBalance = computed(() => list.value.reduce((s, c) => s + Number(c.balance || 0), 0))
-const activeCount = computed(() => list.value.filter((c) => c.status !== 0).length)
+const companyNameById = computed(() => {
+  const map = new Map<number, string>()
+  for (const c of companies.value) {
+    if (c?.id != null) map.set(Number(c.id), c.name)
+  }
+  for (const p of pools.value) {
+    if (p?.companyId != null && p.companyName && !map.has(Number(p.companyId))) {
+      map.set(Number(p.companyId), p.companyName)
+    }
+  }
+  return map
+})
+
+const filteredList = computed(() => {
+  if (filter.companyId == null) return list.value
+  const cid = Number(filter.companyId)
+  return list.value.filter((c) => {
+    if (c.companyId != null) return Number(c.companyId) === cid
+    const pool = pools.value.find((p) => Number(p.id) === Number(c.poolId))
+    return pool != null && Number(pool.companyId) === cid
+  })
+})
+
+const formPools = computed(() => {
+  if (filter.companyId == null) return pools.value
+  return pools.value.filter((p) => Number(p.companyId) === Number(filter.companyId))
+})
+
+const totalBalance = computed(() => filteredList.value.reduce((s, c) => s + Number(c.balance || 0), 0))
+const activeCount = computed(() => filteredList.value.filter((c) => c.status !== 0).length)
 
 function typeMeta(c: any) {
   return TYPE_MAP[c.channelType] || TYPE_OPTS[TYPE_OPTS.length - 1]
@@ -59,9 +92,37 @@ function accountLine(c: any) {
   return '未填账号'
 }
 
+function companyLabel(c: any) {
+  if (c.companyName) return c.companyName
+  if (c.companyId != null) return companyNameById.value.get(Number(c.companyId)) || `公司#${c.companyId}`
+  const pool = pools.value.find((p) => Number(p.id) === Number(c.poolId))
+  if (pool?.companyName) return pool.companyName
+  if (pool?.companyId != null) return companyNameById.value.get(Number(pool.companyId)) || `公司#${pool.companyId}`
+  return '—'
+}
+
+async function loadCompanies() {
+  try {
+    companies.value = await sysApi.myCompanies()
+  } catch {
+    companies.value = []
+  }
+  if (companies.value.length === 1 && filter.companyId == null) {
+    filter.companyId = companies.value[0].id
+  }
+}
+
 async function load() {
-  list.value = await bizApi.payChannelList({ all: true })
-  pools.value = await bizApi.poolList()
+  const [channels, poolList] = await Promise.all([
+    bizApi.payChannelList({ all: true }),
+    bizApi.poolList(),
+  ])
+  list.value = channels
+  pools.value = poolList
+}
+
+function resetFilter() {
+  filter.companyId = companies.value.length === 1 ? companies.value[0].id : undefined
 }
 
 function open(row?: any) {
@@ -70,9 +131,16 @@ function open(row?: any) {
     return
   }
   isEdit.value = !!row
+  if (!row && filter.companyId != null && !formPools.value.length) {
+    ElMessage.warning('该公司暂无资金池，请先配置资金池或切换公司')
+    return
+  }
+  const poolOptions = isEdit.value || filter.companyId == null
+    ? pools.value
+    : formPools.value
   Object.assign(form, row || {
     id: undefined,
-    poolId: pools.value.find((p) => p.isDefault === 1)?.id ?? pools.value[0]?.id,
+    poolId: poolOptions.find((p) => p.isDefault === 1)?.id ?? poolOptions[0]?.id,
     channelType: 'ALIPAY',
     name: '',
     accountNo: '',
@@ -106,7 +174,10 @@ async function save() {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  await loadCompanies()
+  await load()
+})
 </script>
 
 <template>
@@ -120,6 +191,19 @@ onMounted(load)
       </div>
     </div>
 
+    <div class="page-card filter-card">
+      <el-form :inline="true" class="filter-form" @submit.prevent>
+        <el-form-item label="公司">
+          <el-select v-model="filter.companyId" clearable filterable placeholder="全部公司" style="width: 220px">
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <el-button @click="resetFilter">重置</el-button>
+        </el-form-item>
+      </el-form>
+    </div>
+
     <div class="stat-grid">
       <div class="stat-card stat-card--indigo">
         <div class="stat-body">
@@ -131,15 +215,15 @@ onMounted(load)
       <div class="stat-card stat-card--cyan">
         <div class="stat-body">
           <div class="stat-label">启用渠道</div>
-          <div class="stat-value">{{ activeCount }}<span class="stat-unit"> / {{ list.length }}</span></div>
+          <div class="stat-value">{{ activeCount }}<span class="stat-unit"> / {{ filteredList.length }}</span></div>
         </div>
         <el-icon class="stat-glyph" :size="48"><CreditCard /></el-icon>
       </div>
     </div>
 
-    <div v-if="list.length" class="board">
+    <div v-if="filteredList.length" class="board">
       <article
-        v-for="c in list"
+        v-for="c in filteredList"
         :key="c.id"
         class="wallet"
         :class="[`wallet--${typeMeta(c).tone}`, { 'is-off': c.status === 0 }]"
@@ -156,7 +240,7 @@ onMounted(load)
         <div class="wallet-bal">¥ {{ fmt(c.balance) }}</div>
         <div class="wallet-meta">
           <span>{{ accountLine(c) }}</span>
-          <span>归属 {{ c.poolName || '—' }}</span>
+          <span>{{ companyLabel(c) }} · {{ c.poolName || '资金池' }}</span>
         </div>
       </article>
     </div>
@@ -179,7 +263,12 @@ onMounted(load)
         </el-form-item>
         <el-form-item label="资金池" required>
           <el-select v-model="form.poolId" style="width: 100%">
-            <el-option v-for="p in pools" :key="p.id" :label="p.name" :value="p.id" />
+            <el-option
+              v-for="p in (isEdit || filter.companyId == null ? pools : formPools)"
+              :key="p.id"
+              :label="p.companyName ? `${p.name}（${p.companyName}）` : p.name"
+              :value="p.id"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="户名"><el-input v-model="form.accountName" /></el-form-item>
@@ -201,6 +290,16 @@ onMounted(load)
 </template>
 
 <style scoped>
+.filter-card {
+  margin-bottom: 0;
+  padding: 14px 18px;
+}
+.filter-form {
+  margin: 0;
+}
+.filter-form :deep(.el-form-item) {
+  margin-bottom: 0;
+}
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
