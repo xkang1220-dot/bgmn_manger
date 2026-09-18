@@ -54,6 +54,7 @@ const form = reactive<any>({
   poolId: undefined,
   channelId: undefined,
   projectId: undefined,
+  fundType: 'SHARE_PENDING',
   amount: 0,
   feeMode: '' as string,
   feeValue: undefined as number | undefined,
@@ -191,6 +192,7 @@ function emptyForm() {
     poolId,
     channelId: pickChannelForPool(poolId),
     projectId: undefined,
+    fundType: 'SHARE_PENDING',
     amount: 0,
     feeMode: '',
     feeValue: undefined,
@@ -567,6 +569,10 @@ async function save() {
     ElMessage.warning('请选择资金池')
     return
   }
+  if (form.bizType === 'INCOME' && form.projectId && !form.fundType) {
+    ElMessage.warning('关联项目时请选择资金类型')
+    return
+  }
   saving.value = true
   try {
     const res = await bizApi.registerLedger({
@@ -575,6 +581,7 @@ async function save() {
       poolId: form.poolId,
       channelId: form.bizType === 'INCOME' ? form.channelId : undefined,
       projectId: form.projectId,
+      fundType: form.bizType === 'INCOME' && form.projectId ? form.fundType : undefined,
       amount: form.amount,
       feeMode: form.bizType === 'INCOME' && form.feeMode ? form.feeMode : undefined,
       feeValue: form.bizType === 'INCOME' && form.feeMode ? form.feeValue : undefined,
@@ -1304,6 +1311,17 @@ onMounted(async () => {
             top-width="100%"
             child-width="100%"
           />
+        </el-form-item>
+        <el-form-item
+          v-if="form.bizType === 'INCOME' && form.projectId"
+          label="资金类型"
+          required
+        >
+          <el-radio-group v-model="form.fundType">
+            <el-radio value="SHARE_PENDING">待分成资金</el-radio>
+            <el-radio value="NON_SHARE">非分成资金</el-radio>
+          </el-radio-group>
+          <div class="form-tip">审批通过后净额拨入项目对应资金池；支出默认从待分成扣</div>
         </el-form-item>
         <el-form-item label="总额" required>
           <el-input-number v-model="form.amount" :min="0.01" :precision="2" style="width: 100%" />

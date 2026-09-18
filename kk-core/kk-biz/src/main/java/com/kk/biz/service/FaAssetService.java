@@ -7,7 +7,8 @@ import com.kk.biz.entity.WfApproval;
 
 public interface FaAssetService extends IService<FaAsset> {
 
-    Page<FaAsset> pageAssets(long page, long pageSize, Long companyId, String status, Long holderUserId, String keyword);
+    Page<FaAsset> pageAssets(long page, long pageSize, Long companyId, String status,
+                             Long holderUserId, String itemType, String keyword);
 
     FaAsset detail(Long id);
 
@@ -23,9 +24,14 @@ public interface FaAssetService extends IService<FaAsset> {
     /** 提交前校验归还 */
     void assertCanReturn(Long assetId, long applicantId);
 
+    /** 提交前校验转交（当前领用人 → 指定新领用人） */
+    void assertCanTransfer(Long assetId, long applicantId, Long toUserId);
+
     void effectBorrow(WfApproval approval);
 
     void effectReturn(WfApproval approval);
+
+    void effectTransfer(WfApproval approval);
 
     /** 月度折旧，返回处理资产数 */
     int runMonthlyDepreciation();

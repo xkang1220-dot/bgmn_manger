@@ -14,7 +14,7 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
     redirect: '/account',
     children: [
-      { path: 'dashboard', name: 'dashboard', component: () => import('@/views/dashboard/index.vue'), meta: { title: '首页' } },
+      { path: 'dashboard', redirect: '/account' },
       { path: 'finance/pool', redirect: '/finance/ledger' },
       { path: 'finance/ledger', component: () => import('@/views/finance/ledger.vue'), meta: { title: '公司总账' } },
       { path: 'finance/project-account', component: () => import('@/views/finance/project-account.vue'), meta: { title: '项目账款' } },

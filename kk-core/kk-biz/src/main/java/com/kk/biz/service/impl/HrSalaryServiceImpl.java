@@ -19,6 +19,7 @@ import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.HrSalaryService;
 import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.workflow.ApprovalTypes;
+import com.kk.biz.workflow.ProjectFundTypes;
 import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
 import com.kk.system.entity.SysDept;
@@ -679,9 +680,18 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         for (HrSalaryItem item : items) {
             PmProject p = projectMapper.selectById(item.getProjectId());
             Map<String, Object> row = new LinkedHashMap<>();
+            FinProjectAccount account = projectAccountService.getOrCreate(item.getProjectId());
+            String fundType = ProjectFundTypes.SHARE_PENDING;
+            try {
+                fundType = ProjectFundTypes.pickExpensePool(
+                        account.getSharePendingBalance(), account.getNonShareBalance(), item.getAmount());
+            } catch (BusinessException ignored) {
+                // 余额不足时仍带默认池，发薪阶段 checkBalances 会跳过
+            }
             row.put("projectId", item.getProjectId());
             row.put("projectName", p == null ? ("#" + item.getProjectId()) : p.getName());
             row.put("amount", item.getAmount());
+            row.put("fundType", fundType);
             rows.add(row);
             total = total.add(item.getAmount());
         }
@@ -716,15 +726,16 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         StringBuilder sb = new StringBuilder();
         for (HrSalaryItem item : items) {
             FinProjectAccount account = projectAccountService.getOrCreate(item.getProjectId());
-            BigDecimal bal = account.getBalance() == null ? BigDecimal.ZERO : account.getBalance();
-            if (bal.compareTo(item.getAmount()) < 0) {
+            try {
+                ProjectFundTypes.pickExpensePool(
+                        account.getSharePendingBalance(), account.getNonShareBalance(), item.getAmount());
+            } catch (BusinessException ex) {
                 PmProject p = projectMapper.selectById(item.getProjectId());
                 String name = p == null ? ("#" + item.getProjectId()) : p.getName();
                 if (sb.length() > 0) {
                     sb.append("；");
                 }
-                sb.append("项目 ").append(name).append(" 余额不足：需 ").append(item.getAmount())
-                        .append("，现 ").append(bal);
+                sb.append("项目 ").append(name).append(" ").append(ex.getMessage());
             }
         }
         return sb.length() == 0 ? null : sb.toString();

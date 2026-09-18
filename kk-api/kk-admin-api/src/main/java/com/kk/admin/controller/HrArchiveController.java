@@ -34,6 +34,19 @@ public class HrArchiveController {
         return Result.ok(archiveService.listMyPayMethods(StpUtil.getLoginIdAsLong()));
     }
 
+    /** 当前登录人自己的员工档案 */
+    @GetMapping("/mine")
+    public Result<HrArchive> mine() {
+        return Result.ok(archiveService.getMine(StpUtil.getLoginIdAsLong()));
+    }
+
+    /** 当前登录人保存自己的员工档案（同步到人事档案） */
+    @PutMapping("/mine")
+    public Result<Void> saveMine(@RequestBody HrArchive archive) {
+        archiveService.saveMine(StpUtil.getLoginIdAsLong(), archive);
+        return Result.ok();
+    }
+
     @GetMapping("/{id}")
     @SaCheckPermission("hr:archive:list")
     public Result<HrArchive> get(@PathVariable Long id) {

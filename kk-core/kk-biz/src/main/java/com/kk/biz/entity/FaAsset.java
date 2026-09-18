@@ -24,6 +24,9 @@ public class FaAsset extends BaseEntity {
 
     private Long categoryId;
 
+    /** 物品类别，见 {@link com.kk.biz.enums.FaItemType} */
+    private String itemType;
+
     private String assetCode;
 
     private String name;
@@ -57,14 +60,24 @@ public class FaAsset extends BaseEntity {
 
     private String remark;
 
+    /** 物品图片 sys_file.id */
+    private Long imageFileId;
+
     @TableField(exist = false)
     private String companyName;
 
     @TableField(exist = false)
     private String categoryName;
 
+    /** 物品类别中文名 */
+    @TableField(exist = false)
+    private String itemTypeName;
+
     @TableField(exist = false)
     private String holderName;
+
+    @TableField(exist = false)
+    private String imageUrl;
 
     @TableField(exist = false)
     private List<FaAssetEvent> events;

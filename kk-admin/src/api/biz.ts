@@ -110,6 +110,12 @@ export const bizApi = {
   myPayMethods() {
     return request<any[]>({ url: '/hr/archive/my-pay-methods', method: 'get' })
   },
+  myArchive() {
+    return request<any>({ url: '/hr/archive/mine', method: 'get' })
+  },
+  saveMyArchive(data: any) {
+    return request<void>({ url: '/hr/archive/mine', method: 'put', data })
+  },
   saveArchive(data: any, isEdit: boolean) {
     return request<void>({ url: '/hr/archive', method: isEdit ? 'put' : 'post', data })
   },
@@ -133,6 +139,19 @@ export const bizApi = {
   },
   faAssetDetail(id: number) {
     return request<any>({ url: `/fa/asset/${id}`, method: 'get' })
+  },
+  faAssetItemTypes() {
+    return request<Record<string, string>>({ url: '/fa/asset/item-types', method: 'get' })
+  },
+  uploadFaAssetImage(file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return request<any>({
+      url: '/fa/asset/image',
+      method: 'post',
+      data: form,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
   },
   saveFaAsset(data: any, isEdit: boolean) {
     return request<void>({ url: '/fa/asset', method: isEdit ? 'put' : 'post', data })

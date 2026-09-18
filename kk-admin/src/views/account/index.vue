@@ -53,10 +53,17 @@ const balanceApplyForm = reactive({
   projectId: undefined as number | undefined,
   amount: 0,
   remark: '',
+  fundType: 'SHARE_PENDING' as string,
 })
 const balanceApplyProjects = ref<any[]>([])
 const voucherFiles = ref<any[]>([])
+const balanceApplyFiles = ref<any[]>([])
 const uploading = ref(false)
+const balanceUploading = ref(0)
+const submittingBalance = ref(false)
+const MAX_BALANCE_FILES = 9
+const balanceBusy = computed(() => balanceUploading.value > 0 || submittingBalance.value)
+let balanceUploadGen = 0
 const myPayMethods = ref<any[]>([])
 const withdrawTaxRate = ref(0.2)
 const withdrawTaxMode = ref<'FLAT' | 'TIER'>('FLAT')
@@ -326,10 +333,25 @@ const selectedBalanceProject = computed(() =>
   balanceApplyProjects.value.find((p) => Number(p.projectId) === Number(balanceApplyForm.projectId)),
 )
 
+function balanceApplyBucket(fundType?: string) {
+  const row = selectedBalanceProject.value
+  if (fundType === 'NON_SHARE') return Number(row?.nonShareBalance || 0)
+  return Number(row?.sharePendingBalance || 0)
+}
+
+function syncBalanceApplyFundType() {
+  const pending = Number(selectedBalanceProject.value?.sharePendingBalance || 0)
+  const nonShare = Number(selectedBalanceProject.value?.nonShareBalance || 0)
+  balanceApplyForm.fundType = pending > 0 || nonShare <= 0 ? 'SHARE_PENDING' : 'NON_SHARE'
+}
+
 async function openBalanceApply() {
+  balanceUploadGen++
   balanceApplyForm.projectId = undefined
   balanceApplyForm.amount = 0
   balanceApplyForm.remark = ''
+  balanceApplyForm.fundType = 'SHARE_PENDING'
+  balanceApplyFiles.value = []
   try {
     balanceApplyProjects.value = (await bizApi.balanceApplyProjects()) || []
   } catch (e: any) {
@@ -343,6 +365,11 @@ async function openBalanceApply() {
 }
 
 async function submitBalanceApply() {
+  if (submittingBalance.value) return
+  if (balanceUploading.value > 0) {
+    ElMessage.warning('附件正在上传，请稍候')
+    return
+  }
   if (!balanceApplyForm.projectId) {
     ElMessage.warning('请选择项目')
     return
@@ -351,27 +378,44 @@ async function submitBalanceApply() {
     ElMessage.warning('请填写申请金额')
     return
   }
-  const bal = Number(selectedBalanceProject.value?.balance || 0)
+  const fundType = balanceApplyForm.fundType || 'SHARE_PENDING'
+  const bal = balanceApplyBucket(fundType)
   if (bal <= 0) {
-    ElMessage.warning('该项目结余为 0，无法申请')
+    ElMessage.warning(fundType === 'NON_SHARE' ? '该项目非分成余额为 0，无法申请' : '该项目待分成余额为 0，无法申请')
     return
   }
   if (balanceApplyForm.amount > bal) {
-    ElMessage.warning(`不能超过项目结余 ¥${fmt(bal)}`)
+    ElMessage.warning(`不能超过${fundType === 'NON_SHARE' ? '非分成' : '待分成'}余额 ¥${fmt(bal)}`)
     return
   }
   const projectName = selectedBalanceProject.value?.projectName || ''
-  const approval = await workflowApi.submit({
-    type: 'PROJECT_BALANCE_APPLY',
-    title: `项目余额申请 · ${projectName}`,
-    projectId: balanceApplyForm.projectId,
-    amount: balanceApplyForm.amount,
-    remark: balanceApplyForm.remark,
-  })
-  ElMessage.success(`${approvalFlowTip(approval)}。审批通过后项目结余将直接转入你的个人钱包`)
-  balanceApplyDialog.value = false
-  await Promise.all([loadBalance(), loadBoard(), loadApprovals()])
+  const voucherFileIds = balanceApplyFiles.value.map((f) => f.id).filter((id) => id != null)
+  submittingBalance.value = true
+  try {
+    const approval = await workflowApi.submit({
+      type: 'PROJECT_BALANCE_APPLY',
+      title: `项目余额申请 · ${projectName}`,
+      projectId: balanceApplyForm.projectId,
+      amount: balanceApplyForm.amount,
+      remark: balanceApplyForm.remark,
+      voucherFileIds,
+      payload: { fundType },
+    })
+    ElMessage.success(`${approvalFlowTip(approval)}。审批通过后将从所选资金池转入你的个人钱包`)
+    balanceApplyDialog.value = false
+    balanceApplyFiles.value = []
+    await Promise.all([loadBalance(), loadBoard(), loadApprovals()])
+  } finally {
+    submittingBalance.value = false
+  }
 }
+
+watch(
+  () => balanceApplyForm.projectId,
+  () => {
+    if (balanceApplyDialog.value) syncBalanceApplyFundType()
+  },
+)
 
 watch(
   () => [withdrawForm.companyId, withdrawForm.amount] as const,
@@ -397,6 +441,51 @@ async function onUploadVoucher(options: any) {
 
 function removeVoucher(index: number) {
   voucherFiles.value.splice(index, 1)
+}
+
+function fileUrl(file: any) {
+  return file?.url || `/api/file/preview/${file?.id}`
+}
+
+function isImage(file: any) {
+  const name = String(file?.originalName || file?.name || file?.url || '').toLowerCase()
+  return /\.(png|jpe?g|gif|webp|bmp)$/.test(name) || String(file?.contentType || '').startsWith('image/')
+}
+
+async function onUploadBalanceFile(options: any) {
+  if (balanceApplyFiles.value.length + balanceUploading.value >= MAX_BALANCE_FILES) {
+    ElMessage.warning(`最多上传 ${MAX_BALANCE_FILES} 个附件`)
+    options.onError?.(new Error('too many'))
+    return
+  }
+  balanceUploading.value++
+  try {
+    const file = await workflowApi.uploadVoucher(options.file)
+    if (file?.id == null) {
+      throw new Error('上传结果无效')
+    }
+    if (balanceApplyFiles.value.some((f) => f.id === file.id)) {
+      options.onSuccess?.(file)
+      return
+    }
+    if (balanceApplyFiles.value.length >= MAX_BALANCE_FILES) {
+      ElMessage.warning(`最多上传 ${MAX_BALANCE_FILES} 个附件`)
+      options.onError?.(new Error('too many'))
+      return
+    }
+    balanceApplyFiles.value.push(file)
+    ElMessage.success('附件已上传')
+    options.onSuccess?.(file)
+  } catch (e: any) {
+    ElMessage.error(e.message || '上传失败')
+    options.onError?.(e)
+  } finally {
+    balanceUploading.value = Math.max(0, balanceUploading.value - 1)
+  }
+}
+
+function removeBalanceFile(index: number) {
+  balanceApplyFiles.value.splice(index, 1)
 }
 
 async function submitReimburse() {
@@ -1011,7 +1100,7 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="balanceApplyDialog" title="申请项目余额" width="480px">
+    <el-dialog v-model="balanceApplyDialog" title="申请项目余额" width="520px" @closed="balanceApplyFiles = []">
       <el-form label-width="88px">
         <el-form-item label="项目" required>
           <el-select
@@ -1030,21 +1119,62 @@ onMounted(async () => {
         </el-form-item>
         <el-form-item v-if="selectedBalanceProject" label="项目结余">
           <span>¥ {{ fmt(selectedBalanceProject.balance) }}</span>
+          <span class="sec-tip" style="margin-left: 8px">
+            待分成 ¥{{ fmt(selectedBalanceProject.sharePendingBalance) }} · 非分成 ¥{{ fmt(selectedBalanceProject.nonShareBalance) }}
+          </span>
           <span v-if="selectedBalanceProject.companyName" class="sec-tip" style="margin-left: 8px">
             {{ selectedBalanceProject.companyName }}
           </span>
         </el-form-item>
+        <el-form-item v-if="selectedBalanceProject" label="扣自" required>
+          <el-radio-group v-model="balanceApplyForm.fundType">
+            <el-radio value="SHARE_PENDING">待分成（默认）</el-radio>
+            <el-radio value="NON_SHARE">非分成</el-radio>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="申请金额" required>
-          <el-input-number v-model="balanceApplyForm.amount" :min="0.01" :precision="2" style="width: 100%" />
+          <el-input-number
+            v-model="balanceApplyForm.amount"
+            :min="0.01"
+            :precision="2"
+            :max="balanceApplyBucket(balanceApplyForm.fundType) || undefined"
+            style="width: 100%"
+          />
+          <p class="sec-tip">当前可选余额 ¥{{ fmt(balanceApplyBucket(balanceApplyForm.fundType)) }}</p>
         </el-form-item>
         <el-form-item label="说明">
-          <el-input v-model="balanceApplyForm.remark" type="textarea" :rows="2" placeholder="无需发票，说明用途即可" />
+          <el-input v-model="balanceApplyForm.remark" type="textarea" :rows="2" placeholder="说明用途即可，附件选填" />
+        </el-form-item>
+        <el-form-item label="附件">
+          <div class="attach-field">
+            <el-upload
+              :http-request="onUploadBalanceFile"
+              :show-file-list="false"
+              accept="image/*,.pdf,.doc,.docx,.xls,.xlsx"
+              multiple
+              :disabled="balanceBusy"
+            >
+              <el-button :loading="balanceUploading > 0" :disabled="submittingBalance">上传图片/文件</el-button>
+            </el-upload>
+            <p class="sec-tip">选填，支持图片、PDF 和常见办公文件</p>
+            <div v-if="balanceApplyFiles.length" class="attach-gallery">
+              <div v-for="(f, i) in balanceApplyFiles" :key="f.id ?? i" class="attach-item">
+                <a v-if="isImage(f)" :href="fileUrl(f)" target="_blank" rel="noopener" class="attach-thumb">
+                  <img :src="fileUrl(f)" :alt="f.originalName || f.name" />
+                </a>
+                <a :href="fileUrl(f)" target="_blank" rel="noopener" class="attach-name">
+                  {{ f.originalName || f.name || f.id }}
+                </a>
+                <el-button link type="danger" @click="removeBalanceFile(i)">移除</el-button>
+              </div>
+            </div>
+          </div>
         </el-form-item>
         <p class="sec-tip">流程：提交 → 财务审批通过 → 项目结余直接转入个人钱包（公司总账不变，无需回执）。</p>
       </el-form>
       <template #footer>
-        <el-button @click="balanceApplyDialog = false">取消</el-button>
-        <el-button type="primary" @click="submitBalanceApply">提交审批</el-button>
+        <el-button :disabled="submittingBalance" @click="balanceApplyDialog = false">取消</el-button>
+        <el-button type="primary" :loading="submittingBalance" :disabled="balanceBusy" @click="submitBalanceApply">提交审批</el-button>
       </template>
     </el-dialog>
   </div>
@@ -1085,6 +1215,46 @@ onMounted(async () => {
   justify-content: space-between;
   margin-top: 6px;
   font-size: 12px;
+}
+.attach-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+}
+.attach-gallery {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.attach-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.attach-thumb {
+  width: 64px;
+  height: 48px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  flex-shrink: 0;
+}
+.attach-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attach-name {
+  flex: 1;
+  min-width: 0;
+  color: var(--kk-primary);
+  word-break: break-all;
 }
 .tax-breakdown-mini {
   margin: 0;

@@ -22,8 +22,14 @@ public class FinProjectAccount extends BaseEntity {
 
     private Long projectId;
 
-    /** 可用余额 */
+    /** 可用余额（= 待分成 + 非分成） */
     private BigDecimal balance;
+
+    /** 待分成可用余额 */
+    private BigDecimal sharePendingBalance;
+
+    /** 非分成可用余额 */
+    private BigDecimal nonShareBalance;
 
     /** 累计预支 */
     private BigDecimal advanceAmount;

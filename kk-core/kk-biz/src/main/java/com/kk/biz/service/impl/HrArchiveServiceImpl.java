@@ -98,6 +98,106 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
     }
 
     @Override
+    public HrArchive getMine(Long userId) {
+        if (userId == null) {
+            throw new BusinessException("未登录");
+        }
+        HrArchive existing = getByUserId(userId);
+        if (existing != null) {
+            return getDetail(existing.getId());
+        }
+        HrArchive empty = new HrArchive();
+        empty.setUserId(userId);
+        empty.setPayMethods(List.of());
+        SysUser user = userService.getById(userId);
+        if (user != null) {
+            empty.setUsername(user.getUsername());
+            empty.setNickname(user.getNickname());
+            empty.setPhone(user.getPhone());
+            if (StringUtils.hasText(user.getNickname())) {
+                empty.setRealName(user.getNickname());
+            } else if (StringUtils.hasText(user.getUsername())) {
+                empty.setRealName(user.getUsername());
+            }
+            if (user.getDeptId() != null) {
+                SysDept dept = deptService.getById(user.getDeptId());
+                if (dept != null) {
+                    empty.setDeptName(dept.getName());
+                }
+            }
+        }
+        return empty;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void saveMine(Long userId, HrArchive archive) {
+        if (userId == null) {
+            throw new BusinessException("未登录");
+        }
+        if (archive == null) {
+            throw new BusinessException("档案内容不能为空");
+        }
+        if (!StringUtils.hasText(archive.getRealName())) {
+            throw new BusinessException("请填写姓名");
+        }
+        String realName = archive.getRealName().trim();
+        List<HrPayMethod> payMethods = archive.getPayMethods();
+
+        HrArchive existing = getByUserId(userId);
+        if (existing == null) {
+            HrArchive created = new HrArchive();
+            created.setUserId(userId);
+            created.setRealName(realName);
+            created.setEmployeeNo(trimToNull(archive.getEmployeeNo()));
+            created.setPosition(trimToNull(archive.getPosition()));
+            created.setEducation(trimToNull(archive.getEducation()));
+            created.setEntryDate(archive.getEntryDate());
+            created.setIdCard(trimToNull(archive.getIdCard()));
+            created.setAddress(trimToNull(archive.getAddress()));
+            created.setEmergencyContact(trimToNull(archive.getEmergencyContact()));
+            created.setEmergencyPhone(trimToNull(archive.getEmergencyPhone()));
+            created.setRemark(trimToNull(archive.getRemark()));
+            created.setPayMethods(payMethods == null ? List.of() : payMethods);
+            createArchive(created);
+            return;
+        }
+
+        existing.setRealName(realName);
+        existing.setEmployeeNo(trimToEmpty(archive.getEmployeeNo()));
+        existing.setPosition(trimToEmpty(archive.getPosition()));
+        existing.setEducation(trimToEmpty(archive.getEducation()));
+        existing.setIdCard(trimToEmpty(archive.getIdCard()));
+        existing.setAddress(trimToEmpty(archive.getAddress()));
+        existing.setEmergencyContact(trimToEmpty(archive.getEmergencyContact()));
+        existing.setEmergencyPhone(trimToEmpty(archive.getEmergencyPhone()));
+        existing.setRemark(trimToEmpty(archive.getRemark()));
+        existing.setEntryDate(archive.getEntryDate());
+        updateById(existing);
+        // updateById 不会写 null，入职日清空需单独处理
+        if (archive.getEntryDate() == null) {
+            lambdaUpdate()
+                    .eq(HrArchive::getId, existing.getId())
+                    .setSql("entry_date = NULL")
+                    .update();
+        }
+        if (payMethods != null) {
+            syncPayMethods(existing.getId(), payMethods);
+        }
+    }
+
+    private static String trimToNull(String v) {
+        if (!StringUtils.hasText(v)) {
+            return null;
+        }
+        return v.trim();
+    }
+
+    private static String trimToEmpty(String v) {
+        return v == null ? "" : v.trim();
+    }
+
+    @Override
     public List<HrPayMethod> listMyPayMethods(Long userId) {
         if (userId == null) {
             return List.of();

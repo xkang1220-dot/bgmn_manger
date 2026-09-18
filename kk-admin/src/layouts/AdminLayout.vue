@@ -16,7 +16,18 @@ const router = useRouter()
 const userStore = useUserStore()
 
 const visibleMenus = computed(() =>
-  (userStore.menus || []).filter((m) => m.visible !== 0 && m.type !== 3),
+  (userStore.menus || [])
+    .filter((m) => m.visible !== 0 && m.type !== 3)
+    // 目录无可见子项时不展示（避免资产迁走后残留空「人事」）
+    .filter((m) => {
+      const kids = (m.children || []).filter((c: MenuInfo) => c.type !== 3 && c.visible !== 0)
+      if (m.type === 1) return kids.length > 0
+      return true
+    })
+    .map((m) => ({
+      ...m,
+      children: (m.children || []).filter((c: MenuInfo) => c.type !== 3 && c.visible !== 0),
+    })),
 )
 
 const pageTitle = computed(() => String(route.meta.title || '工作台'))
@@ -140,7 +151,7 @@ onUnmounted(() => {
 <template>
   <el-container class="layout">
     <el-aside width="240px" class="aside">
-      <div class="logo" @click="router.push('/dashboard')">
+      <div class="logo" @click="router.push('/account')">
         <div class="logo-mark"><KkLogoMark /></div>
         <span class="logo-title">BGMN</span>
       </div>
@@ -257,7 +268,7 @@ onUnmounted(() => {
       :with-header="false"
       append-to-body
     >
-      <div class="mobile-nav-logo" @click="go('/dashboard')">
+      <div class="mobile-nav-logo" @click="go('/account')">
         <div class="logo-mark"><KkLogoMark /></div>
         <span class="logo-title">BGMN</span>
       </div>

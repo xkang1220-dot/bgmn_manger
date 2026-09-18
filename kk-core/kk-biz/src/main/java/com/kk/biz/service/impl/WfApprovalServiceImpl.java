@@ -49,6 +49,7 @@ import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.dto.WithdrawTaxCalcResult;
 import com.kk.biz.support.BizNoGenerator;
 import com.kk.biz.workflow.ApprovalTypes;
+import com.kk.biz.workflow.ProjectFundTypes;
 import com.kk.biz.workflow.ProjectScales;
 import com.kk.biz.util.ProjectCodeUtil;
 import com.kk.common.exception.BusinessException;
@@ -73,11 +74,14 @@ import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -665,14 +669,27 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                         approval.getRemark());
                 syncReserveAfterFundChange(approval.getProjectId());
             }
+            case ApprovalTypes.PROJECT_ADVANCE_RETURN -> {
+                JSONObject retPayload = JSONUtil.parseObj(approval.getPayload());
+                projectAccountService.reverseAdvance(
+                        approval.getProjectId(),
+                        approval.getPoolId(),
+                        approval.getAmount(),
+                        retPayload.getBigDecimal("sharePendingAmount"),
+                        retPayload.getBigDecimal("nonShareAmount"),
+                        approval.getId(),
+                        approval.getRemark());
+            }
             case ApprovalTypes.REIMBURSE_PROJECT, ApprovalTypes.SALARY_APPLY, ApprovalTypes.PROJECT_BALANCE_APPLY -> {
-                assertExpenseWithinQuota(approval.getProjectId(), approval.getAmount());
+                String fundType = ProjectFundTypes.normalize(payload.getStr("fundType"));
+                assertExpenseWithinQuota(approval.getProjectId(), approval.getAmount(), fundType);
                 String bizType = ApprovalTypes.SALARY_APPLY.equals(type) ? "SALARY"
                         : ApprovalTypes.PROJECT_BALANCE_APPLY.equals(type) ? "PAYOUT" : "REIMBURSE";
                 projectAccountService.expenseToWallet(
                         approval.getProjectId(),
                         approval.getApplicantId(),
                         approval.getAmount(),
+                        fundType,
                         approval.getId(),
                         bizType,
                         ApprovalTypes.label(type),
@@ -686,13 +703,68 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                 assertSettleWithinQuota(approval.getProjectId(), approval.getAmount());
                 effectSettle(approval, payload);
             }
-            case ApprovalTypes.RESERVE_RETURN -> projectAccountService.returnReserveToCompany(
-                    approval.getProjectId(), approval.getPoolId(), approval.getId(), approval.getRemark());
+            case ApprovalTypes.PROJECT_SHARE_PERIOD -> effectSharePeriod(approval, payload);
+            case ApprovalTypes.RESERVE_RETURN -> {
+                if (StringUtils.hasText(payload.getStr("periodMonth"))) {
+                    // 自然月预留回笼：仅退当前预留占用（与「结余回公司」拆分入账无关）
+                    projectAccountService.returnReserveHeldToCompany(
+                            approval.getProjectId(), approval.getPoolId(), approval.getId(), approval.getRemark());
+                } else {
+                    BigDecimal s = nz(payload.getBigDecimal("sharePendingAmount")).setScale(2, RoundingMode.HALF_UP);
+                    BigDecimal n = nz(payload.getBigDecimal("nonShareAmount")).setScale(2, RoundingMode.HALF_UP);
+                    BigDecimal h = nz(payload.getBigDecimal("reserveHeldAmount")).setScale(2, RoundingMode.HALF_UP);
+                    boolean hasSplit = payload.containsKey("sharePendingAmount")
+                            || payload.containsKey("nonShareAmount")
+                            || payload.containsKey("reserveHeldAmount");
+                    BigDecimal sum = s.add(n).add(h).setScale(2, RoundingMode.HALF_UP);
+                    BigDecimal approvalAmt = approval.getAmount() == null
+                            ? null : approval.getAmount().setScale(2, RoundingMode.HALF_UP);
+                    if (hasSplit) {
+                        // 有拆分字段：必须按拆分动账，拆分为 0 直接失败（禁止回退到清仓）
+                        if (sum.compareTo(BigDecimal.ZERO) <= 0) {
+                            throw new BusinessException("结余回公司金额无效");
+                        }
+                        if (approvalAmt != null && approvalAmt.compareTo(sum) != 0) {
+                            throw new BusinessException("结余回公司拆分合计与审批金额不一致：拆分 ¥"
+                                    + sum.toPlainString() + "，审批 ¥" + approvalAmt.toPlainString());
+                        }
+                    } else {
+                        // 旧单只有总额：按 预留→非分成→待分成 依次扣，绝不超过审批金额
+                        if (approvalAmt == null || approvalAmt.compareTo(BigDecimal.ZERO) <= 0) {
+                            throw new BusinessException("结余回公司金额无效");
+                        }
+                        FinProjectAccount account = projectAccountService.getOrCreate(approval.getProjectId());
+                        BigDecimal remain = approvalAmt;
+                        h = remain.min(nz(account.getReserveHeld())).setScale(2, RoundingMode.HALF_UP);
+                        remain = remain.subtract(h);
+                        n = remain.min(nz(account.getNonShareBalance())).setScale(2, RoundingMode.HALF_UP);
+                        remain = remain.subtract(n);
+                        s = remain.min(nz(account.getSharePendingBalance())).setScale(2, RoundingMode.HALF_UP);
+                        remain = remain.subtract(s);
+                        if (remain.compareTo(BigDecimal.ZERO) > 0) {
+                            throw new BusinessException("结余不足，无法按审批金额 ¥"
+                                    + approvalAmt.toPlainString() + " 回公司");
+                        }
+                        sum = s.add(n).add(h).setScale(2, RoundingMode.HALF_UP);
+                    }
+                    if (approvalAmt != null && approvalAmt.compareTo(sum) != 0) {
+                        throw new BusinessException("结余回公司金额校验失败：动账 ¥"
+                                + sum.toPlainString() + " ≠ 审批 ¥" + approvalAmt.toPlainString());
+                    }
+                    projectAccountService.returnReserveToCompany(
+                            approval.getProjectId(),
+                            approval.getPoolId(),
+                            s, n, h,
+                            approval.getId(),
+                            approval.getRemark());
+                }
+            }
             case ApprovalTypes.LEDGER_REGISTER -> effectLedgerRegister(approval, payload);
             case ApprovalTypes.MONTHLY_VERIFY -> effectMonthlyVerify(approval, payload);
             case ApprovalTypes.ROLLBACK -> effectRollback(approval, payload);
             case ApprovalTypes.ASSET_BORROW -> faAssetService.effectBorrow(approval);
             case ApprovalTypes.ASSET_RETURN -> faAssetService.effectReturn(approval);
+            case ApprovalTypes.ASSET_TRANSFER -> faAssetService.effectTransfer(approval);
             default -> {
             }
         }
@@ -952,6 +1024,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             req.setChannelId(payload.getLong("channelId"));
             req.setFeeMode(payload.getStr("feeMode"));
             req.setFeeValue(payload.getBigDecimal("feeValue"));
+            req.setFundType(payload.getStr("fundType"));
         }
         req.setUserId(payload.getLong("userId"));
         req.setProjectId(payload.getLong("projectId", approval.getProjectId()));
@@ -1039,13 +1112,37 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         String bizType = originPayload.getStr("bizType");
         if ("INCOME".equals(bizType)) {
             BigDecimal originGross = originPayload.getBigDecimal("amount", origin.getAmount());
+            BigDecimal fee = BigDecimal.ZERO;
+            String feeMode = originPayload.getStr("feeMode");
+            BigDecimal feeValue = originPayload.getBigDecimal("feeValue");
+            if (StringUtils.hasText(feeMode) && feeValue != null && feeValue.compareTo(BigDecimal.ZERO) > 0) {
+                if ("PERCENT".equalsIgnoreCase(feeMode)) {
+                    fee = originGross.multiply(feeValue).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+                } else if ("FIXED".equalsIgnoreCase(feeMode)) {
+                    fee = feeValue.setScale(2, RoundingMode.HALF_UP);
+                }
+            }
+            BigDecimal net = originGross.subtract(fee);
+            BigDecimal ratio = originGross.compareTo(BigDecimal.ZERO) == 0
+                    ? BigDecimal.ONE
+                    : amount.divide(originGross, 8, RoundingMode.HALF_UP);
+            BigDecimal reverseNet = net.multiply(ratio).setScale(2, RoundingMode.HALF_UP);
+            Long projectId = originPayload.getLong("projectId", origin.getProjectId());
+            Long poolId = originPayload.getLong("poolId", origin.getPoolId());
+            // 关联项目入账曾拨入项目：先退回公司池，再回退入账/渠道
+            if (projectId != null && reverseNet.compareTo(BigDecimal.ZERO) > 0) {
+                String fundType = ProjectFundTypes.normalize(originPayload.getStr("fundType"));
+                projectAccountService.reverseProjectFund(
+                        projectId, poolId, reverseNet, fundType, approval.getId(),
+                        "回退原单 " + origin.getBizNo());
+            }
             financeService.reverseIncomeRegister(
-                    originPayload.getLong("poolId", origin.getPoolId()),
+                    poolId,
                     originPayload.getLong("channelId"),
                     amount,
                     originGross,
-                    originPayload.getStr("feeMode"),
-                    originPayload.getBigDecimal("feeValue"),
+                    feeMode,
+                    feeValue,
                     approval.getId(),
                     "回退 · " + origin.getBizNo(),
                     "回退原单 " + origin.getBizNo());
@@ -1149,12 +1246,30 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
     }
 
-    /** 支出不再校验比例额度，仅校验项目结余（动账时再扣项目并入钱包） */
+    /** 支出按指定资金池校验；默认待分成 */
     private void assertExpenseWithinQuota(Long projectId, BigDecimal addAmount) {
+        assertExpenseWithinQuota(projectId, addAmount, ProjectFundTypes.SHARE_PENDING);
+    }
+
+    private void assertExpenseWithinQuota(Long projectId, BigDecimal addAmount, String fundType) {
         var account = projectAccountService.getOrCreate(projectId);
-        if (nz(addAmount).compareTo(nz(account.getBalance())) > 0) {
-            throw new BusinessException("超过项目结余 ¥" + nz(account.getBalance()).toPlainString());
+        String pool = ProjectFundTypes.normalize(fundType);
+        BigDecimal bucket = ProjectFundTypes.NON_SHARE.equals(pool)
+                ? nz(account.getNonShareBalance())
+                : nz(account.getSharePendingBalance());
+        if (nz(addAmount).compareTo(bucket) > 0) {
+            throw new BusinessException("超过" + ProjectFundTypes.label(pool) + "余额 ¥" + bucket.toPlainString());
         }
+    }
+
+    /** 未写 fundType 时按余额自动选池，避免公司预支进非分成后月薪/旧单默认待分成直接失败 */
+    private String resolveExpenseFundType(Long projectId, BigDecimal amount, String rawFundType) {
+        if (StringUtils.hasText(rawFundType) && !"null".equalsIgnoreCase(rawFundType.trim())) {
+            return ProjectFundTypes.normalize(rawFundType);
+        }
+        var account = projectAccountService.getOrCreate(projectId);
+        return ProjectFundTypes.pickExpensePool(
+                account.getSharePendingBalance(), account.getNonShareBalance(), amount);
     }
 
     /** 预算或已预支作为比例计算基数 */
@@ -1174,8 +1289,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
     private void assertSettleWithinQuota(Long projectId, BigDecimal addAmount) {
         PmProject project = projectMapper.selectById(projectId);
         var account = projectAccountService.getOrCreate(projectId);
-        if (nz(addAmount).compareTo(nz(account.getBalance())) > 0) {
-            throw new BusinessException("超过项目结余 ¥" + nz(account.getBalance()).toPlainString());
+        if (nz(addAmount).compareTo(nz(account.getSharePendingBalance())) > 0) {
+            throw new BusinessException("超过待分成余额 ¥" + nz(account.getSharePendingBalance()).toPlainString());
         }
         if (project == null) {
             return;
@@ -1212,6 +1327,147 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                 approval.getRemark());
     }
 
+    private void effectSharePeriod(WfApproval approval, JSONObject payload) {
+        Long projectId = approval.getProjectId();
+        if (projectId == null) {
+            throw new BusinessException("缺少项目");
+        }
+        String periodMonth = normalizePeriodMonth(payload.getStr("periodMonth"));
+        FinProjectAccount account = projectAccountService.getOrCreate(projectId);
+        BigDecimal pending = nz(account.getSharePendingBalance());
+        if (pending.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("待分成余额为 0，无法分层");
+        }
+        PmProject project = projectMapper.selectById(projectId);
+        if (project == null) {
+            throw new BusinessException("项目不存在");
+        }
+        BigDecimal settlePercent = payload.getBigDecimal("settlePercent");
+        BigDecimal reservePercent = payload.getBigDecimal("reservePercent");
+        if (settlePercent == null) {
+            settlePercent = nz(project.getSettlePercent());
+        }
+        if (reservePercent == null) {
+            reservePercent = nz(project.getReservePercent());
+        }
+        assertSettleReservePercents(settlePercent, reservePercent);
+
+        BigDecimal settleAmt = pending.multiply(settlePercent)
+                .divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+        // 余数进预留，避免分位悬空
+        BigDecimal reserveAmt = pending.subtract(settleAmt);
+        if (settleAmt.compareTo(BigDecimal.ZERO) < 0 || reserveAmt.compareTo(BigDecimal.ZERO) < 0) {
+            throw new BusinessException("分层金额无效");
+        }
+
+        Map<Long, BigDecimal> shares = new HashMap<>();
+        if (settleAmt.compareTo(BigDecimal.ZERO) > 0) {
+            // 按生效时待分成余额与成员比例重算，避免提交到审批期间余额变化导致明细不准
+            shares = buildSharesFromMembers(projectId, settleAmt);
+            projectAccountService.settleToWallets(
+                    projectId, approval.getPoolId(), shares, approval.getId(),
+                    "自然月分层 " + periodMonth + " · 分成");
+        }
+        if (reserveAmt.compareTo(BigDecimal.ZERO) > 0) {
+            projectAccountService.holdFromSharePending(
+                    projectId, reserveAmt, approval.getId(),
+                    "自然月分层 " + periodMonth + " · 预留");
+        }
+        // 回写快照，便于详情展示
+        payload.set("periodMonth", periodMonth);
+        payload.set("pendingAmount", pending);
+        payload.set("settleAmount", settleAmt);
+        payload.set("reserveAmount", reserveAmt);
+        payload.set("settlePercent", settlePercent);
+        payload.set("reservePercent", reservePercent);
+        approval.setPayload(payload.toString());
+        approval.setAmount(pending);
+        updateById(approval);
+    }
+
+    private Map<Long, BigDecimal> buildSharesFromMembers(Long projectId, BigDecimal settleAmt) {
+        List<PmProjectMember> members = memberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
+                .eq(PmProjectMember::getProjectId, projectId));
+        if (members == null || members.isEmpty()) {
+            throw new BusinessException("请先配置分成人员及比例");
+        }
+        Map<Long, BigDecimal> shares = new LinkedHashMap<>();
+        List<PmProjectMember> valid = new ArrayList<>();
+        for (PmProjectMember m : members) {
+            if (m.getUserId() != null && nz(m.getPercent()).compareTo(BigDecimal.ZERO) > 0) {
+                valid.add(m);
+            }
+        }
+        if (valid.isEmpty()) {
+            throw new BusinessException("请先配置分成人员及比例");
+        }
+        BigDecimal allocated = BigDecimal.ZERO;
+        for (int i = 0; i < valid.size(); i++) {
+            PmProjectMember m = valid.get(i);
+            BigDecimal part;
+            if (i == valid.size() - 1) {
+                part = settleAmt.subtract(allocated);
+                if (part.compareTo(BigDecimal.ZERO) < 0) {
+                    throw new BusinessException("分成比例合计超过 100%，余数无法分摊");
+                }
+            } else {
+                part = settleAmt.multiply(nz(m.getPercent()))
+                        .divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+                allocated = allocated.add(part);
+            }
+            if (part.compareTo(BigDecimal.ZERO) > 0) {
+                shares.merge(m.getUserId(), part, BigDecimal::add);
+            }
+        }
+        if (shares.isEmpty()) {
+            throw new BusinessException("分成人员无效");
+        }
+        return shares;
+    }
+
+    private String normalizePeriodMonth(String raw) {
+        if (!StringUtils.hasText(raw) || "null".equalsIgnoreCase(raw.trim())) {
+            return YearMonth.now().format(DateTimeFormatter.ofPattern("yyyy-MM"));
+        }
+        String text = raw.trim();
+        try {
+            return YearMonth.parse(text, DateTimeFormatter.ofPattern("yyyy-MM")).toString();
+        } catch (DateTimeParseException e) {
+            throw new BusinessException("自然月格式须为 yyyy-MM");
+        }
+    }
+
+    private void assertNoDuplicatePeriodApproval(String type, Long projectId, String periodMonth) {
+        if (projectId == null || !StringUtils.hasText(periodMonth)) {
+            return;
+        }
+        List<WfApproval> exists = list(new LambdaQueryWrapper<WfApproval>()
+                .eq(WfApproval::getType, type)
+                .eq(WfApproval::getProjectId, projectId)
+                .in(WfApproval::getStatus, List.of("PENDING", "APPROVED", "TIMEOUT_PASS", "ROLLING"))
+                .orderByDesc(WfApproval::getId)
+                .last("LIMIT 50"));
+        for (WfApproval a : exists) {
+            if (!StringUtils.hasText(a.getPayload())) {
+                continue;
+            }
+            JSONObject p = JSONUtil.parseObj(a.getPayload());
+            if (periodMonth.equals(p.getStr("periodMonth"))) {
+                throw new BusinessException("该项目 " + periodMonth + " 已有进行中或已通过的「"
+                        + ApprovalTypes.label(type) + "」审批");
+            }
+        }
+    }
+
+    private void creditFundBucketOnAccount(FinProjectAccount account, String fundType, BigDecimal amount) {
+        String pool = ProjectFundTypes.normalize(fundType);
+        if (ProjectFundTypes.NON_SHARE.equals(pool)) {
+            account.setNonShareBalance(nz(account.getNonShareBalance()).add(amount));
+        } else {
+            account.setSharePendingBalance(nz(account.getSharePendingBalance()).add(amount));
+        }
+    }
+
     private void effectRollback(WfApproval approval, JSONObject payload) {
         Long originId = payload.getLong("originApprovalId");
         BigDecimal amount = payload.getBigDecimal("amount", approval.getAmount());
@@ -1226,6 +1482,46 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (ApprovalTypes.PROJECT_ADVANCE.equals(originType) && origin.getProjectId() != null) {
             projectAccountService.reverseAdvance(origin.getProjectId(), origin.getPoolId(), amount,
                     approval.getId(), "回退原单 " + origin.getBizNo());
+        } else if (ApprovalTypes.PROJECT_ADVANCE_RETURN.equals(originType) && origin.getProjectId() != null) {
+            JSONObject originPayload = JSONUtil.parseObj(origin.getPayload());
+            BigDecimal shareAmt = nz(originPayload.getBigDecimal("sharePendingAmount"));
+            BigDecimal nonShareAmt = nz(originPayload.getBigDecimal("nonShareAmount"));
+            BigDecimal originTotal = shareAmt.add(nonShareAmt);
+            if (originTotal.compareTo(BigDecimal.ZERO) <= 0) {
+                // 旧单：整笔回非分成
+                projectAccountService.creditProjectFund(
+                        origin.getProjectId(), origin.getPoolId(), amount, ProjectFundTypes.NON_SHARE,
+                        approval.getId(), "退回公司回退入项目", "回退原单 " + origin.getBizNo());
+            } else {
+                BigDecimal ratio = amount.divide(originTotal, 8, RoundingMode.HALF_UP);
+                BigDecimal backShare = shareAmt.multiply(ratio).setScale(2, RoundingMode.HALF_UP);
+                BigDecimal backNonShare = nonShareAmt.multiply(ratio).setScale(2, RoundingMode.HALF_UP);
+                // 分位差额补到非分成（无非分成则补到待分成），保证合计等于回退金额
+                BigDecimal diff = amount.subtract(backShare.add(backNonShare));
+                if (nonShareAmt.signum() > 0 || backNonShare.signum() > 0 || shareAmt.signum() <= 0) {
+                    backNonShare = backNonShare.add(diff);
+                } else {
+                    backShare = backShare.add(diff);
+                }
+                if (backShare.signum() < 0) {
+                    backNonShare = backNonShare.add(backShare);
+                    backShare = BigDecimal.ZERO;
+                }
+                if (backNonShare.signum() < 0) {
+                    backShare = backShare.add(backNonShare);
+                    backNonShare = BigDecimal.ZERO;
+                }
+                if (backShare.signum() > 0) {
+                    projectAccountService.creditProjectFund(
+                            origin.getProjectId(), origin.getPoolId(), backShare, ProjectFundTypes.SHARE_PENDING,
+                            approval.getId(), "退回公司回退入项目·待分成", "回退原单 " + origin.getBizNo());
+                }
+                if (backNonShare.signum() > 0) {
+                    projectAccountService.creditProjectFund(
+                            origin.getProjectId(), origin.getPoolId(), backNonShare, ProjectFundTypes.NON_SHARE,
+                            approval.getId(), "退回公司回退入项目·非分成", "回退原单 " + origin.getBizNo());
+                }
+            }
         } else if (ApprovalTypes.PROJECT_SETTLE.equals(originType)) {
             // 从原审批 payload 取每人金额，扣回个人并退回项目
             JSONObject originPayload = JSONUtil.parseObj(origin.getPayload());
@@ -1273,6 +1569,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             BigDecimal before = nz(account.getBalance());
             account.setBalance(before.add(amount));
             account.setSettleAmount(nz(account.getSettleAmount()).subtract(amount));
+            creditFundBucketOnAccount(account, ProjectFundTypes.SHARE_PENDING, amount);
             projectAccountService.updateById(account);
             Long batchId = writeSimpleLedger("ROLLBACK", "PROJECT", origin.getPoolId(), null, amount,
                     before, account.getBalance(), origin.getProjectId(), null, approval.getId(),
@@ -1357,6 +1654,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             BigDecimal before = nz(account.getBalance());
             account.setBalance(before.add(amount));
             account.setExpenseAmount(nz(account.getExpenseAmount()).subtract(amount));
+            JSONObject originPayload = JSONUtil.parseObj(origin.getPayload());
+            creditFundBucketOnAccount(account, originPayload.getStr("fundType"), amount);
             projectAccountService.updateById(account);
             Long projectLedger = writeSimpleLedger("ROLLBACK", "PROJECT", origin.getPoolId(), null, amount,
                     before, account.getBalance(), origin.getProjectId(), null, approval.getId(),
@@ -1372,6 +1671,86 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                         amount.negate(), wb, walletAfter.getBalance(), origin.getProjectId(), projectLedger, approval.getId(),
                         "项目支出回退扣个人钱包", "回退原单 " + origin.getBizNo());
             }
+            projectAccountService.assertBalanced(origin.getProjectId());
+        } else if (ApprovalTypes.RESERVE_RETURN.equals(originType) && origin.getProjectId() != null) {
+            // 结余回公司回退：公司总账扣回，按原单拆分还原项目池/预留
+            JSONObject originPayload = JSONUtil.parseObj(origin.getPayload());
+            BigDecimal shareAmt = nz(originPayload.getBigDecimal("sharePendingAmount"));
+            BigDecimal nonShareAmt = nz(originPayload.getBigDecimal("nonShareAmount"));
+            BigDecimal heldAmt = nz(originPayload.getBigDecimal("reserveHeldAmount"));
+            BigDecimal originTotal = shareAmt.add(nonShareAmt).add(heldAmt).setScale(2, RoundingMode.HALF_UP);
+            BigDecimal backShare;
+            BigDecimal backNonShare;
+            BigDecimal backHeld;
+            if (originTotal.compareTo(BigDecimal.ZERO) <= 0) {
+                if (StringUtils.hasText(originPayload.getStr("periodMonth"))) {
+                    // 自然月预留回笼：还原为预留占用
+                    backShare = BigDecimal.ZERO;
+                    backNonShare = BigDecimal.ZERO;
+                    backHeld = amount.setScale(2, RoundingMode.HALF_UP);
+                } else {
+                    // 旧整笔无拆分：还原到非分成可用，避免误进预留占用
+                    backShare = BigDecimal.ZERO;
+                    backNonShare = amount.setScale(2, RoundingMode.HALF_UP);
+                    backHeld = BigDecimal.ZERO;
+                }
+            } else {
+                BigDecimal ratio = amount.divide(originTotal, 8, RoundingMode.HALF_UP);
+                backShare = shareAmt.multiply(ratio).setScale(2, RoundingMode.HALF_UP);
+                backNonShare = nonShareAmt.multiply(ratio).setScale(2, RoundingMode.HALF_UP);
+                backHeld = heldAmt.multiply(ratio).setScale(2, RoundingMode.HALF_UP);
+                BigDecimal diff = amount.subtract(backShare.add(backNonShare).add(backHeld));
+                // 分位差额优先补到非分成，其次待分成，再次预留
+                if (diff.compareTo(BigDecimal.ZERO) != 0) {
+                    if (nonShareAmt.signum() > 0 || backNonShare.signum() > 0) {
+                        backNonShare = backNonShare.add(diff);
+                    } else if (shareAmt.signum() > 0 || backShare.signum() > 0) {
+                        backShare = backShare.add(diff);
+                    } else {
+                        backHeld = backHeld.add(diff);
+                    }
+                }
+            }
+            if (backShare.signum() < 0 || backNonShare.signum() < 0 || backHeld.signum() < 0) {
+                throw new BusinessException("结余回公司回退拆分无效");
+            }
+            FinPool pool = resolvePool(origin.getPoolId(), origin.getCompanyId());
+            BigDecimal poolBefore = pool.getBalance();
+            boolean ok = new com.baomidou.mybatisplus.extension.conditions.update.LambdaUpdateChainWrapper<>(poolMapper)
+                    .eq(FinPool::getId, pool.getId())
+                    .ge(FinPool::getBalance, amount)
+                    .setSql("balance = balance - " + amount.toPlainString())
+                    .update();
+            if (!ok) {
+                throw new BusinessException("公司总账余额不足，无法回退结余回公司");
+            }
+            pool = poolMapper.selectById(pool.getId());
+            FinProjectAccount account = projectAccountService.getOrCreate(origin.getProjectId());
+            BigDecimal projectBefore = nz(account.getBalance());
+            BigDecimal availableBack = backShare.add(backNonShare);
+            if (availableBack.signum() > 0) {
+                account.setBalance(projectBefore.add(availableBack));
+                if (backShare.signum() > 0) {
+                    creditFundBucketOnAccount(account, ProjectFundTypes.SHARE_PENDING, backShare);
+                }
+                if (backNonShare.signum() > 0) {
+                    creditFundBucketOnAccount(account, ProjectFundTypes.NON_SHARE, backNonShare);
+                }
+            }
+            if (backHeld.signum() > 0) {
+                account.setReserveHeld(nz(account.getReserveHeld()).add(backHeld));
+            }
+            account.setAdvanceAmount(nz(account.getAdvanceAmount()).add(amount));
+            projectAccountService.updateById(account);
+            Long poolLedger = writeSimpleLedger("ROLLBACK", "POOL", pool.getId(), null, amount.negate(),
+                    poolBefore, pool.getBalance(), origin.getProjectId(), null, approval.getId(),
+                    "结余回公司回退扣公司", "回退原单 " + origin.getBizNo());
+            writeSimpleLedger("ROLLBACK", "PROJECT", pool.getId(), null, amount,
+                    projectBefore, account.getBalance(), origin.getProjectId(), poolLedger, approval.getId(),
+                    "结余回公司回退入项目", "回退原单 " + origin.getBizNo()
+                            + " · 待分成¥" + backShare.toPlainString()
+                            + " 非分成¥" + backNonShare.toPlainString()
+                            + " 预留¥" + backHeld.toPlainString());
             projectAccountService.assertBalanced(origin.getProjectId());
         } else if (ApprovalTypes.SALARY_MONTHLY.equals(originType)) {
             effectSalaryMonthlyRollback(approval, origin);
@@ -1410,12 +1789,15 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             if (projectId == null || amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
                 throw new BusinessException("月度工资明细无效");
             }
-            assertExpenseWithinQuota(projectId, amount);
+            String fundType = resolveExpenseFundType(projectId, amount, row.getStr("fundType"));
+            row.set("fundType", fundType);
+            assertExpenseWithinQuota(projectId, amount, fundType);
             String projectName = row.getStr("projectName", "#" + projectId);
             projectAccountService.expenseToWallet(
                     projectId,
                     userId,
                     amount,
+                    fundType,
                     approval.getId(),
                     "SALARY",
                     "月度工资 · " + projectName,
@@ -1447,6 +1829,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             BigDecimal before = nz(account.getBalance());
             account.setBalance(before.add(amount));
             account.setExpenseAmount(nz(account.getExpenseAmount()).subtract(amount));
+            creditFundBucketOnAccount(account, row.getStr("fundType"), amount);
             projectAccountService.updateById(account);
             Long projectLedger = writeSimpleLedger("ROLLBACK", "PROJECT", origin.getPoolId(), null, amount,
                     before, account.getBalance(), projectId, null, approval.getId(),
@@ -1761,9 +2144,10 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (ApprovalTypes.PROJECT_DELETE.equals(type) && request.getProjectId() != null) {
             projectService.assertNoUndeletedChildren(request.getProjectId());
         }
-        if (List.of(ApprovalTypes.PROJECT_ADVANCE, ApprovalTypes.REIMBURSE_PROJECT,
+        if (List.of(ApprovalTypes.PROJECT_ADVANCE, ApprovalTypes.PROJECT_ADVANCE_RETURN,
+                ApprovalTypes.REIMBURSE_PROJECT,
                 ApprovalTypes.SALARY_APPLY, ApprovalTypes.PROJECT_BALANCE_APPLY,
-                ApprovalTypes.PROJECT_SETTLE,
+                ApprovalTypes.PROJECT_SETTLE, ApprovalTypes.PROJECT_SHARE_PERIOD,
                 ApprovalTypes.RESERVE_RETURN, ApprovalTypes.SHARE_CONFIG).contains(type)) {
             if (request.getProjectId() == null) {
                 throw new BusinessException("请选择项目");
@@ -1771,12 +2155,26 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             projectAccountService.assertMutableProject(request.getProjectId());
         }
         // 预留回笼金额取自项目已占用预留，提交时可不填金额
-        if (List.of(ApprovalTypes.PROJECT_ADVANCE, ApprovalTypes.REIMBURSE_PROJECT,
+        // 退回公司金额可由待分成/非分成组合算出，在专用校验里汇总
+        if (List.of(ApprovalTypes.PROJECT_ADVANCE,
+                ApprovalTypes.REIMBURSE_PROJECT,
                 ApprovalTypes.SALARY_APPLY, ApprovalTypes.PROJECT_BALANCE_APPLY,
                 ApprovalTypes.PROJECT_SETTLE).contains(type)) {
             if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
                 throw new BusinessException("请填写金额");
             }
+        }
+        if (List.of(ApprovalTypes.REIMBURSE_PROJECT, ApprovalTypes.SALARY_APPLY,
+                ApprovalTypes.PROJECT_BALANCE_APPLY).contains(type)) {
+            Map<String, Object> payload = request.getPayload();
+            if (payload == null) {
+                payload = new HashMap<>();
+                request.setPayload(payload);
+            }
+            Object rawFund = payload.get("fundType");
+            String fundType = ProjectFundTypes.normalize(rawFund == null ? null : String.valueOf(rawFund));
+            payload.put("fundType", fundType);
+            assertExpenseWithinQuota(request.getProjectId(), request.getAmount(), fundType);
         }
         if (ApprovalTypes.PROJECT_ADVANCE.equals(type)) {
             BigDecimal amount = request.getAmount().setScale(2, RoundingMode.HALF_UP);
@@ -1802,6 +2200,58 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                 throw new BusinessException("不能超过公司余额 ¥" + poolBal.toPlainString());
             }
         }
+        if (ApprovalTypes.PROJECT_ADVANCE_RETURN.equals(type)) {
+            FinProjectAccount account = projectAccountService.getOrCreate(request.getProjectId());
+            BigDecimal advanceHeld = nz(account.getAdvanceAmount());
+            BigDecimal pendingBal = nz(account.getSharePendingBalance());
+            BigDecimal nonShareBal = nz(account.getNonShareBalance());
+
+            Map<String, Object> payload = request.getPayload();
+            if (payload == null) {
+                payload = new java.util.HashMap<>();
+                request.setPayload(payload);
+            }
+            BigDecimal shareAmt = nz(toBd(payload.get("sharePendingAmount"))).setScale(2, RoundingMode.HALF_UP);
+            BigDecimal nonShareAmt = nz(toBd(payload.get("nonShareAmount"))).setScale(2, RoundingMode.HALF_UP);
+            // 旧单/未拆池：整笔按非分成
+            if (shareAmt.signum() <= 0 && nonShareAmt.signum() <= 0) {
+                if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+                    throw new BusinessException("请填写退回金额");
+                }
+                nonShareAmt = request.getAmount().setScale(2, RoundingMode.HALF_UP);
+            }
+            if (shareAmt.signum() < 0 || nonShareAmt.signum() < 0) {
+                throw new BusinessException("退回金额不能为负");
+            }
+            BigDecimal total = shareAmt.add(nonShareAmt).setScale(2, RoundingMode.HALF_UP);
+            if (total.compareTo(BigDecimal.ZERO) <= 0) {
+                throw new BusinessException("请至少填写一笔退回金额");
+            }
+            if (shareAmt.compareTo(pendingBal) > 0) {
+                throw new BusinessException("待分成退回不能超过余额 ¥" + pendingBal.toPlainString());
+            }
+            if (nonShareAmt.compareTo(nonShareBal) > 0) {
+                throw new BusinessException("非分成退回不能超过余额 ¥" + nonShareBal.toPlainString());
+            }
+            if (total.compareTo(advanceHeld) > 0) {
+                throw new BusinessException("不能超过公司预支未退回 ¥" + advanceHeld.toPlainString());
+            }
+            request.setAmount(total);
+            payload.put("sharePendingAmount", shareAmt);
+            payload.put("nonShareAmount", nonShareAmt);
+
+            Long poolId = request.getPoolId();
+            Long companyId = null;
+            PmProject project = projectMapper.selectById(request.getProjectId());
+            if (project != null) {
+                companyId = project.getCompanyId();
+                if (poolId == null) {
+                    poolId = project.getPoolId();
+                }
+            }
+            FinPool pool = resolvePool(poolId, companyId);
+            request.setPoolId(pool.getId());
+        }
         if (ApprovalTypes.SALARY_MONTHLY.equals(type)) {
             if (request.getCompanyId() == null
                     && (request.getPayload() == null || request.getPayload().get("companyId") == null)) {
@@ -1816,6 +2266,24 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             Object items = request.getPayload().get("items");
             if (!(items instanceof List<?> list) || list.isEmpty()) {
                 throw new BusinessException("月度工资明细不能为空");
+            }
+            for (Object raw : list) {
+                if (!(raw instanceof Map<?, ?> row)) {
+                    throw new BusinessException("月度工资明细无效");
+                }
+                Object projectObj = row.get("projectId");
+                Object amountObj = row.get("amount");
+                Long projectId = projectObj instanceof Number n ? n.longValue() : null;
+                BigDecimal amount = toBd(amountObj);
+                if (projectId == null || amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+                    throw new BusinessException("月度工资明细无效");
+                }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> writable = (Map<String, Object>) row;
+                String fundType = resolveExpenseFundType(projectId, amount,
+                        writable.get("fundType") == null ? null : String.valueOf(writable.get("fundType")));
+                writable.put("fundType", fundType);
+                assertExpenseWithinQuota(projectId, amount, fundType);
             }
         }
         if (ApprovalTypes.REIMBURSE_PERSONAL.equals(type)) {
@@ -1841,14 +2309,15 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             projectService.assertCanView(request.getProjectId(), applicantId);
             BigDecimal amount = request.getAmount().setScale(2, RoundingMode.HALF_UP);
             request.setAmount(amount);
-            FinProjectAccount account = projectAccountService.getOne(
-                    new LambdaQueryWrapper<FinProjectAccount>()
-                            .eq(FinProjectAccount::getProjectId, request.getProjectId())
-                            .last("LIMIT 1"));
-            BigDecimal bal = account == null ? BigDecimal.ZERO : nz(account.getBalance());
-            if (bal.compareTo(amount) < 0) {
-                throw new BusinessException("项目可用余额不足，当前结余 ¥" + bal.toPlainString());
+            Map<String, Object> payload = request.getPayload();
+            if (payload == null) {
+                payload = new HashMap<>();
+                request.setPayload(payload);
             }
+            String fundType = resolveExpenseFundType(request.getProjectId(), amount,
+                    payload.get("fundType") == null ? null : String.valueOf(payload.get("fundType")));
+            payload.put("fundType", fundType);
+            assertExpenseWithinQuota(request.getProjectId(), amount, fundType);
         }
         if (ApprovalTypes.REIMBURSE_PERSONAL.equals(type)
                 || ApprovalTypes.REIMBURSE_PROJECT.equals(type)) {
@@ -1874,6 +2343,24 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             }
             if ("INCOME".equals(bizType) && payload.get("channelId") == null) {
                 throw new BusinessException("入账请选择收款渠道");
+            }
+            Long projectId = request.getProjectId();
+            if (projectId == null && payload != null && payload.get("projectId") != null) {
+                Object raw = payload.get("projectId");
+                if (raw instanceof Number n) {
+                    projectId = n.longValue();
+                }
+            }
+            if ("INCOME".equals(bizType) && projectId != null) {
+                Object rawFund = payload == null ? null : payload.get("fundType");
+                String fundType = ProjectFundTypes.require(rawFund == null ? null : String.valueOf(rawFund));
+                payload.put("fundType", fundType);
+            } else if (payload != null && payload.get("fundType") != null
+                    && StringUtils.hasText(String.valueOf(payload.get("fundType")))
+                    && !"null".equalsIgnoreCase(String.valueOf(payload.get("fundType")))) {
+                if (projectId == null) {
+                    throw new BusinessException("未关联项目时不能指定资金类型");
+                }
             }
         }
         if (ApprovalTypes.MONTHLY_VERIFY.equals(type)) {
@@ -1905,8 +2392,130 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             if (request.getProjectId() == null) {
                 throw new BusinessException("请选择项目");
             }
+            Map<String, Object> payload = request.getPayload();
+            if (payload == null) {
+                payload = new HashMap<>();
+                request.setPayload(payload);
+            }
+            Object monthObj = payload.get("periodMonth");
+            if (monthObj != null && StringUtils.hasText(String.valueOf(monthObj))
+                    && !"null".equalsIgnoreCase(String.valueOf(monthObj).trim())) {
+                String periodMonth = normalizePeriodMonth(String.valueOf(monthObj));
+                payload.put("periodMonth", periodMonth);
+                assertNoDuplicatePeriodApproval(ApprovalTypes.RESERVE_RETURN, request.getProjectId(), periodMonth);
+                FinProjectAccount account = projectAccountService.getOrCreate(request.getProjectId());
+                if (nz(account.getReserveHeld()).compareTo(BigDecimal.ZERO) <= 0) {
+                    throw new BusinessException("当前没有可回公司的预留占用");
+                }
+                request.setAmount(nz(account.getReserveHeld()));
+            } else {
+                FinProjectAccount account = projectAccountService.getOrCreate(request.getProjectId());
+                BigDecimal pendingBal = nz(account.getSharePendingBalance());
+                BigDecimal nonShareBal = nz(account.getNonShareBalance());
+                BigDecimal heldBal = nz(account.getReserveHeld());
+                boolean hasSplit = payload.containsKey("sharePendingAmount")
+                        || payload.containsKey("nonShareAmount")
+                        || payload.containsKey("reserveHeldAmount");
+                if (!hasSplit) {
+                    throw new BusinessException("请指定待分成/非分成/预留回公司金额");
+                }
+                BigDecimal shareAmt = nz(toBd(payload.get("sharePendingAmount"))).setScale(2, RoundingMode.HALF_UP);
+                BigDecimal nonShareAmt = nz(toBd(payload.get("nonShareAmount"))).setScale(2, RoundingMode.HALF_UP);
+                BigDecimal heldAmt = nz(toBd(payload.get("reserveHeldAmount"))).setScale(2, RoundingMode.HALF_UP);
+                if (shareAmt.signum() < 0 || nonShareAmt.signum() < 0 || heldAmt.signum() < 0) {
+                    throw new BusinessException("回公司金额不能为负");
+                }
+                BigDecimal total = shareAmt.add(nonShareAmt).add(heldAmt).setScale(2, RoundingMode.HALF_UP);
+                if (total.compareTo(BigDecimal.ZERO) <= 0) {
+                    throw new BusinessException("请至少填写一笔回公司金额");
+                }
+                // 防前端未失焦仍带着旧值：若显式传了 amount，须与拆分合计一致
+                if (request.getAmount() != null
+                        && request.getAmount().setScale(2, RoundingMode.HALF_UP).compareTo(total) != 0) {
+                    throw new BusinessException("回公司合计 ¥" + total.toPlainString()
+                            + " 与提交金额 ¥"
+                            + request.getAmount().setScale(2, RoundingMode.HALF_UP).toPlainString()
+                            + " 不一致，请重新填写后再提交");
+                }
+                if (shareAmt.compareTo(pendingBal) > 0) {
+                    throw new BusinessException("待分成回公司不能超过余额 ¥" + pendingBal.toPlainString());
+                }
+                if (nonShareAmt.compareTo(nonShareBal) > 0) {
+                    throw new BusinessException("非分成回公司不能超过余额 ¥" + nonShareBal.toPlainString());
+                }
+                if (heldAmt.compareTo(heldBal) > 0) {
+                    throw new BusinessException("预留占用回公司不能超过 ¥" + heldBal.toPlainString());
+                }
+                request.setAmount(total);
+                payload.put("sharePendingAmount", shareAmt);
+                payload.put("nonShareAmount", nonShareAmt);
+                payload.put("reserveHeldAmount", heldAmt);
+            }
+            // 确保有资金池
+            if (request.getPoolId() == null) {
+                PmProject project = projectMapper.selectById(request.getProjectId());
+                if (project != null) {
+                    request.setPoolId(project.getPoolId());
+                }
+            }
         }
-        if (ApprovalTypes.ASSET_BORROW.equals(type) || ApprovalTypes.ASSET_RETURN.equals(type)) {
+        if (ApprovalTypes.PROJECT_SHARE_PERIOD.equals(type)) {
+            if (request.getProjectId() == null) {
+                throw new BusinessException("请选择项目");
+            }
+            Map<String, Object> payload = request.getPayload();
+            if (payload == null) {
+                payload = new HashMap<>();
+                request.setPayload(payload);
+            }
+            String periodMonth = normalizePeriodMonth(
+                    payload.get("periodMonth") == null ? null : String.valueOf(payload.get("periodMonth")));
+            payload.put("periodMonth", periodMonth);
+            assertNoDuplicatePeriodApproval(ApprovalTypes.PROJECT_SHARE_PERIOD, request.getProjectId(), periodMonth);
+            FinProjectAccount account = projectAccountService.getOrCreate(request.getProjectId());
+            BigDecimal pending = nz(account.getSharePendingBalance());
+            if (pending.compareTo(BigDecimal.ZERO) <= 0) {
+                throw new BusinessException("待分成余额为 0，无法分层");
+            }
+            request.setAmount(pending);
+            PmProject project = projectMapper.selectById(request.getProjectId());
+            if (project == null) {
+                throw new BusinessException("项目不存在");
+            }
+            if (request.getPoolId() == null) {
+                request.setPoolId(project.getPoolId());
+            }
+            BigDecimal settlePercent = toBd(payload.get("settlePercent"));
+            BigDecimal reservePercent = toBd(payload.get("reservePercent"));
+            if (settlePercent == null) {
+                settlePercent = nz(project.getSettlePercent());
+            }
+            if (reservePercent == null) {
+                reservePercent = nz(project.getReservePercent());
+            }
+            assertSettleReservePercents(settlePercent, reservePercent);
+            payload.put("settlePercent", settlePercent);
+            payload.put("reservePercent", reservePercent);
+            payload.put("pendingAmount", pending);
+            // 预计算分成明细（按成员比例）
+            if (payload.get("items") == null && payload.get("shares") == null) {
+                BigDecimal settleAmt = pending.multiply(settlePercent)
+                        .divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+                if (settleAmt.compareTo(BigDecimal.ZERO) > 0) {
+                    Map<Long, BigDecimal> shares = buildSharesFromMembers(request.getProjectId(), settleAmt);
+                    List<Map<String, Object>> items = new ArrayList<>();
+                    for (Map.Entry<Long, BigDecimal> e : shares.entrySet()) {
+                        Map<String, Object> row = new HashMap<>();
+                        row.put("userId", e.getKey());
+                        row.put("amount", e.getValue());
+                        items.add(row);
+                    }
+                    payload.put("items", items);
+                }
+            }
+        }
+        if (ApprovalTypes.ASSET_BORROW.equals(type) || ApprovalTypes.ASSET_RETURN.equals(type)
+                || ApprovalTypes.ASSET_TRANSFER.equals(type)) {
             Map<String, Object> payload = request.getPayload();
             if (payload == null) {
                 payload = new HashMap<>();
@@ -1940,7 +2549,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                     payload.put("originalValue", asset.getOriginalValue());
                     payload.put("companyId", asset.getCompanyId());
                 }
-            } else {
+            } else if (ApprovalTypes.ASSET_RETURN.equals(type)) {
                 faAssetService.assertCanReturn(assetId, applicantId);
                 var asset = faAssetService.getById(assetId);
                 if (asset != null) {
@@ -1951,6 +2560,39 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                     payload.put("originalValue", asset.getOriginalValue());
                     payload.put("holderUserId", asset.getHolderUserId());
                     payload.put("companyId", asset.getCompanyId());
+                }
+            } else {
+                Long toUserId = null;
+                Object toObj = payload.get("toUserId");
+                if (toObj instanceof Number n) {
+                    toUserId = n.longValue();
+                } else if (toObj != null) {
+                    String text = String.valueOf(toObj).trim();
+                    if (StringUtils.hasText(text) && !"null".equalsIgnoreCase(text)) {
+                        try {
+                            toUserId = Long.parseLong(text);
+                        } catch (NumberFormatException e) {
+                            throw new BusinessException("新领用人参数无效");
+                        }
+                    }
+                }
+                faAssetService.assertCanTransfer(assetId, applicantId, toUserId);
+                var asset = faAssetService.getById(assetId);
+                if (asset != null) {
+                    request.setAmount(asset.getOriginalValue());
+                    request.setCompanyId(asset.getCompanyId());
+                    payload.put("assetCode", asset.getAssetCode());
+                    payload.put("assetName", asset.getName());
+                    payload.put("originalValue", asset.getOriginalValue());
+                    payload.put("fromUserId", asset.getHolderUserId());
+                    payload.put("toUserId", toUserId);
+                    payload.put("companyId", asset.getCompanyId());
+                    SysUser from = asset.getHolderUserId() != null ? userService.getById(asset.getHolderUserId()) : null;
+                    SysUser to = userService.getById(toUserId);
+                    payload.put("fromUserName", from == null ? null
+                            : (StringUtils.hasText(from.getNickname()) ? from.getNickname() : from.getUsername()));
+                    payload.put("toUserName", to == null ? null
+                            : (StringUtils.hasText(to.getNickname()) ? to.getNickname() : to.getUsername()));
                 }
             }
         }

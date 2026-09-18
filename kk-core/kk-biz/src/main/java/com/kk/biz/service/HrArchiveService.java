@@ -21,6 +21,12 @@ public interface HrArchiveService extends IService<HrArchive> {
 
     HrArchive getByUserId(Long userId);
 
+    /** 当前登录人档案（无则返回预填空壳，不落库） */
+    HrArchive getMine(Long userId);
+
+    /** 当前登录人保存自己的档案（无则创建，有则更新） */
+    void saveMine(Long userId, HrArchive archive);
+
     /** 当前用户档案下的收款方式 */
     List<HrPayMethod> listMyPayMethods(Long userId);
 

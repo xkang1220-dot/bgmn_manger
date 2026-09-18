@@ -34,6 +34,12 @@ public class LedgerCreateRequest {
 
     private Long projectId;
 
+    /**
+     * 关联项目时的资金类型：SHARE_PENDING（待分成）/ NON_SHARE（非分成）。
+     * 有 projectId 时必填；无项目时不得传。
+     */
+    private String fundType;
+
     private String title;
 
     private String remark;

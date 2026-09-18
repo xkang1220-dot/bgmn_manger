@@ -11,6 +11,7 @@ import com.kk.biz.entity.FaAssetEvent;
 import com.kk.biz.entity.FaDeprCategory;
 import com.kk.biz.entity.HrWallet;
 import com.kk.biz.entity.WfApproval;
+import com.kk.biz.enums.FaItemType;
 import com.kk.biz.mapper.FaAssetEventMapper;
 import com.kk.biz.mapper.FaAssetMapper;
 import com.kk.biz.mapper.FaDeprCategoryMapper;
@@ -66,12 +67,21 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
 
     @Override
     public Page<FaAsset> pageAssets(long page, long pageSize, Long companyId, String status,
-                                    Long holderUserId, String keyword) {
+                                    Long holderUserId, String itemType, String keyword) {
         long loginId = StpUtil.getLoginIdAsLong();
+        String typeCode = null;
+        if (StringUtils.hasText(itemType)) {
+            FaItemType t = FaItemType.fromCode(itemType.trim());
+            if (t == null) {
+                throw new BusinessException("资产类型无效");
+            }
+            typeCode = t.name();
+        }
         LambdaQueryWrapper<FaAsset> w = new LambdaQueryWrapper<FaAsset>()
                 .eq(companyId != null, FaAsset::getCompanyId, companyId)
                 .eq(StringUtils.hasText(status), FaAsset::getStatus, status)
                 .eq(holderUserId != null, FaAsset::getHolderUserId, holderUserId)
+                .eq(typeCode != null, FaAsset::getItemType, typeCode)
                 .orderByDesc(FaAsset::getId);
         if (StringUtils.hasText(keyword)) {
             String kw = keyword.trim();
@@ -111,6 +121,7 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
                 .setScale(2, RoundingMode.HALF_UP);
         asset.setAssetCode(asset.getAssetCode().trim());
         asset.setName(asset.getName().trim());
+        asset.setItemType(FaItemType.fromCode(asset.getItemType()).name());
         asset.setOriginalValue(original);
         asset.setResidualValue(residual);
         asset.setDeprMonths(category.getMonths());
@@ -123,6 +134,9 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
         asset.setHolderUserId(null);
         asset.setFrozenAmount(BigDecimal.ZERO);
         asset.setLockFreeze(0);
+        if (asset.getImageFileId() != null && asset.getImageFileId() <= 0) {
+            asset.setImageFileId(null);
+        }
         save(asset);
         writeEvent(asset, "CREATE", original, StpUtil.getLoginIdAsLong(), null, "资产入库");
     }
@@ -145,6 +159,12 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
         db.setRemark(asset.getRemark());
         db.setPurchaseDate(asset.getPurchaseDate());
         db.setDeprStartDate(asset.getDeprStartDate());
+        if (StringUtils.hasText(asset.getItemType())) {
+            if (!FaItemType.isValid(asset.getItemType())) {
+                throw new BusinessException("物品类别无效");
+            }
+            db.setItemType(FaItemType.fromCode(asset.getItemType()).name());
+        }
 
         boolean neverDepr = db.getAccumDepr() == null || db.getAccumDepr().compareTo(BigDecimal.ZERO) == 0;
         if (neverDepr) {
@@ -185,6 +205,22 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
             }
         }
         updateById(db);
+        // NOT_NULL 策略下 updateById 不会写 null，需单独处理图片清除/变更
+        Long imageFileId = asset.getImageFileId() != null && asset.getImageFileId() > 0
+                ? asset.getImageFileId() : null;
+        if (!Objects.equals(imageFileId, db.getImageFileId())) {
+            if (imageFileId == null) {
+                lambdaUpdate()
+                        .eq(FaAsset::getId, db.getId())
+                        .setSql("image_file_id = NULL")
+                        .update();
+            } else {
+                lambdaUpdate()
+                        .eq(FaAsset::getId, db.getId())
+                        .set(FaAsset::getImageFileId, imageFileId)
+                        .update();
+            }
+        }
     }
 
     @Override
@@ -222,9 +258,43 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
             throw new BusinessException("仅领用中的资产可申请归还");
         }
         if (!Objects.equals(asset.getHolderUserId(), applicantId)) {
-            throw new BusinessException("仅当前持有人可申请归还");
+            throw new BusinessException("仅当前领用人可申请归还");
         }
         assertNoPending(assetId);
+    }
+
+    @Override
+    public void assertCanTransfer(Long assetId, long applicantId, Long toUserId) {
+        FaAsset asset = requireVisible(assetId);
+        if (!STATUS_IN_USE.equals(asset.getStatus())) {
+            throw new BusinessException("仅领用中的资产可转交");
+        }
+        if (!Objects.equals(asset.getHolderUserId(), applicantId)) {
+            throw new BusinessException("仅当前领用人可申请转交");
+        }
+        if (toUserId == null) {
+            throw new BusinessException("请选择新领用人");
+        }
+        if (Objects.equals(toUserId, applicantId)) {
+            throw new BusinessException("新领用人不能是自己");
+        }
+        SysUser toUser = userService.getById(toUserId);
+        if (toUser == null) {
+            throw new BusinessException("新领用人不存在");
+        }
+        if (!dataScopeService.isGlobalAdmin(toUserId)
+                && (asset.getCompanyId() == null
+                || !dataScopeService.visibleCompanyIds(toUserId).contains(asset.getCompanyId()))) {
+            throw new BusinessException("新领用人无权接收该公司资产");
+        }
+        assertNoPending(assetId);
+        if (Objects.equals(asset.getLockFreeze(), 1) && nz(asset.getFrozenAmount()).compareTo(BigDecimal.ZERO) > 0) {
+            HrWallet wallet = walletService.getOrCreate(toUserId);
+            BigDecimal available = nz(wallet.getBalance()).subtract(nz(wallet.getFrozen()));
+            if (available.compareTo(nz(asset.getFrozenAmount())) < 0) {
+                throw new BusinessException("新领用人钱包可用余额不足，无法承接冻结金额");
+            }
+        }
     }
 
     @Override
@@ -283,10 +353,10 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
         }
         Long holderId = asset.getHolderUserId();
         if (holderId == null) {
-            throw new BusinessException("资产持有人缺失，无法归还");
+            throw new BusinessException("资产领用人缺失，无法归还");
         }
         if (!Objects.equals(holderId, approval.getApplicantId())) {
-            throw new BusinessException("归还申请人与持有人不一致");
+            throw new BusinessException("归还申请人与领用人不一致");
         }
         if (Objects.equals(asset.getLockFreeze(), 1) && nz(asset.getFrozenAmount()).compareTo(BigDecimal.ZERO) > 0) {
             walletService.unfreeze(holderId, asset.getFrozenAmount());
@@ -311,6 +381,74 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
         asset.setLockFreeze(0);
         writeEvent(asset, "RETURN", asset.getOriginalValue(), approval.getApplicantId(),
                 approval.getId(), "归还生效");
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void effectTransfer(WfApproval approval) {
+        JSONObject payload = JSONUtil.parseObj(approval.getPayload());
+        Long assetId = payload.getLong("assetId");
+        Long toUserId = payload.getLong("toUserId");
+        if (assetId == null) {
+            throw new BusinessException("转交审批缺少资产");
+        }
+        if (toUserId == null) {
+            throw new BusinessException("转交审批缺少新领用人");
+        }
+        FaAsset asset = getById(assetId);
+        if (asset == null) {
+            throw new BusinessException("资产不存在");
+        }
+        if (approval.getCompanyId() != null && !Objects.equals(approval.getCompanyId(), asset.getCompanyId())) {
+            throw new BusinessException("审批公司与资产公司不一致");
+        }
+        if (!STATUS_IN_USE.equals(asset.getStatus())) {
+            throw new BusinessException("资产不是领用中，无法转交");
+        }
+        Long fromUserId = asset.getHolderUserId();
+        if (fromUserId == null) {
+            throw new BusinessException("资产领用人缺失，无法转交");
+        }
+        if (!Objects.equals(fromUserId, approval.getApplicantId())) {
+            throw new BusinessException("转交申请人与当前领用人不一致");
+        }
+        if (Objects.equals(fromUserId, toUserId)) {
+            throw new BusinessException("新领用人不能是当前领用人");
+        }
+        SysUser toUser = userService.getById(toUserId);
+        if (toUser == null) {
+            throw new BusinessException("新领用人不存在");
+        }
+        if (!dataScopeService.isGlobalAdmin(toUserId)
+                && (asset.getCompanyId() == null
+                || !dataScopeService.visibleCompanyIds(toUserId).contains(asset.getCompanyId()))) {
+            throw new BusinessException("新领用人无权接收该公司资产");
+        }
+
+        boolean stillFrozen = Objects.equals(asset.getLockFreeze(), 1)
+                && nz(asset.getFrozenAmount()).compareTo(BigDecimal.ZERO) > 0;
+        BigDecimal frozen = nz(asset.getFrozenAmount());
+
+        // 先 CAS 变更领用人，再迁移冻结；任一步失败整单回滚，避免钱到人未到
+        boolean ok = lambdaUpdate()
+                .eq(FaAsset::getId, assetId)
+                .eq(FaAsset::getStatus, STATUS_IN_USE)
+                .eq(FaAsset::getHolderUserId, fromUserId)
+                .set(FaAsset::getHolderUserId, toUserId)
+                .update();
+        if (!ok) {
+            throw new BusinessException("资产状态已变更，转交失败");
+        }
+        if (stillFrozen) {
+            walletService.unfreeze(fromUserId, frozen);
+            walletService.freeze(toUserId, frozen);
+        }
+        asset.setHolderUserId(toUserId);
+        String fromName = resolveUserName(fromUserId);
+        String toName = resolveUserName(toUserId);
+        writeEvent(asset, "TRANSFER", stillFrozen ? frozen : asset.getOriginalValue(),
+                approval.getApplicantId(), approval.getId(),
+                "转交：" + fromName + " → " + toName + (stillFrozen ? "（冻结已迁移）" : "（无冻结）"));
     }
 
     @Override
@@ -403,14 +541,15 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
     private void assertNoPending(Long assetId) {
         List<WfApproval> pending = approvalMapper.selectList(new LambdaQueryWrapper<WfApproval>()
                 .eq(WfApproval::getStatus, "PENDING")
-                .in(WfApproval::getType, ApprovalTypes.ASSET_BORROW, ApprovalTypes.ASSET_RETURN));
+                .in(WfApproval::getType, ApprovalTypes.ASSET_BORROW, ApprovalTypes.ASSET_RETURN,
+                        ApprovalTypes.ASSET_TRANSFER));
         for (WfApproval a : pending) {
             if (!StringUtils.hasText(a.getPayload())) {
                 continue;
             }
             Long id = JSONUtil.parseObj(a.getPayload()).getLong("assetId");
             if (Objects.equals(id, assetId)) {
-                throw new BusinessException("该资产已有进行中的领用/归还审批");
+                throw new BusinessException("该资产已有进行中的领用/归还/转交审批");
             }
         }
     }
@@ -422,6 +561,9 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
         if (asset.getCategoryId() == null) {
             throw new BusinessException("请选择折旧类别");
         }
+        if (!StringUtils.hasText(asset.getItemType()) || !FaItemType.isValid(asset.getItemType())) {
+            throw new BusinessException("请选择物品类别");
+        }
         if (!StringUtils.hasText(asset.getAssetCode())) {
             throw new BusinessException("请填写资产编码");
         }
@@ -430,6 +572,9 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
         }
         if (asset.getOriginalValue() == null || asset.getOriginalValue().compareTo(BigDecimal.ZERO) <= 0) {
             throw new BusinessException("原值须大于 0");
+        }
+        if (asset.getImageFileId() != null && asset.getImageFileId() <= 0) {
+            asset.setImageFileId(null);
         }
     }
 
@@ -531,6 +676,10 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
             if (a.getCategoryId() != null) {
                 a.setCategoryName(categoryNames.get(a.getCategoryId()));
             }
+            a.setItemTypeName(FaItemType.labelOf(a.getItemType()));
+            if (a.getImageFileId() != null && a.getImageFileId() > 0) {
+                a.setImageUrl("/api/file/preview/" + a.getImageFileId());
+            }
             // 在库资产 holderUserId 为 null；不可对 ImmutableMap 调 get(null)
             if (a.getHolderUserId() == null) {
                 continue;
@@ -540,6 +689,17 @@ public class FaAssetServiceImpl extends ServiceImpl<FaAssetMapper, FaAsset> impl
                 a.setHolderName(StringUtils.hasText(u.getNickname()) ? u.getNickname() : u.getUsername());
             }
         }
+    }
+
+    private String resolveUserName(Long userId) {
+        if (userId == null) {
+            return "—";
+        }
+        SysUser u = userService.getById(userId);
+        if (u == null) {
+            return String.valueOf(userId);
+        }
+        return StringUtils.hasText(u.getNickname()) ? u.getNickname() : u.getUsername();
     }
 
     private static BigDecimal nz(BigDecimal v) {

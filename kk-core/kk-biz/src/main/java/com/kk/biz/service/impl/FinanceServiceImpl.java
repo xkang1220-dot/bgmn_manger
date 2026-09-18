@@ -31,6 +31,7 @@ import com.kk.biz.mapper.PmProjectMemberMapper;
 import com.kk.biz.mapper.WfApprovalMapper;
 import com.kk.biz.service.FinLedgerThresholdService;
 import com.kk.biz.service.FinPayChannelService;
+import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.FinanceService;
 import com.kk.biz.service.HrWalletService;
 import com.kk.biz.service.SysFileService;
@@ -38,6 +39,7 @@ import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.dto.ApprovalSubmitRequest;
 import com.kk.biz.support.BizNoGenerator;
 import com.kk.biz.workflow.ApprovalTypes;
+import com.kk.biz.workflow.ProjectFundTypes;
 import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
 import com.kk.system.entity.SysDept;
@@ -95,6 +97,10 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
     @Lazy
     @Autowired
     private WfApprovalService wfApprovalService;
+
+    @Lazy
+    @Autowired
+    private FinProjectAccountService projectAccountService;
 
     @Override
     public FinPool getDefaultPool() {
@@ -363,6 +369,7 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
             throw new BusinessException("金额必须大于 0");
         }
+        validateLedgerFundType(request);
         try {
             if (request.getApprovalId() != null) {
                 approvalIdHolder.set(request.getApprovalId());
@@ -413,6 +420,7 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         if ("INCOME".equals(bizType) && request.getChannelId() == null) {
             throw new BusinessException("入账请选择收款渠道");
         }
+        validateLedgerFundType(request);
 
         // 入账：始终财务审批
         if ("INCOME".equals(bizType)) {
@@ -473,6 +481,7 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         payload.put("amount", request.getAmount());
         payload.put("feeMode", request.getFeeMode());
         payload.put("feeValue", request.getFeeValue());
+        payload.put("fundType", request.getFundType());
         payload.put("title", request.getTitle());
         payload.put("remark", request.getRemark());
         payload.put("voucherFileIds", request.getVoucherFileIds());
@@ -1037,7 +1046,34 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         if (request.getChannelId() != null) {
             payChannelService.creditBalance(request.getChannelId(), net);
         }
+        // 关联项目：净额拨入项目指定资金池（公司池同步扣减，与预支同口径）
+        if (request.getProjectId() != null) {
+            String fundType = ProjectFundTypes.require(request.getFundType());
+            projectAccountService.creditProjectFund(
+                    request.getProjectId(),
+                    request.getPoolId(),
+                    net,
+                    fundType,
+                    request.getApprovalId(),
+                    title,
+                    request.getRemark());
+        }
         return incomeId;
+    }
+
+    private void validateLedgerFundType(LedgerCreateRequest request) {
+        if (request == null) {
+            return;
+        }
+        if (request.getProjectId() != null) {
+            if (!"INCOME".equals(request.getBizType())) {
+                return;
+            }
+            request.setFundType(ProjectFundTypes.require(request.getFundType()));
+            projectAccountService.assertMutableProject(request.getProjectId());
+        } else if (StringUtils.hasText(request.getFundType())) {
+            throw new BusinessException("未关联项目时不能指定资金类型");
+        }
     }
 
     private BigDecimal calcFee(BigDecimal gross, String feeMode, BigDecimal feeValue) {

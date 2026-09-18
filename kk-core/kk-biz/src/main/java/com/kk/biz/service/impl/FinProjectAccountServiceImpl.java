@@ -16,6 +16,7 @@ import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.HrWalletService;
 import com.kk.biz.service.PmProjectService;
 import com.kk.biz.support.BizNoGenerator;
+import com.kk.biz.workflow.ProjectFundTypes;
 import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
 import com.kk.system.entity.SysDept;
@@ -33,6 +34,7 @@ import org.springframework.util.StringUtils;
 import cn.dev33.satoken.stp.StpUtil;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -67,6 +69,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
                 .eq(FinProjectAccount::getProjectId, projectId)
                 .last("LIMIT 1"));
         if (account != null) {
+            healFundBuckets(account);
             return account;
         }
         PmProject project = projectMapper.selectById(projectId);
@@ -76,6 +79,8 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         account = new FinProjectAccount();
         account.setProjectId(projectId);
         account.setBalance(BigDecimal.ZERO);
+        account.setSharePendingBalance(BigDecimal.ZERO);
+        account.setNonShareBalance(BigDecimal.ZERO);
         account.setAdvanceAmount(BigDecimal.ZERO);
         account.setExpenseAmount(BigDecimal.ZERO);
         account.setSettleAmount(BigDecimal.ZERO);
@@ -273,12 +278,16 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
                 account.setProjectId(project.getId());
                 account.setCompanyId(project.getCompanyId());
                 account.setBalance(BigDecimal.ZERO);
+                account.setSharePendingBalance(BigDecimal.ZERO);
+                account.setNonShareBalance(BigDecimal.ZERO);
                 account.setAdvanceAmount(BigDecimal.ZERO);
                 account.setExpenseAmount(BigDecimal.ZERO);
                 account.setSettleAmount(BigDecimal.ZERO);
                 account.setReserveAmount(BigDecimal.ZERO);
                 account.setReserveHeld(BigDecimal.ZERO);
                 account.setStatus(1);
+            } else {
+                healFundBuckets(account);
             }
             accounts.add(account);
         }
@@ -344,53 +353,78 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void advanceFromCompany(Long projectId, Long poolId, BigDecimal amount, Long approvalId, String remark) {
+        creditProjectFund(projectId, poolId, amount, ProjectFundTypes.NON_SHARE, approvalId,
+                "项目预支入账", remark);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void creditProjectFund(Long projectId, Long poolId, BigDecimal amount, String fundType,
+                                  Long approvalId, String title, String remark) {
         assertMutableProject(projectId);
         requirePositive(amount);
-        FinPool pool = requirePool(poolId, projectId);
+        String pool = ProjectFundTypes.normalize(fundType);
+        FinPool companyPool = requirePool(poolId, projectId);
         FinProjectAccount account = getOrCreate(projectId);
-        BigDecimal poolBefore = pool.getBalance();
-        debitPool(pool, amount);
-        pool = poolMapper.selectById(pool.getId());
+        BigDecimal poolBefore = companyPool.getBalance();
+        debitPool(companyPool, amount);
+        companyPool = poolMapper.selectById(companyPool.getId());
 
-        Long companyLedgerId = writeLedger("ADVANCE", "POOL", pool.getId(), null, null, amount.negate(),
-                poolBefore, pool.getBalance(), projectId, null, approvalId,
-                "项目预支扣款", remark);
+        String debitTitle = StringUtils.hasText(title) ? title + "扣公司" : "拨入项目扣公司";
+        String creditTitle = StringUtils.hasText(title) ? title : "拨入项目";
+        Long companyLedgerId = writeLedger("ADVANCE", "POOL", companyPool.getId(), null, null, amount.negate(),
+                poolBefore, companyPool.getBalance(), projectId, null, approvalId,
+                debitTitle, remark);
 
-        BigDecimal projectBefore = account.getBalance();
+        BigDecimal projectBefore = nz(account.getBalance());
         account.setAdvanceAmount(nz(account.getAdvanceAmount()).add(amount));
-        account.setBalance(nz(account.getBalance()).add(amount));
+        account.setBalance(projectBefore.add(amount));
+        creditFundBucket(account, pool, amount);
         updateById(account);
-        // 入账流水：可用余额 = before + amount（预留占用另记）
-        writeLedger("ADVANCE", "PROJECT", pool.getId(), null, null, amount,
+        writeLedger("ADVANCE", "PROJECT", companyPool.getId(), null, null, amount,
                 projectBefore, account.getBalance(), projectId, companyLedgerId, approvalId,
-                "项目预支入账", remark);
-
-        // 若有约定预留且尚未占用，再锁定预留
-        BigDecimal needHold = nz(account.getReserveAmount()).subtract(nz(account.getReserveHeld()));
-        if (needHold.compareTo(BigDecimal.ZERO) > 0) {
-            BigDecimal hold = needHold.min(nz(account.getBalance()));
-            if (hold.compareTo(BigDecimal.ZERO) > 0) {
-                BigDecimal beforeHold = account.getBalance();
-                account.setReserveHeld(nz(account.getReserveHeld()).add(hold));
-                account.setBalance(beforeHold.subtract(hold));
-                updateById(account);
-                writeLedger("RESERVE", "PROJECT", pool.getId(), null, null, hold.negate(),
-                        beforeHold, account.getBalance(), projectId, companyLedgerId, approvalId,
-                        "预留占用", "预支后自动锁定预留");
-            }
-        }
+                creditTitle + " · " + ProjectFundTypes.label(pool), remark);
         assertBalanced(projectId);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void reverseAdvance(Long projectId, Long poolId, BigDecimal amount, Long approvalId, String remark) {
+        reverseAdvance(projectId, poolId, amount, null, null, approvalId, remark);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void reverseAdvance(Long projectId, Long poolId, BigDecimal amount,
+                               BigDecimal sharePendingAmount, BigDecimal nonShareAmount,
+                               Long approvalId, String remark) {
+        BigDecimal shareAmt = nz(sharePendingAmount);
+        BigDecimal nonShareAmt = nz(nonShareAmount);
+        if (shareAmt.signum() <= 0 && nonShareAmt.signum() <= 0) {
+            reverseProjectFund(projectId, poolId, amount, ProjectFundTypes.NON_SHARE, approvalId, remark);
+            return;
+        }
+        BigDecimal total = shareAmt.add(nonShareAmt).setScale(2, RoundingMode.HALF_UP);
+        if (amount != null && amount.compareTo(total) != 0) {
+            throw new BusinessException("退回合计须等于审批金额 ¥" + amount.setScale(2, RoundingMode.HALF_UP).toPlainString());
+        }
+        if (shareAmt.signum() > 0) {
+            reverseProjectFund(projectId, poolId, shareAmt, ProjectFundTypes.SHARE_PENDING, approvalId, remark);
+        }
+        if (nonShareAmt.signum() > 0) {
+            reverseProjectFund(projectId, poolId, nonShareAmt, ProjectFundTypes.NON_SHARE, approvalId, remark);
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void reverseProjectFund(Long projectId, Long poolId, BigDecimal amount, String fundType,
+                                   Long approvalId, String remark) {
         assertMutableProject(projectId);
         requirePositive(amount);
+        String poolType = ProjectFundTypes.normalize(fundType);
         FinProjectAccount account = getOrCreate(projectId);
-        if (nz(account.getBalance()).compareTo(amount) < 0) {
-            throw new BusinessException("项目可用余额不足，无法回退预支");
-        }
+        assertFundEnough(account, poolType, amount);
         if (nz(account.getAdvanceAmount()).compareTo(amount) < 0) {
             throw new BusinessException("回退金额超过累计预支");
         }
@@ -398,36 +432,44 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         BigDecimal projectBefore = account.getBalance();
         account.setBalance(projectBefore.subtract(amount));
         account.setAdvanceAmount(nz(account.getAdvanceAmount()).subtract(amount));
+        debitFundBucket(account, poolType, amount);
         updateById(account);
         Long projectLedger = writeLedger("ROLLBACK", "PROJECT", pool.getId(), null, null, amount.negate(),
                 projectBefore, account.getBalance(), projectId, null, approvalId,
-                "预支回退出账", remark);
+                "拨入回退出账 · " + ProjectFundTypes.label(poolType), remark);
 
         BigDecimal poolBefore = pool.getBalance();
         creditPool(pool, amount);
         pool = poolMapper.selectById(pool.getId());
         writeLedger("ROLLBACK", "POOL", pool.getId(), null, null, amount,
                 poolBefore, pool.getBalance(), projectId, projectLedger, approvalId,
-                "预支回退入公司总账", remark);
+                "拨入回退入公司总账", remark);
         assertBalanced(projectId);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void expense(Long projectId, BigDecimal amount, Long approvalId, String title, String remark) {
+        expense(projectId, amount, ProjectFundTypes.SHARE_PENDING, approvalId, title, remark);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void expense(Long projectId, BigDecimal amount, String fundType, Long approvalId, String title, String remark) {
         assertMutableProject(projectId);
         requirePositive(amount);
+        String pool = ProjectFundTypes.normalize(fundType);
         FinProjectAccount account = getOrCreate(projectId);
-        if (nz(account.getBalance()).compareTo(amount) < 0) {
-            throw new BusinessException("项目可用余额不足");
-        }
+        assertFundEnough(account, pool, amount);
         BigDecimal before = account.getBalance();
         account.setBalance(before.subtract(amount));
         account.setExpenseAmount(nz(account.getExpenseAmount()).add(amount));
+        debitFundBucket(account, pool, amount);
         updateById(account);
         writeLedger("EXPENSE", "PROJECT", null, null, null, amount.negate(),
                 before, account.getBalance(), projectId, null, approvalId,
-                StringUtils.hasText(title) ? title : "项目支出", remark);
+                StringUtils.hasText(title) ? title : "项目支出",
+                appendFundRemark(remark, pool));
         assertBalanced(projectId);
     }
 
@@ -435,24 +477,32 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Transactional(rollbackFor = Exception.class)
     public void expenseToWallet(Long projectId, Long userId, BigDecimal amount, Long approvalId,
                                 String bizType, String title, String remark) {
+        expenseToWallet(projectId, userId, amount, ProjectFundTypes.SHARE_PENDING, approvalId, bizType, title, remark);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void expenseToWallet(Long projectId, Long userId, BigDecimal amount, String fundType, Long approvalId,
+                                String bizType, String title, String remark) {
         assertMutableProject(projectId);
         requirePositive(amount);
         if (userId == null) {
             throw new BusinessException("缺少收款人，无法转入个人钱包");
         }
+        String pool = ProjectFundTypes.normalize(fundType);
         String type = StringUtils.hasText(bizType) ? bizType : "EXPENSE";
         FinProjectAccount account = getOrCreate(projectId);
-        if (nz(account.getBalance()).compareTo(amount) < 0) {
-            throw new BusinessException("项目可用余额不足");
-        }
+        assertFundEnough(account, pool, amount);
         BigDecimal projectBefore = account.getBalance();
         account.setBalance(projectBefore.subtract(amount));
         account.setExpenseAmount(nz(account.getExpenseAmount()).add(amount));
+        debitFundBucket(account, pool, amount);
         updateById(account);
 
         Long batchId = writeLedger(type, "PROJECT", null, null, null, amount.negate(),
                 projectBefore, account.getBalance(), projectId, null, approvalId,
-                StringUtils.hasText(title) ? title : "项目支出", remark);
+                StringUtils.hasText(title) ? title : "项目支出",
+                appendFundRemark(remark, pool));
 
         HrWallet walletBefore = walletService.getOrCreate(userId);
         BigDecimal wb = walletBefore.getBalance();
@@ -474,12 +524,11 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         BigDecimal total = shares.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
         requirePositive(total);
         FinProjectAccount account = getOrCreate(projectId);
-        if (nz(account.getBalance()).compareTo(total) < 0) {
-            throw new BusinessException("项目可用余额不足，无法分成");
-        }
+        assertFundEnough(account, ProjectFundTypes.SHARE_PENDING, total);
         BigDecimal before = account.getBalance();
         account.setBalance(before.subtract(total));
         account.setSettleAmount(nz(account.getSettleAmount()).add(total));
+        debitFundBucket(account, ProjectFundTypes.SHARE_PENDING, total);
         updateById(account);
 
         PmProject project = projectMapper.selectById(projectId);
@@ -515,6 +564,24 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public void holdFromSharePending(Long projectId, BigDecimal amount, Long approvalId, String remark) {
+        assertMutableProject(projectId);
+        requirePositive(amount);
+        FinProjectAccount account = getOrCreate(projectId);
+        assertFundEnough(account, ProjectFundTypes.SHARE_PENDING, amount);
+        BigDecimal before = account.getBalance();
+        account.setBalance(before.subtract(amount));
+        debitFundBucket(account, ProjectFundTypes.SHARE_PENDING, amount);
+        account.setReserveHeld(nz(account.getReserveHeld()).add(amount));
+        updateById(account);
+        writeLedger("RESERVE", "PROJECT", null, null, null, amount.negate(),
+                before, account.getBalance(), projectId, null, approvalId,
+                "待分成转入预留", remark);
+        assertBalanced(projectId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public void holdReserve(Long projectId, BigDecimal reserveAmount) {
         assertMutableProject(projectId);
         FinProjectAccount account = getOrCreate(projectId);
@@ -526,15 +593,15 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         BigDecimal held = nz(account.getReserveHeld());
         if (target.compareTo(held) > 0) {
             BigDecimal need = target.subtract(held);
-            if (nz(account.getBalance()).compareTo(need) < 0) {
-                throw new BusinessException("可用余额不足以锁定预留");
-            }
-            account.setBalance(account.getBalance().subtract(need));
+            assertFundEnough(account, ProjectFundTypes.SHARE_PENDING, need);
+            account.setBalance(nz(account.getBalance()).subtract(need));
+            debitFundBucket(account, ProjectFundTypes.SHARE_PENDING, need);
             account.setReserveHeld(held.add(need));
         } else if (target.compareTo(held) < 0) {
             BigDecimal release = held.subtract(target);
             account.setReserveHeld(target);
             account.setBalance(nz(account.getBalance()).add(release));
+            creditFundBucket(account, ProjectFundTypes.SHARE_PENDING, release);
         }
         updateById(account);
         PmProject project = projectMapper.selectById(projectId);
@@ -548,23 +615,67 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void returnReserveToCompany(Long projectId, Long poolId, Long approvalId, String remark) {
+        // 禁止整笔清仓；历史调用方须改为传入三池拆分金额
+        throw new BusinessException("结余回公司须指定待分成/非分成/预留金额，禁止整笔清仓");
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void returnReserveToCompany(Long projectId, Long poolId,
+                                       BigDecimal sharePendingAmount, BigDecimal nonShareAmount, BigDecimal reserveHeldAmount,
+                                       Long approvalId, String remark) {
         assertMutableProject(projectId);
-        FinProjectAccount account = getOrCreate(projectId);
-        BigDecimal held = nz(account.getReserveHeld());
-        BigDecimal available = nz(account.getBalance());
-        BigDecimal total = available.add(held);
+        BigDecimal shareAmt = nz(sharePendingAmount).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal nonShareAmt = nz(nonShareAmount).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal heldAmt = nz(reserveHeldAmount).setScale(2, RoundingMode.HALF_UP);
+        if (shareAmt.signum() < 0 || nonShareAmt.signum() < 0 || heldAmt.signum() < 0) {
+            throw new BusinessException("回公司金额不能为负");
+        }
+        BigDecimal availablePart = shareAmt.add(nonShareAmt);
+        BigDecimal total = availablePart.add(heldAmt);
         if (total.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new BusinessException("项目没有可回公司的结余");
+            throw new BusinessException("请至少填写一笔回公司金额");
+        }
+        FinProjectAccount account = getOrCreate(projectId);
+        if (shareAmt.signum() > 0
+                && nz(account.getSharePendingBalance()).compareTo(shareAmt) < 0) {
+            throw new BusinessException("待分成余额不足，当前 ¥"
+                    + nz(account.getSharePendingBalance()).toPlainString());
+        }
+        if (nonShareAmt.signum() > 0
+                && nz(account.getNonShareBalance()).compareTo(nonShareAmt) < 0) {
+            throw new BusinessException("非分成余额不足，当前 ¥"
+                    + nz(account.getNonShareBalance()).toPlainString());
+        }
+        if (availablePart.compareTo(nz(account.getBalance())) > 0) {
+            throw new BusinessException("项目可用余额不足，当前 ¥"
+                    + nz(account.getBalance()).toPlainString()
+                    + "，本次需扣可用 ¥" + availablePart.toPlainString());
+        }
+        if (heldAmt.compareTo(nz(account.getReserveHeld())) > 0) {
+            throw new BusinessException("预留占用不足，当前 ¥" + nz(account.getReserveHeld()).toPlainString());
         }
         FinPool pool = requirePool(poolId, projectId);
-        BigDecimal projectBefore = account.getBalance();
-        // 结余 = 当前余额 + 若有历史预留占用一并退回公司
-        account.setBalance(BigDecimal.ZERO);
-        account.setReserveHeld(BigDecimal.ZERO);
-        account.setReserveAmount(BigDecimal.ZERO);
+        BigDecimal projectBefore = nz(account.getBalance());
+        if (availablePart.compareTo(BigDecimal.ZERO) > 0) {
+            account.setBalance(projectBefore.subtract(availablePart));
+            if (shareAmt.signum() > 0) {
+                debitFundBucket(account, ProjectFundTypes.SHARE_PENDING, shareAmt);
+            }
+            if (nonShareAmt.signum() > 0) {
+                debitFundBucket(account, ProjectFundTypes.NON_SHARE, nonShareAmt);
+            }
+        }
+        if (heldAmt.signum() > 0) {
+            account.setReserveHeld(nz(account.getReserveHeld()).subtract(heldAmt));
+        }
         account.setAdvanceAmount(nz(account.getAdvanceAmount()).subtract(total));
         if (nz(account.getAdvanceAmount()).compareTo(BigDecimal.ZERO) < 0) {
             account.setAdvanceAmount(BigDecimal.ZERO);
+        }
+        if (nz(account.getBalance()).compareTo(BigDecimal.ZERO) == 0
+                && nz(account.getReserveHeld()).compareTo(BigDecimal.ZERO) == 0) {
+            account.setReserveAmount(BigDecimal.ZERO);
         }
         updateById(account);
 
@@ -582,6 +693,37 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void returnReserveHeldToCompany(Long projectId, Long poolId, Long approvalId, String remark) {
+        assertMutableProject(projectId);
+        FinProjectAccount account = getOrCreate(projectId);
+        BigDecimal held = nz(account.getReserveHeld());
+        if (held.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("当前没有可回公司的预留占用");
+        }
+        FinPool pool = requirePool(poolId, projectId);
+        BigDecimal projectBefore = account.getBalance();
+        account.setReserveHeld(BigDecimal.ZERO);
+        account.setAdvanceAmount(nz(account.getAdvanceAmount()).subtract(held));
+        if (nz(account.getAdvanceAmount()).compareTo(BigDecimal.ZERO) < 0) {
+            account.setAdvanceAmount(BigDecimal.ZERO);
+        }
+        updateById(account);
+
+        Long projectLedger = writeLedger("RESERVE", "PROJECT", pool.getId(), null, null, held.negate(),
+                projectBefore, account.getBalance(), projectId, null, approvalId,
+                "预留占用回公司", remark);
+
+        BigDecimal poolBefore = pool.getBalance();
+        creditPool(pool, held);
+        pool = poolMapper.selectById(pool.getId());
+        writeLedger("RESERVE", "POOL", pool.getId(), null, null, held,
+                poolBefore, pool.getBalance(), projectId, projectLedger, approvalId,
+                "预留占用入公司总账", remark);
+        assertBalanced(projectId);
+    }
+
+    @Override
     public void assertBalanced(Long projectId) {
         FinProjectAccount account = getOrCreate(projectId);
         BigDecimal expected = nz(account.getAdvanceAmount())
@@ -592,6 +734,74 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
             throw new BusinessException("项目账款轧平失败：可用=" + account.getBalance()
                     + "，应有=" + expected + "（预支-支出-分成-预留）");
         }
+        BigDecimal fundSum = nz(account.getSharePendingBalance()).add(nz(account.getNonShareBalance()));
+        if (fundSum.compareTo(nz(account.getBalance())) != 0) {
+            throw new BusinessException("项目资金池轧平失败：可用=" + account.getBalance()
+                    + "，待分成+非分成=" + fundSum);
+        }
+    }
+
+    private void healFundBuckets(FinProjectAccount account) {
+        if (account == null) {
+            return;
+        }
+        BigDecimal pending = nz(account.getSharePendingBalance());
+        BigDecimal nonShare = nz(account.getNonShareBalance());
+        BigDecimal bal = nz(account.getBalance());
+        if (account.getSharePendingBalance() == null) {
+            account.setSharePendingBalance(pending);
+        }
+        if (account.getNonShareBalance() == null) {
+            account.setNonShareBalance(nonShare);
+        }
+        // 字段已加但未回填：历史结余按公司预支归入非分成
+        if (pending.add(nonShare).compareTo(BigDecimal.ZERO) == 0 && bal.compareTo(BigDecimal.ZERO) != 0) {
+            if (bal.compareTo(BigDecimal.ZERO) > 0) {
+                account.setNonShareBalance(bal);
+                account.setSharePendingBalance(BigDecimal.ZERO);
+            } else {
+                account.setSharePendingBalance(bal);
+                account.setNonShareBalance(BigDecimal.ZERO);
+            }
+            updateById(account);
+        }
+    }
+
+    private void creditFundBucket(FinProjectAccount account, String fundType, BigDecimal amount) {
+        if (ProjectFundTypes.NON_SHARE.equals(fundType)) {
+            account.setNonShareBalance(nz(account.getNonShareBalance()).add(amount));
+        } else {
+            account.setSharePendingBalance(nz(account.getSharePendingBalance()).add(amount));
+        }
+    }
+
+    private void debitFundBucket(FinProjectAccount account, String fundType, BigDecimal amount) {
+        if (ProjectFundTypes.NON_SHARE.equals(fundType)) {
+            account.setNonShareBalance(nz(account.getNonShareBalance()).subtract(amount));
+        } else {
+            account.setSharePendingBalance(nz(account.getSharePendingBalance()).subtract(amount));
+        }
+    }
+
+    private void assertFundEnough(FinProjectAccount account, String fundType, BigDecimal amount) {
+        BigDecimal bucket = ProjectFundTypes.NON_SHARE.equals(fundType)
+                ? nz(account.getNonShareBalance())
+                : nz(account.getSharePendingBalance());
+        if (bucket.compareTo(amount) < 0) {
+            throw new BusinessException(ProjectFundTypes.label(fundType) + "余额不足，当前 ¥" + bucket.toPlainString()
+                    + "（不可跨池拆扣）");
+        }
+        if (nz(account.getBalance()).compareTo(amount) < 0) {
+            throw new BusinessException("项目可用余额不足");
+        }
+    }
+
+    private String appendFundRemark(String remark, String fundType) {
+        String label = "扣自" + ProjectFundTypes.label(fundType);
+        if (!StringUtils.hasText(remark)) {
+            return label;
+        }
+        return remark + "；" + label;
     }
 
     private void assertBalancedQuiet(FinProjectAccount account) {
@@ -744,6 +954,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
                 : deptService.listByIds(companyIds).stream()
                 .collect(Collectors.toMap(SysDept::getId, SysDept::getName, (a, b) -> a));
         for (FinProjectAccount account : list) {
+            healFundBuckets(account);
             PmProject project = projectMap.get(account.getProjectId());
             if (project != null) {
                 account.setProjectName(project.getName());
@@ -811,6 +1022,8 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
                 continue;
             }
             BigDecimal balance = BigDecimal.ZERO;
+            BigDecimal sharePending = BigDecimal.ZERO;
+            BigDecimal nonShare = BigDecimal.ZERO;
             BigDecimal advance = BigDecimal.ZERO;
             BigDecimal expense = BigDecimal.ZERO;
             BigDecimal settle = BigDecimal.ZERO;
@@ -821,7 +1034,10 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
                 if (childAcc == null) {
                     continue;
                 }
+                healFundBuckets(childAcc);
                 balance = balance.add(nz(childAcc.getBalance()));
+                sharePending = sharePending.add(nz(childAcc.getSharePendingBalance()));
+                nonShare = nonShare.add(nz(childAcc.getNonShareBalance()));
                 advance = advance.add(nz(childAcc.getAdvanceAmount()));
                 expense = expense.add(nz(childAcc.getExpenseAmount()));
                 settle = settle.add(nz(childAcc.getSettleAmount()));
@@ -829,6 +1045,8 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
                 reserveHeld = reserveHeld.add(nz(childAcc.getReserveHeld()));
             }
             account.setBalance(balance);
+            account.setSharePendingBalance(sharePending);
+            account.setNonShareBalance(nonShare);
             account.setAdvanceAmount(advance);
             account.setExpenseAmount(expense);
             account.setSettleAmount(settle);
