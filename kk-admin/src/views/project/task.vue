@@ -5,7 +5,9 @@ import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import { useUserStore } from '@/stores/user'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
+import CompanyTaskShareDialog from '@/components/task/CompanyTaskShareDialog.vue'
 import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
+import { companyTaskShareApi, type CompanyTaskShareOption } from '@/api/companyTaskShare'
 
 const route = useRoute()
 const userStore = useUserStore()
@@ -37,6 +39,8 @@ const users = ref<any[]>([])
 const taskDrawer = ref(false)
 const activeTaskId = ref<number | null>(null)
 const listLoading = ref(false)
+const shareOpen = ref(false)
+const shareCompanies = ref<CompanyTaskShareOption[]>([])
 
 const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭' }
 const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
@@ -217,6 +221,9 @@ function progressStatus(row: any) {
 onMounted(async () => {
   projects.value = await bizApi.projectList()
   users.value = await sysApi.userList()
+  shareCompanies.value = userStore.hasPermission('project:task:share')
+    ? await companyTaskShareApi.options().catch(() => [])
+    : []
   if (query.participantId == null) {
     query.participantId = currentUserId()
   }
@@ -241,6 +248,7 @@ onMounted(async () => {
         <p class="page-desc">全局任务列表；项目内请用「看板」拖拽改状态、点卡片看详情与评论</p>
       </div>
       <div class="page-actions">
+        <el-button v-if="shareCompanies.length" v-permission="'project:task:share'" @click="shareOpen = true">今日工作外链</el-button>
         <el-button v-permission="'project:task:add'" type="primary" @click="open()">新建任务</el-button>
       </div>
     </div>
@@ -365,6 +373,7 @@ onMounted(async () => {
       </div>
     </div>
 
+    <CompanyTaskShareDialog v-model="shareOpen" :companies="shareCompanies" />
     <TaskDetailDrawer
       v-model="taskDrawer"
       :task-id="activeTaskId"

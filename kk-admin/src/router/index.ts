@@ -9,6 +9,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '登录', requiresAuth: false },
   },
   {
+    path: '/public/company-tasks/:token',
+    name: 'public-company-tasks',
+    component: () => import('@/views/public/company-tasks.vue'),
+    meta: { title: '今日工作', requiresAuth: false },
+  },
+  {
     path: '/',
     component: () => import('@/layouts/AdminLayout.vue'),
     meta: { requiresAuth: true },
@@ -28,6 +34,9 @@ const routes: RouteRecordRaw[] = [
       { path: 'workflow/flow', component: () => import('@/views/workflow/flow.vue'), meta: { title: '审批配置' } },
       { path: 'project/list', component: () => import('@/views/project/list.vue'), meta: { title: '项目管理' } },
       { path: 'project/task', component: () => import('@/views/project/task.vue'), meta: { title: '任务管理' } },
+      { path: 'ticket/manage', component: () => import('@/views/ticket/manage.vue'), meta: { title: '工单管理' } },
+      { path: 'ticket/submissions', component: () => import('@/views/ticket/submissions.vue'), meta: { title: '我的工单' } },
+      { path: 'ticket/dashboard', component: () => import('@/views/ticket/dashboard.vue'), meta: { title: '任务看板' } },
       { path: 'hr/archive', component: () => import('@/views/hr/archive.vue'), meta: { title: '人员档案' } },
       { path: 'hr/depr-category', component: () => import('@/views/hr/depr-category.vue'), meta: { title: '折旧类别' } },
       { path: 'hr/asset', component: () => import('@/views/hr/asset.vue'), meta: { title: '资产台账' } },

@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import KkLogoMark from '@/components/KkLogoMark.vue'
+import TicketSubmitDialog from '@/components/ticket/TicketSubmitDialog.vue'
 import { notificationApi, type NotificationItem } from '@/api/notification'
 import type { MenuInfo } from '@/api/types'
 import {
@@ -14,6 +15,9 @@ import {
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const ticketSubmitOpen = ref(false)
+
+const canSubmitTicket = computed(() => userStore.hasPermission('ticket:submit'))
 
 const visibleMenus = computed(() =>
   (userStore.menus || [])
@@ -206,6 +210,16 @@ onUnmounted(() => {
           </button>
           <span class="header-split" aria-hidden="true" />
           <div class="header-actions">
+            <button
+              v-if="canSubmitTicket"
+              type="button"
+              class="icon-btn"
+              title="提交工单"
+              aria-label="提交工单"
+              @click="ticketSubmitOpen = true"
+            >
+              <el-icon :size="18"><Tickets /></el-icon>
+            </button>
             <el-popover
               :visible="noticeVisible"
               placement="bottom-end"
@@ -302,6 +316,8 @@ onUnmounted(() => {
       </el-scrollbar>
     </el-drawer>
   </el-container>
+
+  <TicketSubmitDialog v-model="ticketSubmitOpen" />
 </template>
 
 <style scoped>
