@@ -82,7 +82,7 @@ public class FinanceController {
     }
 
     @GetMapping("/wallet/page")
-    @SaCheckPermission(value = {"finance:wallet:list", "finance:wallet:board"}, mode = SaMode.OR)
+    @SaCheckPermission(value = {"finance:wallet:list", "finance:wallet:board", "finance:ledger:list"}, mode = SaMode.OR)
     public Result<PageResult<HrWallet>> walletPage(
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long pageSize,

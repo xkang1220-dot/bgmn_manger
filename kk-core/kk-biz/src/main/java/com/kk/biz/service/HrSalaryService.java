@@ -31,6 +31,14 @@ public interface HrSalaryService {
 
     void revokeMine(Long lineId);
 
+    /** 发薪准备草稿：含考勤请假天数 */
+    List<Map<String, Object>> preparePayDraft(Long companyId, String yearMonth);
+
+    /**
+     * 财务填写扣款后发送确认（替代定时预告；员工确认后再手动发薪生成审批）
+     */
+    HrSalaryRun preparePayConfirm(Long companyId, String yearMonth, List<Map<String, Object>> lines);
+
     HrSalaryRun runPreview(Long companyId, String yearMonth, boolean manual);
 
     HrSalaryRun runPay(Long companyId, String yearMonth, boolean manual);

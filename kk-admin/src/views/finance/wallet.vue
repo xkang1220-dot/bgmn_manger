@@ -151,7 +151,7 @@ async function submitReimburse() {
     voucherFileIds: voucherFiles.value.map((f) => f.id),
     payload: { payMethodId: reimburseForm.payMethodId },
   })
-  ElMessage.success(`${approvalFlowTip(approval)}。后续：上传回执 → 确认到账`)
+  ElMessage.success(`${approvalFlowTip(approval)}。后续：上传回执 → 确认到账后从公司总账扣款，不进个人钱包`)
   reimburseDialog.value = false
   reimburseForm.amount = 0
   reimburseForm.remark = ''
@@ -172,7 +172,7 @@ onMounted(async () => {
       <div class="mine-head">
         <div>
           <div class="mine-title">我的钱包</div>
-          <div class="mine-desc">包含项目分成、报销等到账收入；个人报销需上传发票，财务通过并回执后请确认到账</div>
+          <div class="mine-desc">包含项目分成等到账收入。个人报销从公司总账扣款，不进钱包；需上传发票，财务回执后请确认到账</div>
         </div>
         <div class="mine-right">
           <div class="mine-balance">¥ {{ mine.balance ?? 0 }}</div>
@@ -215,7 +215,7 @@ onMounted(async () => {
     </div>
 
     <el-dialog v-model="reimburseDialog" title="个人报销" width="480px" @closed="voucherFiles = []">
-      <div class="flow-tip">流程：上传发票提交 → 财务审批查看发票 → 财务上传回执 → 你在审批中心确认到账</div>
+      <div class="flow-tip">流程：上传发票提交 → 财务审批 → 上传回执 → 你确认到账。确认后只扣公司总账，不进个人钱包。</div>
       <el-form label-width="80px">
         <el-form-item label="所属公司" required>
           <el-select v-model="reimburseForm.companyId" filterable placeholder="选择公司" style="width: 100%">

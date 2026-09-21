@@ -12,6 +12,7 @@ import com.kk.biz.dto.LedgerThresholdSaveRequest;
 import com.kk.biz.dto.ManualShareItem;
 import com.kk.biz.dto.ProjectManualSettleRequest;
 import com.kk.biz.dto.ProjectSettleRequest;
+import com.kk.biz.entity.FaAsset;
 import com.kk.biz.entity.FinLedger;
 import com.kk.biz.entity.FinLedgerThreshold;
 import com.kk.biz.entity.FinPayChannel;
@@ -22,6 +23,7 @@ import com.kk.biz.entity.PmProject;
 import com.kk.biz.entity.PmProjectMember;
 import com.kk.biz.entity.SysFile;
 import com.kk.biz.entity.WfApproval;
+import com.kk.biz.mapper.FaAssetMapper;
 import com.kk.biz.mapper.FinLedgerMapper;
 import com.kk.biz.mapper.FinPoolMapper;
 import com.kk.biz.mapper.FinProjectAccountMapper;
@@ -79,6 +81,7 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
     private final FinLedgerMapper ledgerMapper;
     private final HrWalletMapper walletMapper;
     private final FinProjectAccountMapper projectAccountMapper;
+    private final FaAssetMapper faAssetMapper;
     private final HrWalletService walletService;
     private final SysUserService userService;
     private final SysDeptService deptService;
@@ -353,6 +356,18 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         result.put("balance", wallet.getBalance());
         result.put("frozen", wallet.getFrozen());
         result.put("available", wallet.getAvailable());
+        List<Map<String, Object>> freezeItems = listWalletFreezeItems(userId);
+        result.put("freezeItems", freezeItems);
+        BigDecimal freezeDetailTotal = freezeItems.stream()
+                .map(row -> toBd(row.get("amount")))
+                .reduce(BigDecimal.ZERO, BigDecimal::add)
+                .setScale(2, RoundingMode.HALF_UP);
+        result.put("freezeDetailTotal", freezeDetailTotal);
+        BigDecimal frozenAmt = wallet.getFrozen() == null ? BigDecimal.ZERO : wallet.getFrozen();
+        BigDecimal unexplained = frozenAmt.subtract(freezeDetailTotal).setScale(2, RoundingMode.HALF_UP);
+        if (unexplained.compareTo(BigDecimal.ZERO) > 0) {
+            result.put("freezeUnexplained", unexplained);
+        }
         result.put("period", monthly ? "monthly" : "daily");
         result.put("trend", trend);
         result.put("sourceBreakdown", sourceBreakdown);
@@ -361,6 +376,93 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         result.put("monthIn", monthIn);
         result.put("monthOut", monthOut);
         return result;
+    }
+
+    /**
+     * 当前仍占用钱包冻结的明细：资产领用原值 + 进行中的提现审批。
+     */
+    private List<Map<String, Object>> listWalletFreezeItems(Long userId) {
+        List<Map<String, Object>> items = new ArrayList<>();
+        if (userId == null) {
+            return items;
+        }
+        List<FaAsset> assets = faAssetMapper.selectList(new LambdaQueryWrapper<FaAsset>()
+                .eq(FaAsset::getHolderUserId, userId)
+                .eq(FaAsset::getLockFreeze, 1)
+                .gt(FaAsset::getFrozenAmount, BigDecimal.ZERO)
+                .orderByDesc(FaAsset::getId));
+        for (FaAsset asset : assets) {
+            BigDecimal amt = asset.getFrozenAmount();
+            if (amt == null || amt.compareTo(BigDecimal.ZERO) <= 0) {
+                continue;
+            }
+            Map<String, Object> row = new HashMap<>();
+            row.put("type", "ASSET");
+            row.put("typeLabel", "资产领用");
+            row.put("bizId", asset.getId());
+            row.put("amount", amt.setScale(2, RoundingMode.HALF_UP));
+            String name = StringUtils.hasText(asset.getName()) ? asset.getName().trim() : "资产";
+            String code = StringUtils.hasText(asset.getAssetCode()) ? asset.getAssetCode().trim() : "";
+            row.put("title", StringUtils.hasText(code) ? (code + " · " + name) : name);
+            row.put("remark", "领用中按原值冻结，归还或折旧至残值后解冻");
+            row.put("link", "/hr/asset");
+            items.add(row);
+        }
+
+        List<WfApproval> withdraws = approvalMapper.selectList(new LambdaQueryWrapper<WfApproval>()
+                .eq(WfApproval::getApplicantId, userId)
+                .eq(WfApproval::getType, ApprovalTypes.WALLET_WITHDRAW)
+                .in(WfApproval::getStatus, "PENDING", "APPROVED", "TIMEOUT_PASS")
+                .gt(WfApproval::getAmount, BigDecimal.ZERO)
+                .orderByDesc(WfApproval::getId));
+        for (WfApproval approval : withdraws) {
+            if (approval.getAmount() == null || approval.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+                continue;
+            }
+            // 确认到账(confirmStatus=3)后已 consumeFrozen，不再占用冻结
+            Integer confirmStatus = approval.getConfirmStatus();
+            if (!"PENDING".equals(approval.getStatus())
+                    && confirmStatus != null
+                    && confirmStatus >= 3) {
+                continue;
+            }
+            Map<String, Object> row = new HashMap<>();
+            row.put("type", "WITHDRAW");
+            row.put("typeLabel", "提现占用");
+            row.put("bizId", approval.getId());
+            row.put("bizNo", approval.getBizNo());
+            row.put("amount", approval.getAmount().setScale(2, RoundingMode.HALF_UP));
+            String statusTip;
+            if ("PENDING".equals(approval.getStatus())) {
+                statusTip = "待审批";
+            } else if (Integer.valueOf(2).equals(confirmStatus)) {
+                statusTip = "待确认到账";
+            } else {
+                statusTip = "待财务回执";
+            }
+            row.put("title", StringUtils.hasText(approval.getTitle()) ? approval.getTitle() : "钱包提现");
+            row.put("remark", "单号 " + approval.getBizNo() + " · " + statusTip);
+            row.put("link", "/workflow/center");
+            items.add(row);
+        }
+        return items;
+    }
+
+    private BigDecimal toBd(Object value) {
+        if (value == null) {
+            return BigDecimal.ZERO;
+        }
+        if (value instanceof BigDecimal bd) {
+            return bd;
+        }
+        if (value instanceof Number n) {
+            return BigDecimal.valueOf(n.doubleValue());
+        }
+        try {
+            return new BigDecimal(String.valueOf(value));
+        } catch (Exception e) {
+            return BigDecimal.ZERO;
+        }
     }
 
     @Override
@@ -698,7 +800,50 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
                 .sorted((a, b) -> toBigDecimal(b.get("balance")).compareTo(toBigDecimal(a.get("balance"))))
                 .collect(Collectors.toList()));
         map.put("projectBalances", buildProjectBalances());
+        map.put("walletBalances", buildWalletBalances());
         return map;
+    }
+
+    /** 个人钱包明细：有余额或冻结的人员，供总账页点开查看 */
+    private List<Map<String, Object>> buildWalletBalances() {
+        List<HrWallet> wallets = walletService.pageWallets(1, 500, null).getRecords();
+        if (wallets == null || wallets.isEmpty()) {
+            return List.of();
+        }
+        return wallets.stream()
+                .filter(w -> {
+                    BigDecimal bal = w.getBalance() == null ? BigDecimal.ZERO : w.getBalance();
+                    BigDecimal frozen = w.getFrozen() == null ? BigDecimal.ZERO : w.getFrozen();
+                    return bal.compareTo(BigDecimal.ZERO) != 0 || frozen.compareTo(BigDecimal.ZERO) != 0;
+                })
+                .sorted((a, b) -> {
+                    BigDecimal ba = a.getBalance() == null ? BigDecimal.ZERO : a.getBalance();
+                    BigDecimal bb = b.getBalance() == null ? BigDecimal.ZERO : b.getBalance();
+                    int c = bb.compareTo(ba);
+                    if (c != 0) {
+                        return c;
+                    }
+                    BigDecimal fa = a.getFrozen() == null ? BigDecimal.ZERO : a.getFrozen();
+                    BigDecimal fb = b.getFrozen() == null ? BigDecimal.ZERO : b.getFrozen();
+                    return fb.compareTo(fa);
+                })
+                .map(w -> {
+                    BigDecimal bal = w.getBalance() == null ? BigDecimal.ZERO : w.getBalance();
+                    BigDecimal frozen = w.getFrozen() == null ? BigDecimal.ZERO : w.getFrozen();
+                    BigDecimal available = w.getAvailable() != null
+                            ? w.getAvailable()
+                            : bal.subtract(frozen);
+                    Map<String, Object> row = new HashMap<>();
+                    row.put("userId", w.getUserId());
+                    row.put("nickname", w.getNickname());
+                    row.put("realName", w.getRealName());
+                    row.put("username", w.getUsername());
+                    row.put("balance", bal);
+                    row.put("frozen", frozen);
+                    row.put("available", available);
+                    return row;
+                })
+                .collect(Collectors.toList());
     }
 
     /** 项目余额明细：按项目列出账款余额（含公司归属） */
@@ -955,6 +1100,89 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
         } else {
             throw new BusinessException("划转方向不正确");
         }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void payoutPoolToWallet(Long poolId, Long userId, BigDecimal amount, Long approvalId, String title, String remark) {
+        if (poolId == null || userId == null) {
+            throw new BusinessException("发钱必须指定资金池和收款人");
+        }
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("发钱金额必须大于 0");
+        }
+        BigDecimal pay = amount.setScale(2, RoundingMode.HALF_UP);
+        try {
+            if (approvalId != null) {
+                approvalIdHolder.set(approvalId);
+            }
+            // 审批生效用：不按当前登录人做资金池可见性校验（审批人未必有财务数据权限）
+            FinPool pool = getById(poolId);
+            if (pool == null) {
+                throw new BusinessException("资金池不存在");
+            }
+            ensurePoolEnabled(pool);
+            walletService.getOrCreate(userId);
+            String ledgerTitle = StringUtils.hasText(title) ? title : "财务发钱";
+            BigDecimal poolBefore = pool.getBalance();
+            debitPool(pool, pay);
+            pool = getById(pool.getId());
+            Long batchId = writeLedger("PAYOUT", "POOL", pool.getId(), userId, pay.negate(),
+                    poolBefore, pool.getBalance(), null, null, ledgerTitle, remark);
+            linkBatch(batchId);
+            HrWallet wallet = walletService.getOrCreate(userId);
+            BigDecimal walletBefore = wallet.getBalance();
+            walletService.changeBalance(userId, pay);
+            HrWallet walletAfter = walletService.getOrCreate(userId);
+            writeLedger("PAYOUT", "WALLET", pool.getId(), userId, pay,
+                    walletBefore, walletAfter.getBalance(), null, batchId, ledgerTitle + "入钱包", remark);
+        } finally {
+            approvalIdHolder.remove();
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void reversePayoutPoolFromWallet(Long poolId, Long userId, BigDecimal amount, Long approvalId, String title, String remark) {
+        if (poolId == null || userId == null) {
+            throw new BusinessException("回退必须指定资金池和收款人");
+        }
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("回退金额必须大于 0");
+        }
+        BigDecimal pay = amount.setScale(2, RoundingMode.HALF_UP);
+        try {
+            if (approvalId != null) {
+                approvalIdHolder.set(approvalId);
+            }
+            FinPool pool = getById(poolId);
+            if (pool == null) {
+                throw new BusinessException("资金池不存在");
+            }
+            ensurePoolEnabled(pool);
+            HrWallet wallet = walletService.getOrCreate(userId);
+            if (nz(wallet.getBalance()).compareTo(pay) < 0) {
+                throw new BusinessException("收款人钱包余额不足，无法回退");
+            }
+            String ledgerTitle = StringUtils.hasText(title) ? title : "财务发钱回退";
+            BigDecimal walletBefore = wallet.getBalance();
+            walletService.changeBalance(userId, pay.negate());
+            HrWallet walletAfter = walletService.getOrCreate(userId);
+            Long batchId = writeLedger("ROLLBACK", "WALLET", pool.getId(), userId, pay.negate(),
+                    walletBefore, walletAfter.getBalance(), null, null, ledgerTitle + "扣钱包", remark);
+            linkBatch(batchId);
+            BigDecimal poolBefore = pool.getBalance();
+            creditPool(pool, pay);
+            pool = getById(pool.getId());
+            writeLedger("ROLLBACK", "POOL", pool.getId(), userId, pay,
+                    poolBefore, pool.getBalance(), null, batchId, ledgerTitle + "入公司", remark);
+        } finally {
+            approvalIdHolder.remove();
+        }
+    }
+
+    private BigDecimal nz(BigDecimal v) {
+        return v == null ? BigDecimal.ZERO : v;
     }
 
     @Override

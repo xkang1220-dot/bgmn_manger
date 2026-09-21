@@ -280,6 +280,12 @@ export const bizApi = {
   salaryPreview(data: { companyId: number; yearMonth?: string }) {
     return request<any>({ url: '/hr/salary/preview', method: 'post', data })
   },
+  salaryPrepareDraft(params: { companyId: number; yearMonth?: string }) {
+    return request<any[]>({ url: '/hr/salary/prepare-draft', method: 'get', params })
+  },
+  salaryPrepareConfirm(data: { companyId: number; yearMonth?: string; lines: any[] }) {
+    return request<any>({ url: '/hr/salary/prepare-confirm', method: 'post', data })
+  },
   salaryPay(data: { companyId: number; yearMonth?: string }) {
     return request<any>({ url: '/hr/salary/pay', method: 'post', data })
   },
@@ -291,5 +297,14 @@ export const bizApi = {
   },
   revokeSalaryConfirm(lineId: number) {
     return request<void>({ url: `/hr/salary/my-confirm/${lineId}/revoke`, method: 'post' })
+  },
+  submitLeave(data: { companyId: number; startDate: string; endDate: string; reason: string }) {
+    return request<any>({ url: '/hr/leave/mine', method: 'post', data })
+  },
+  myLeave(params?: { companyId?: number; start?: string; end?: string }) {
+    return request<any[]>({ url: '/hr/leave/mine', method: 'get', params })
+  },
+  companyLeave(params: { companyId: number; start?: string; end?: string }) {
+    return request<any[]>({ url: '/hr/leave/company', method: 'get', params })
   },
 }

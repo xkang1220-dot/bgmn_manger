@@ -89,13 +89,25 @@ async function withdraw() {
 async function confirmReceived() {
   if (!detail.value) return
   const withdraw = detail.value.type === 'WALLET_WITHDRAW'
+  const personalReimburse = detail.value.type === 'REIMBURSE_PERSONAL'
+  const withVoucher = withdraw && (payload.value?.withVoucher === true || payload.value?.taxMode === 'VOUCHER')
   await ElMessageBox.confirm(
     withdraw
-      ? '确认财务已打款到账？确认后将从钱包扣减提现全额，并把税额记入公司资金池'
-      : '确认钱已到账？确认后将正式动账',
+      ? withVoucher
+        ? '确认财务已打款到账？确认后将从钱包扣减提现全额（有凭证不扣税），公司余额不变'
+        : '确认财务已打款到账？确认后将从钱包扣减提现全额；税额仅供线下到手参考，公司余额不变'
+      : personalReimburse
+        ? '确认财务已线下打款？确认后只从公司总账扣款，个人钱包不变'
+        : '确认钱已到账？确认后将正式动账',
   )
   await workflowApi.confirm(detail.value.id)
-  ElMessage.success(withdraw ? '已确认，钱包已扣款' : '已确认到账并完成动账')
+  ElMessage.success(
+    withdraw
+      ? '已确认，钱包已扣款'
+      : personalReimburse
+        ? '已确认，公司总账已扣款'
+        : '已确认到账并完成动账',
+  )
   await refreshDetail()
   await load()
 }
@@ -233,6 +245,8 @@ onMounted(load)
           <el-option label="自然月分成" value="PROJECT_SHARE_PERIOD" />
           <el-option label="工资申请" value="SALARY_APPLY" />
           <el-option label="月度工资" value="SALARY_MONTHLY" />
+          <el-option label="财务发钱" value="DIRECT_PAYOUT" />
+          <el-option label="请假申请" value="LEAVE_APPLY" />
           <el-option label="预留回公司" value="RESERVE_RETURN" />
           <el-option label="总账登记" value="LEDGER_REGISTER" />
           <el-option label="月度核验" value="MONTHLY_VERIFY" />
@@ -312,7 +326,7 @@ onMounted(load)
       <el-table-column label="操作" width="120" fixed="right">
         <template #default="{ row }">
           <el-button v-if="row.canConfirm" link type="success" @click.stop="openDetail(row)">确认到账</el-button>
-          <el-button v-else-if="row.type !== 'PROJECT_BALANCE_APPLY' && row.canUploadReceipt" link type="warning" @click.stop="openDetail(row)">上传回执</el-button>
+          <el-button v-else-if="row.type !== 'PROJECT_BALANCE_APPLY' && row.type !== 'DIRECT_PAYOUT' && row.canUploadReceipt" link type="warning" @click.stop="openDetail(row)">上传回执</el-button>
           <el-button v-else-if="row.canHandle" link type="primary" @click.stop="openDetail(row)">去审批</el-button>
           <span v-else class="muted">—</span>
         </template>
@@ -356,7 +370,15 @@ onMounted(load)
           <el-descriptions-item label="备注">{{ detail.remark || '—' }}</el-descriptions-item>
         </el-descriptions>
 
-        <h4 class="sec">{{ detail.type === 'PROJECT_BALANCE_APPLY' ? '附件' : '发票 / 凭证' }}（{{ detail.voucherFiles?.length || 0 }}）</h4>
+        <h4 class="sec">
+          {{
+            detail.type === 'PROJECT_BALANCE_APPLY' || detail.type === 'DIRECT_PAYOUT'
+              ? '附件'
+              : detail.type === 'WALLET_WITHDRAW'
+                ? '提现凭证'
+                : '发票 / 凭证'
+          }}（{{ detail.voucherFiles?.length || 0 }}）
+        </h4>
         <div v-if="detail.voucherFiles?.length" class="file-gallery">
           <div v-for="file in detail.voucherFiles" :key="file.id" class="file-card">
             <div v-if="isImage(file)" class="file-thumb" @click="previewFile(file)">
@@ -368,9 +390,19 @@ onMounted(load)
             <div v-if="isImage(file)" class="file-name">{{ file.originalName || `文件#${file.id}` }}</div>
           </div>
         </div>
-        <div v-else class="empty-tip">{{ detail.type === 'PROJECT_BALANCE_APPLY' ? '未上传附件' : '申请人未上传发票' }}</div>
+        <div v-else class="empty-tip">
+          {{
+            detail.type === 'PROJECT_BALANCE_APPLY' || detail.type === 'DIRECT_PAYOUT'
+              ? '未上传附件'
+              : detail.type === 'WALLET_WITHDRAW'
+                ? payload.withVoucher || payload.taxMode === 'VOUCHER'
+                  ? '有凭证提现但未找到凭证文件'
+                  : '无凭证提现（按税率扣税）'
+                : '申请人未上传发票'
+          }}
+        </div>
 
-        <template v-if="detail.type !== 'PROJECT_BALANCE_APPLY'">
+        <template v-if="detail.type !== 'PROJECT_BALANCE_APPLY' && detail.type !== 'DIRECT_PAYOUT'">
           <h4 class="sec">财务回执（{{ detail.receiptFiles?.length || 0 }}）</h4>
           <div v-if="detail.receiptFiles?.length" class="file-gallery">
             <div v-for="file in detail.receiptFiles" :key="file.id" class="file-card">
@@ -389,7 +421,6 @@ onMounted(load)
         <div class="payload-box">
           <template v-if="detail.type === 'SHARE_CONFIG'">
             <div class="kv-grid">
-              <div><span>预算基数</span><b>¥{{ fmtMoney(payload.budget) }}</b></div>
               <div><span>分成 %</span><b>{{ pct(payload.settlePercent) }}</b></div>
               <div><span>预留 %（结束回公司）</span><b>{{ pct(payload.reservePercent) }}</b></div>
               <div><span>支出</span><b>不占比例，从项目结余扣</b></div>
@@ -442,8 +473,21 @@ onMounted(load)
           <template v-else-if="detail.type === 'SALARY_MONTHLY'">
             <div class="kv-grid">
               <div><span>收款人</span><b>{{ payload.userName || payload.userId || '—' }}</b></div>
-              <div><span>月份</span><b>{{ payload.yearMonth || '—' }}</b></div>
-              <div><span>合计</span><b>¥{{ fmtMoney(payload.totalAmount ?? detail.amount) }}</b></div>
+              <div>
+                <span>{{ payload.cycleType === 'WEEKLY' ? '周期' : '月份' }}</span>
+                <b>{{ payload.yearMonth || '—' }}</b>
+              </div>
+              <div><span>结算</span><b>{{ payload.cycleType === 'WEEKLY' ? '周结' : '月结' }}</b></div>
+              <div v-if="payload.grossAmount != null"><span>应发</span><b>¥{{ fmtMoney(payload.grossAmount) }}</b></div>
+              <div v-if="payload.deductionAmount != null && Number(payload.deductionAmount) > 0">
+                <span>扣款</span>
+                <b>¥{{ fmtMoney(payload.deductionAmount) }}{{ payload.deductionRemark ? `（${payload.deductionRemark}）` : '' }}</b>
+              </div>
+              <div><span>实发</span><b>¥{{ fmtMoney(payload.totalAmount ?? detail.amount) }}</b></div>
+              <div v-if="payload.fullAttendance === false">
+                <span>考勤</span>
+                <b>请假 {{ payload.leaveDays || 0 }} 天</b>
+              </div>
             </div>
             <el-table v-if="payload.items?.length" :data="payload.items" size="small" style="margin-top: 10px">
               <el-table-column prop="projectName" label="项目" min-width="140" />
@@ -451,6 +495,14 @@ onMounted(load)
                 <template #default="{ row }">¥{{ fmtMoney(row.amount) }}</template>
               </el-table-column>
             </el-table>
+          </template>
+
+          <template v-else-if="detail.type === 'LEAVE_APPLY'">
+            <div class="kv-grid">
+              <div><span>起止日期</span><b>{{ payload.startDate || '—' }} ~ {{ payload.endDate || '—' }}</b></div>
+              <div><span>天数</span><b>{{ payload.leaveDays ?? '—' }}</b></div>
+              <div><span>事由</span><b>{{ payload.reason || detail.remark || '—' }}</b></div>
+            </div>
           </template>
 
           <template v-else-if="detail.type === 'LEDGER_REGISTER'">
@@ -478,8 +530,19 @@ onMounted(load)
 
           <template v-else-if="detail.type === 'WALLET_WITHDRAW'">
             <div class="kv-grid">
+              <div>
+                <span>提现类型</span>
+                <b>{{ payload.withVoucher || payload.taxMode === 'VOUCHER' ? '有凭证（免税）' : '无凭证（扣税）' }}</b>
+              </div>
               <div><span>提现全额</span><b>¥{{ fmtMoney(payload.gross ?? detail.amount) }}</b></div>
-              <div><span>计税</span><b>{{ payload.taxMode === 'TIER' ? '阶梯累进' : `${Number(payload.taxRate ?? 0) * 100}%` }}</b></div>
+              <div>
+                <span>计税</span>
+                <b>
+                  <template v-if="payload.withVoucher || payload.taxMode === 'VOUCHER'">有凭证免税</template>
+                  <template v-else-if="payload.taxMode === 'TIER'">阶梯累进</template>
+                  <template v-else>{{ Number(payload.taxRate ?? 0) * 100 }}%</template>
+                </b>
+              </div>
               <div><span>税额</span><b>¥{{ fmtMoney(payload.tax) }}</b></div>
               <div><span>到手金额</span><b>¥{{ fmtMoney(payload.net) }}</b></div>
               <div v-if="payload.payMethod">
@@ -493,6 +556,21 @@ onMounted(load)
               </div>
               <div v-else><span>收款方式</span><b>未填写</b></div>
               <div><span>说明</span><b>{{ detail.remark || payload.remark || '—' }}</b></div>
+            </div>
+          </template>
+
+          <template v-else-if="detail.type === 'DIRECT_PAYOUT'">
+            <div class="kv-grid">
+              <div><span>金额</span><b>¥{{ fmtMoney(detail.amount) }}</b></div>
+              <div><span>收款人</span><b>{{ payload.payeeUserName || payload.payeeUserId || '—' }}</b></div>
+              <div><span>资金来源</span><b>{{ payload.sourceTypeLabel || payload.sourceType || '—' }}</b></div>
+              <div v-if="payload.sourceType === 'PROJECT' || detail.projectName">
+                <span>项目</span><b>{{ detail.projectName || '—' }}</b>
+              </div>
+              <div v-if="payload.fundTypeLabel || payload.fundType">
+                <span>项目资金池</span><b>{{ payload.fundTypeLabel || payload.fundType }}</b>
+              </div>
+              <div><span>说明</span><b>{{ detail.remark || payload.remark || '审批通过后直接转入收款人钱包' }}</b></div>
             </div>
           </template>
 
@@ -599,7 +677,7 @@ onMounted(load)
         </div>
         <div class="btns action-bar">
           <el-button v-if="detail.canWithdraw" type="warning" @click="withdraw">撤回审批</el-button>
-          <el-upload v-if="detail.type !== 'PROJECT_BALANCE_APPLY' && detail.canUploadReceipt && canUploadReceipt" :show-file-list="false" :http-request="onUploadReceipt">
+          <el-upload v-if="detail.type !== 'PROJECT_BALANCE_APPLY' && detail.type !== 'DIRECT_PAYOUT' && detail.canUploadReceipt && canUploadReceipt" :show-file-list="false" :http-request="onUploadReceipt">
             <el-button :loading="uploading" type="warning">上传财务回执</el-button>
           </el-upload>
           <el-button v-if="detail.canConfirm" type="success" @click="confirmReceived">

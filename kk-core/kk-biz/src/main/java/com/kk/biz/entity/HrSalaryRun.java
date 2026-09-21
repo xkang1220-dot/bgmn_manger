@@ -20,7 +20,10 @@ public class HrSalaryRun extends BaseEntity {
 
     private Long companyId;
 
-    /** 发薪月份 yyyy-MM（库列 salary_month，避免 MySQL 保留字 year_month） */
+    /**
+     * 发薪周期键（库列 salary_month，避免 MySQL 保留字 year_month）：
+     * 月结 yyyy-MM；周结 ISO 周 yyyy-Www
+     */
     @TableField("salary_month")
     private String yearMonth;
 

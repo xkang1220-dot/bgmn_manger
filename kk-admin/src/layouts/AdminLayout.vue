@@ -45,6 +45,7 @@ const unreadCount = ref(0)
 const noticeList = ref<NotificationItem[]>([])
 const noticeLoading = ref(false)
 const noticeVisible = ref(false)
+const noticeTab = ref<'message' | 'approval'>('message')
 const mobileMenuOpen = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let noticeSocket: { disconnect: () => void } | null = null
@@ -65,6 +66,71 @@ function fmtTime(t?: string) {
   return t.replace('T', ' ').slice(0, 16)
 }
 
+/** 与后端一致：空 bizType 默认视为审批 */
+function isApprovalNotice(item: { bizType?: string }) {
+  const t = (item.bizType || '').trim().toLowerCase()
+  return !t || t === 'approval'
+}
+
+function noticeKindLabel(bizType?: string) {
+  const t = (bizType || '').trim().toLowerCase()
+  switch (t) {
+    case '':
+    case 'approval':
+      return '审批'
+    case 'salary_preview':
+      return '工资确认'
+    case 'ledger_expense':
+      return '出账'
+    case 'task':
+      return '任务'
+    case 'ticket_reply':
+      return '工单'
+    default:
+      return '消息'
+  }
+}
+
+function noticeFallbackLink(item: { bizType?: string; link?: string }) {
+  const link = (item.link || '').trim()
+  if (link) return link
+  return isApprovalNotice(item) ? '/workflow/center' : '/account'
+}
+
+const NOTICE_LIST_LIMIT = 40
+
+const filteredNotices = computed(() =>
+  noticeList.value.filter((item) =>
+    noticeTab.value === 'approval' ? isApprovalNotice(item) : !isApprovalNotice(item),
+  ),
+)
+
+const approvalNoticeCount = computed(
+  () => noticeList.value.filter((item) => isApprovalNotice(item) && !item.readFlag).length,
+)
+
+const messageNoticeCount = computed(
+  () => noticeList.value.filter((item) => !isApprovalNotice(item) && !item.readFlag).length,
+)
+
+function pickNoticeTab() {
+  if (messageNoticeCount.value > 0) {
+    noticeTab.value = 'message'
+    return
+  }
+  if (approvalNoticeCount.value > 0) {
+    noticeTab.value = 'approval'
+    return
+  }
+  const hasMessage = noticeList.value.some((item) => !isApprovalNotice(item))
+  const hasApproval = noticeList.value.some((item) => isApprovalNotice(item))
+  if (noticeTab.value === 'message' && !hasMessage && hasApproval) {
+    noticeTab.value = 'approval'
+  } else if (noticeTab.value === 'approval' && !hasApproval && hasMessage) {
+    noticeTab.value = 'message'
+  }
+}
+
 async function loadUnread() {
   try {
     const res = await notificationApi.unreadCount()
@@ -77,7 +143,7 @@ async function loadUnread() {
 async function loadNotices() {
   noticeLoading.value = true
   try {
-    const res = await notificationApi.page({ page: 1, pageSize: 15 })
+    const res = await notificationApi.page({ page: 1, pageSize: NOTICE_LIST_LIMIT })
     noticeList.value = res.list || []
     await loadUnread()
   } finally {
@@ -87,7 +153,10 @@ async function loadNotices() {
 
 async function onNoticeShow(visible: boolean) {
   noticeVisible.value = visible
-  if (visible) await loadNotices()
+  if (visible) {
+    await loadNotices()
+    pickNoticeTab()
+  }
 }
 
 async function openNotice(item: NotificationItem) {
@@ -99,7 +168,7 @@ async function openNotice(item: NotificationItem) {
     } catch { /* ignore */ }
   }
   noticeVisible.value = false
-  router.push(item.link || '/workflow/center')
+  router.push(noticeFallbackLink(item))
 }
 
 async function openPushedNotice(payload: NotificationPushPayload) {
@@ -112,14 +181,14 @@ async function openPushedNotice(payload: NotificationPushPayload) {
     } catch { /* ignore */ }
   }
   noticeVisible.value = false
-  router.push(payload.link || '/workflow/center')
+  router.push(noticeFallbackLink(payload))
 }
 
 function onPushNotice(payload: NotificationPushPayload) {
   void loadUnread()
   const item = toNoticeItem(payload)
   if (item && noticeVisible.value) {
-    noticeList.value = [item, ...noticeList.value.filter((n) => n.id !== item.id)].slice(0, 15)
+    noticeList.value = [item, ...noticeList.value.filter((n) => n.id !== item.id)].slice(0, NOTICE_LIST_LIMIT)
   }
 }
 
@@ -236,25 +305,69 @@ onUnmounted(() => {
               </template>
               <div class="notice-panel">
                 <div class="notice-head">
-                  <span>通知</span>
+                  <span>站内信</span>
                   <el-button v-if="unreadCount" link type="primary" @click="markAllRead">全部已读</el-button>
+                </div>
+                <div class="notice-tabs">
+                  <button
+                    type="button"
+                    class="notice-tab"
+                    :class="{ active: noticeTab === 'message' }"
+                    @click="noticeTab = 'message'"
+                  >
+                    消息
+                    <span v-if="messageNoticeCount" class="notice-tab-count">{{ messageNoticeCount }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="notice-tab"
+                    :class="{ active: noticeTab === 'approval' }"
+                    @click="noticeTab = 'approval'"
+                  >
+                    审批提醒
+                    <span v-if="approvalNoticeCount" class="notice-tab-count">{{ approvalNoticeCount }}</span>
+                  </button>
                 </div>
                 <div v-loading="noticeLoading" class="notice-body">
                   <div
-                    v-for="item in noticeList"
+                    v-for="item in filteredNotices"
                     :key="item.id"
                     class="notice-item"
                     :class="{ unread: !item.readFlag }"
                     @click="openNotice(item)"
                   >
-                    <div class="notice-title">{{ item.title }}</div>
+                    <div class="notice-title-row">
+                      <span class="notice-kind" :class="isApprovalNotice(item) ? 'is-approval' : 'is-message'">
+                        {{ noticeKindLabel(item.bizType) }}
+                      </span>
+                      <div class="notice-title">{{ item.title }}</div>
+                    </div>
                     <div class="notice-content">{{ item.content }}</div>
                     <div class="notice-time">{{ fmtTime(item.createTime) }}</div>
                   </div>
-                  <el-empty v-if="!noticeLoading && !noticeList.length" description="暂无通知" :image-size="64" />
+                  <el-empty
+                    v-if="!noticeLoading && !filteredNotices.length"
+                    :description="noticeTab === 'approval' ? '暂无审批提醒' : '暂无消息'"
+                    :image-size="64"
+                  />
                 </div>
                 <div class="notice-foot">
-                  <el-button link type="primary" @click="noticeVisible = false; go('/workflow/center')">去审批中心</el-button>
+                  <el-button
+                    v-if="noticeTab === 'approval'"
+                    link
+                    type="primary"
+                    @click="noticeVisible = false; go('/workflow/center')"
+                  >
+                    去审批中心
+                  </el-button>
+                  <el-button
+                    v-else
+                    link
+                    type="primary"
+                    @click="noticeVisible = false; go('/account')"
+                  >
+                    去工作台
+                  </el-button>
                 </div>
               </div>
             </el-popover>
@@ -671,7 +784,46 @@ onUnmounted(() => {
   font-size: 14px;
   font-weight: 500;
   color: var(--kk-text);
+}
+
+.notice-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 10px;
   border-bottom: 1px solid var(--kk-hairline);
+}
+
+.notice-tab {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--kk-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.notice-tab.active {
+  background: rgba(24, 24, 27, 0.06);
+  color: var(--kk-text);
+  font-weight: 500;
+}
+
+.notice-tab-count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--el-color-danger);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
 }
 
 .notice-body {
@@ -697,7 +849,35 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
+.notice-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.notice-kind {
+  flex: none;
+  margin-top: 2px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.notice-kind.is-approval {
+  background: rgba(37, 99, 235, 0.12);
+  color: #2563eb;
+}
+
+.notice-kind.is-message {
+  background: rgba(24, 24, 27, 0.06);
+  color: var(--kk-text-secondary);
+}
+
 .notice-title {
+  flex: 1;
+  min-width: 0;
   font-size: 14px;
   color: var(--kk-text);
   line-height: 20px;

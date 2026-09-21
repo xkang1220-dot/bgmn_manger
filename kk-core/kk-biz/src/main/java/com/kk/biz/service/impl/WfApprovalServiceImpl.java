@@ -40,6 +40,7 @@ import com.kk.biz.service.FinPayChannelService;
 import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.FinanceService;
 import com.kk.biz.service.HrArchiveService;
+import com.kk.biz.service.HrLeaveService;
 import com.kk.biz.service.HrWalletService;
 import com.kk.biz.service.PmProjectService;
 import com.kk.biz.service.SysFileService;
@@ -124,6 +125,9 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
     @Lazy
     @Autowired
     private PmProjectService projectService;
+    @Lazy
+    @Autowired
+    private HrLeaveService leaveService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -476,12 +480,21 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             financeIds = dataScopeService.listUserIdsByRoleCodeInCompany("admin", approval.getCompanyId());
         }
         boolean withdraw = ApprovalTypes.WALLET_WITHDRAW.equals(approval.getType());
+        String moneyTip;
+        if (withdraw) {
+            moneyTip = "申请人已确认，单号 " + approval.getBizNo() + "，钱包已扣款"
+                    + (isWithdrawWithVoucher(JSONUtil.parseObj(approval.getPayload()))
+                            ? "（有凭证免税）"
+                            : "（税额仅供线下到手参考，公司余额不变）");
+        } else if (ApprovalTypes.REIMBURSE_PERSONAL.equals(approval.getType())) {
+            moneyTip = "申请人已确认，单号 " + approval.getBizNo() + "，公司总账已扣款";
+        } else {
+            moneyTip = "申请人已确认，单号 " + approval.getBizNo() + "，资金已入账";
+        }
         notificationService.notifyUsers(
                 financeIds.stream().filter(uid -> !Objects.equals(uid, loginId)).toList(),
                 (withdraw ? "已确认提现 · " : "已确认到账 · ") + approval.getTitle(),
-                withdraw
-                        ? "申请人已确认，单号 " + approval.getBizNo() + "，钱包已扣款，税费已入公司资金池"
-                        : "申请人已确认，单号 " + approval.getBizNo() + "，资金已入账",
+                moneyTip,
                 "approval", approval.getId(), "/workflow/center");
     }
 
@@ -695,6 +708,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                         ApprovalTypes.label(type),
                         approval.getRemark());
             }
+            case ApprovalTypes.DIRECT_PAYOUT -> effectDirectPayout(approval, payload);
+            case ApprovalTypes.LEAVE_APPLY -> effectLeaveApply(approval, payload);
             case ApprovalTypes.SALARY_MONTHLY -> effectSalaryMonthly(approval, payload);
             case ApprovalTypes.REIMBURSE_PERSONAL -> effectPersonalReimburse(approval);
             case ApprovalTypes.WALLET_WITHDRAW -> effectWalletWithdraw(approval, payload);
@@ -899,7 +914,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (approval.getAmount() == null || approval.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
             return;
         }
-        // 确认到账：公司总账出账 + 个人钱包入账（报销款归属个人）
+        // 确认到账：只扣公司总账；线下打到申请人收款账户，系统内不进个人钱包
         FinPool pool = resolvePool(approval.getPoolId(), approval.getCompanyId());
         BigDecimal amount = approval.getAmount();
         BigDecimal poolBefore = pool.getBalance();
@@ -912,16 +927,9 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             throw new BusinessException("公司总账余额不足，无法完成报销动账");
         }
         pool = poolMapper.selectById(pool.getId());
-        Long companyLedgerId = writeSimpleLedger("REIMBURSE", "POOL", pool.getId(), null,
+        writeSimpleLedger("REIMBURSE", "POOL", pool.getId(), approval.getApplicantId(),
                 amount.negate(), poolBefore, pool.getBalance(), null, null, approval.getId(),
                 "个人报销扣款", approval.getRemark());
-
-        HrWallet walletBefore = walletService.getOrCreate(approval.getApplicantId());
-        BigDecimal wb = walletBefore.getBalance();
-        HrWallet walletAfter = walletService.changeBalance(approval.getApplicantId(), amount);
-        writeSimpleLedger("REIMBURSE", "WALLET", pool.getId(), approval.getApplicantId(),
-                amount, wb, walletAfter.getBalance(), null, companyLedgerId, approval.getId(),
-                "个人报销入账", approval.getRemark());
     }
 
     private void effectWalletWithdraw(WfApproval approval, JSONObject payload) {
@@ -929,9 +937,37 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             return;
         }
         BigDecimal amount = approval.getAmount().setScale(2, RoundingMode.HALF_UP);
-        WithdrawTaxCalcResult calc = walletWithdrawTaxService.calculate(approval.getCompanyId(), amount);
-        BigDecimal tax = calc.getTax();
-        BigDecimal net = calc.getNet();
+        boolean withVoucher = isWithdrawWithVoucher(payload);
+        BigDecimal tax;
+        BigDecimal net;
+        String taxMode;
+        BigDecimal taxRate = null;
+        if (withVoucher) {
+            // 有凭证提现：免税；只扣个人钱包，公司余额不变
+            tax = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+            net = amount;
+            taxMode = "VOUCHER";
+        } else {
+            // 无凭证：税额仅用于算线下到手，不写入公司资金池
+            BigDecimal snapshotTax = resolveWithdrawTaxFromPayload(payload);
+            BigDecimal snapshotNet = payload == null ? null : payload.getBigDecimal("net");
+            boolean snapshotOk = snapshotTax != null && snapshotNet != null
+                    && snapshotTax.compareTo(BigDecimal.ZERO) >= 0
+                    && snapshotTax.compareTo(amount) <= 0
+                    && snapshotNet.add(snapshotTax).setScale(2, RoundingMode.HALF_UP).compareTo(amount) == 0;
+            if (snapshotOk) {
+                tax = snapshotTax;
+                net = snapshotNet.setScale(2, RoundingMode.HALF_UP);
+                taxMode = payload.getStr("taxMode", "FLAT");
+                taxRate = payload.getBigDecimal("taxRate");
+            } else {
+                WithdrawTaxCalcResult calc = walletWithdrawTaxService.calculate(approval.getCompanyId(), amount);
+                tax = calc.getTax();
+                net = calc.getNet();
+                taxMode = calc.getTaxMode();
+                taxRate = calc.getTaxRate();
+            }
+        }
         if (net.compareTo(BigDecimal.ZERO) < 0) {
             throw new BusinessException("提现税额计算异常");
         }
@@ -941,26 +977,27 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         HrWallet walletAfter = walletService.consumeFrozen(approval.getApplicantId(), amount);
 
         FinPool pool = resolvePool(approval.getPoolId(), approval.getCompanyId());
-        BigDecimal poolBefore = pool.getBalance();
-        if (tax.compareTo(BigDecimal.ZERO) > 0) {
-            creditPoolDirect(pool, tax);
-            pool = poolMapper.selectById(pool.getId());
-        } else {
-            pool = poolMapper.selectById(pool.getId());
-        }
-
-        String taxRemark = "TIER".equals(calc.getTaxMode())
-                ? "阶梯计税"
-                : ("税率 " + (calc.getTaxRate() == null ? "-" : calc.getTaxRate().toPlainString()));
-        Long walletLedgerId = writeSimpleLedger("WITHDRAW", "WALLET", pool.getId(), approval.getApplicantId(),
+        String taxRemark = withVoucher
+                ? "有凭证免税"
+                : ("TIER".equals(taxMode)
+                        ? "阶梯计税"
+                        : ("税率 " + (taxRate == null ? "-" : taxRate.toPlainString())));
+        writeSimpleLedger("WITHDRAW", "WALLET", pool.getId(), approval.getApplicantId(),
                 amount.negate(), wb, walletAfter.getBalance(), null, null, approval.getId(),
-                "钱包提现扣款", String.format("全额¥%s，税¥%s，到手¥%s（%s）",
+                "钱包提现扣款", String.format("全额¥%s，税¥%s，到手¥%s（%s）；公司余额不变",
                         amount.toPlainString(), tax.toPlainString(), net.toPlainString(), taxRemark));
-        if (tax.compareTo(BigDecimal.ZERO) > 0) {
-            writeSimpleLedger("WITHDRAW", "POOL", pool.getId(), approval.getApplicantId(),
-                    tax, poolBefore, pool.getBalance(), null, walletLedgerId, approval.getId(),
-                    "提现税费入公司资金池", taxRemark);
+    }
+
+    /** 有凭证提现：payload.withVoucher=true 或 taxMode=VOUCHER */
+    private boolean isWithdrawWithVoucher(JSONObject payload) {
+        if (payload == null) {
+            return false;
         }
+        if (asBool(payload.get("withVoucher"))) {
+            return true;
+        }
+        String mode = payload.getStr("taxMode");
+        return StringUtils.hasText(mode) && "VOUCHER".equalsIgnoreCase(mode.trim());
     }
 
     private BigDecimal resolveWithdrawTaxFromPayload(JSONObject payload) {
@@ -979,17 +1016,34 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
         BigDecimal amount = request.getAmount().setScale(2, RoundingMode.HALF_UP);
         request.setAmount(amount);
-        WithdrawTaxCalcResult calc = walletWithdrawTaxService.calculate(companyId, amount);
         Map<String, Object> payload = request.getPayload() == null
                 ? new HashMap<>()
                 : new HashMap<>(request.getPayload());
-        payload.put("taxMode", calc.getTaxMode());
-        payload.put("taxRate", calc.getTaxRate());
-        payload.put("tax", calc.getTax());
-        payload.put("net", calc.getNet());
-        payload.put("gross", amount);
-        payload.put("taxBreakdown", calc.getBreakdown());
-        payload.put("taxTiers", calc.getTiers());
+        boolean withVoucher = asBool(payload.get("withVoucher"))
+                || "VOUCHER".equalsIgnoreCase(String.valueOf(payload.getOrDefault("taxMode", "")).trim());
+        if (withVoucher) {
+            if (request.getVoucherFileIds() == null || request.getVoucherFileIds().isEmpty()) {
+                throw new BusinessException("有凭证提现请上传凭证");
+            }
+            payload.put("withVoucher", true);
+            payload.put("taxMode", "VOUCHER");
+            payload.put("taxRate", BigDecimal.ZERO);
+            payload.put("tax", BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
+            payload.put("net", amount);
+            payload.put("gross", amount);
+            payload.put("taxBreakdown", List.of());
+            payload.put("taxTiers", List.of());
+        } else {
+            WithdrawTaxCalcResult calc = walletWithdrawTaxService.calculate(companyId, amount);
+            payload.put("withVoucher", false);
+            payload.put("taxMode", calc.getTaxMode());
+            payload.put("taxRate", calc.getTaxRate());
+            payload.put("tax", calc.getTax());
+            payload.put("net", calc.getNet());
+            payload.put("gross", amount);
+            payload.put("taxBreakdown", calc.getBreakdown());
+            payload.put("taxTiers", calc.getTiers());
+        }
         request.setPayload(payload);
     }
 
@@ -1591,50 +1645,43 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             }
             projectAccountService.assertBalanced(origin.getProjectId());
         } else if (ApprovalTypes.REIMBURSE_PERSONAL.equals(originType)) {
-            // 反向：个人扣回 + 公司入账
-            HrWallet walletBefore = walletService.getOrCreate(origin.getApplicantId());
-            BigDecimal wb = walletBefore.getBalance();
-            HrWallet walletAfter = walletService.changeBalance(origin.getApplicantId(), amount.negate());
+            // 反向：公司总账加回；仅当原单曾入过钱包时才扣回钱包（兼容旧单）
             FinPool pool = resolvePool(origin.getPoolId(), origin.getCompanyId());
             BigDecimal poolBefore = pool.getBalance();
             creditPoolDirect(pool, amount);
             pool = poolMapper.selectById(pool.getId());
-            Long walletLedger = writeSimpleLedger("ROLLBACK", "WALLET", pool.getId(), origin.getApplicantId(),
-                    amount.negate(), wb, walletAfter.getBalance(), null, null, approval.getId(),
-                    "个人报销回退扣款", "回退原单 " + origin.getBizNo());
+
+            boolean creditedWallet = origin.getApplicantId() != null
+                    && ledgerMapper.selectCount(new LambdaQueryWrapper<FinLedger>()
+                    .eq(FinLedger::getApprovalId, origin.getId())
+                    .eq(FinLedger::getAccountType, "WALLET")
+                    .eq(FinLedger::getUserId, origin.getApplicantId())
+                    .gt(FinLedger::getAmount, BigDecimal.ZERO)) > 0;
+
+            Long relatedLedgerId = null;
+            if (creditedWallet) {
+                HrWallet walletBefore = walletService.getOrCreate(origin.getApplicantId());
+                if (nz(walletBefore.getBalance()).compareTo(amount) < 0) {
+                    throw new BusinessException("申请人钱包余额不足，无法回退");
+                }
+                BigDecimal wb = walletBefore.getBalance();
+                HrWallet walletAfter = walletService.changeBalance(origin.getApplicantId(), amount.negate());
+                relatedLedgerId = writeSimpleLedger("ROLLBACK", "WALLET", pool.getId(), origin.getApplicantId(),
+                        amount.negate(), wb, walletAfter.getBalance(), null, null, approval.getId(),
+                        "个人报销回退扣款", "回退原单 " + origin.getBizNo());
+            }
             writeSimpleLedger("ROLLBACK", "POOL", pool.getId(), origin.getApplicantId(),
-                    amount, poolBefore, pool.getBalance(), null, walletLedger, approval.getId(),
+                    amount, poolBefore, pool.getBalance(), null, relatedLedgerId, approval.getId(),
                     "个人报销回退入公司", "回退原单 " + origin.getBizNo());
         } else if (ApprovalTypes.WALLET_WITHDRAW.equals(originType)) {
-            // 反向：钱包加回全额，公司资金池扣回税额（优先用原单快照税额）
-            JSONObject originPayload = JSONUtil.parseObj(origin.getPayload());
-            BigDecimal tax = resolveWithdrawTaxFromPayload(originPayload);
-            if (tax == null) {
-                WithdrawTaxCalcResult calc = walletWithdrawTaxService.calculate(origin.getCompanyId(), amount);
-                tax = calc.getTax();
-            }
+            // 方案 A：提现只动钱包；回退只加回钱包（公司余额本就未因提现变动）
             HrWallet walletBefore = walletService.getOrCreate(origin.getApplicantId());
             BigDecimal wb = walletBefore.getBalance();
             HrWallet walletAfter = walletService.changeBalance(origin.getApplicantId(), amount);
             FinPool pool = resolvePool(origin.getPoolId(), origin.getCompanyId());
-            BigDecimal poolBefore = pool.getBalance();
-            Long walletLedger = writeSimpleLedger("ROLLBACK", "WALLET", pool.getId(), origin.getApplicantId(),
+            writeSimpleLedger("ROLLBACK", "WALLET", pool.getId(), origin.getApplicantId(),
                     amount, wb, walletAfter.getBalance(), null, null, approval.getId(),
                     "提现回退入钱包", "回退原单 " + origin.getBizNo());
-            if (tax.compareTo(BigDecimal.ZERO) > 0) {
-                boolean ok = new com.baomidou.mybatisplus.extension.conditions.update.LambdaUpdateChainWrapper<>(poolMapper)
-                        .eq(FinPool::getId, pool.getId())
-                        .ge(FinPool::getBalance, tax)
-                        .setSql("balance = balance - " + tax.toPlainString())
-                        .update();
-                if (!ok) {
-                    throw new BusinessException("公司资金池余额不足，无法回退提现税费");
-                }
-                pool = poolMapper.selectById(pool.getId());
-                writeSimpleLedger("ROLLBACK", "POOL", pool.getId(), origin.getApplicantId(),
-                        tax.negate(), poolBefore, pool.getBalance(), null, walletLedger, approval.getId(),
-                        "提现税费回退扣公司", "回退原单 " + origin.getBizNo());
-            }
         } else if (List.of(ApprovalTypes.REIMBURSE_PROJECT, ApprovalTypes.SALARY_APPLY,
                 ApprovalTypes.PROJECT_BALANCE_APPLY).contains(originType)) {
             if (origin.getApplicantId() == null) {
@@ -1672,6 +1719,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                         "项目支出回退扣个人钱包", "回退原单 " + origin.getBizNo());
             }
             projectAccountService.assertBalanced(origin.getProjectId());
+        } else if (ApprovalTypes.DIRECT_PAYOUT.equals(originType)) {
+            effectDirectPayoutRollback(approval, origin, amount);
         } else if (ApprovalTypes.RESERVE_RETURN.equals(originType) && origin.getProjectId() != null) {
             // 结余回公司回退：公司总账扣回，按原单拆分还原项目池/预留
             JSONObject originPayload = JSONUtil.parseObj(origin.getPayload());
@@ -1773,12 +1822,14 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
     private void effectSalaryMonthly(WfApproval approval, JSONObject payload) {
         Long userId = payload.getLong("userId");
         if (userId == null) {
-            throw new BusinessException("月度工资缺少收款人");
+            throw new BusinessException("工资审批缺少收款人");
         }
         var items = payload.getJSONArray("items");
         if (items == null || items.isEmpty()) {
-            throw new BusinessException("月度工资明细为空");
+            throw new BusinessException("工资明细为空");
         }
+        boolean weekly = "WEEKLY".equalsIgnoreCase(payload.getStr("cycleType"));
+        String salaryLabel = weekly ? "周度工资" : "月度工资";
         for (int i = 0; i < items.size(); i++) {
             JSONObject row = items.getJSONObject(i);
             Long projectId = row.getLong("projectId");
@@ -1787,7 +1838,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                 amount = new BigDecimal(String.valueOf(row.get("amount")));
             }
             if (projectId == null || amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-                throw new BusinessException("月度工资明细无效");
+                throw new BusinessException("工资明细无效");
             }
             String fundType = resolveExpenseFundType(projectId, amount, row.getStr("fundType"));
             row.set("fundType", fundType);
@@ -1800,7 +1851,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                     fundType,
                     approval.getId(),
                     "SALARY",
-                    "月度工资 · " + projectName,
+                    salaryLabel + " · " + projectName,
                     approval.getRemark());
         }
     }
@@ -2302,6 +2353,12 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             if (available.compareTo(amount) < 0) {
                 throw new BusinessException("可用余额不足，当前可用 ¥" + available.toPlainString());
             }
+            Map<String, Object> payload = request.getPayload();
+            boolean withVoucher = payload != null && (asBool(payload.get("withVoucher"))
+                    || "VOUCHER".equalsIgnoreCase(String.valueOf(payload.getOrDefault("taxMode", "")).trim()));
+            if (withVoucher && (request.getVoucherFileIds() == null || request.getVoucherFileIds().isEmpty())) {
+                throw new BusinessException("有凭证提现请上传凭证");
+            }
             // 税额在 resolveApprovalCompanyId 之后由 applyWithdrawTaxPayload 写入
         }
         if (ApprovalTypes.PROJECT_BALANCE_APPLY.equals(type)) {
@@ -2318,6 +2375,12 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                     payload.get("fundType") == null ? null : String.valueOf(payload.get("fundType")));
             payload.put("fundType", fundType);
             assertExpenseWithinQuota(request.getProjectId(), amount, fundType);
+        }
+        if (ApprovalTypes.DIRECT_PAYOUT.equals(type)) {
+            validateDirectPayoutSubmit(request, applicantId);
+        }
+        if (ApprovalTypes.LEAVE_APPLY.equals(type)) {
+            validateLeaveApplySubmit(request, applicantId);
         }
         if (ApprovalTypes.REIMBURSE_PERSONAL.equals(type)
                 || ApprovalTypes.REIMBURSE_PROJECT.equals(type)) {
@@ -2676,6 +2739,9 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         if (payload.getLong("userId") != null) {
             userIds.add(payload.getLong("userId"));
         }
+        if (payload.getLong("payeeUserId") != null) {
+            userIds.add(payload.getLong("payeeUserId"));
+        }
 
         Map<Long, String> nameMap = new HashMap<>();
         if (!userIds.isEmpty()) {
@@ -2710,6 +2776,21 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         }
         if (payload.getLong("userId") != null) {
             data.put("userName", nameMap.get(payload.getLong("userId")));
+        }
+        if (payload.getLong("payeeUserId") != null) {
+            data.put("payeeUserName", nameMap.get(payload.getLong("payeeUserId")));
+        }
+        String sourceType = payload.getStr("sourceType");
+        if (StringUtils.hasText(sourceType)) {
+            data.put("sourceTypeLabel", switch (sourceType.trim().toUpperCase()) {
+                case "COMPANY" -> "公司余额";
+                case "PROJECT" -> "项目资金";
+                default -> sourceType;
+            });
+        }
+        String fundTypeLabel = payload.getStr("fundType");
+        if (StringUtils.hasText(fundTypeLabel)) {
+            data.put("fundTypeLabel", ProjectFundTypes.label(ProjectFundTypes.normalize(fundTypeLabel)));
         }
 
         String bizType = payload.getStr("bizType");
@@ -2997,6 +3078,258 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
                 .eq(FinPool::getId, pool.getId())
                 .setSql("balance = balance + " + amount.toPlainString())
                 .update();
+    }
+
+    private void validateLeaveApplySubmit(ApprovalSubmitRequest request, long applicantId) {
+        Map<String, Object> payload = request.getPayload();
+        if (payload == null) {
+            throw new BusinessException("请填写请假信息");
+        }
+        LocalDate start = parseIsoDate(payload.get("startDate"));
+        LocalDate end = parseIsoDate(payload.get("endDate"));
+        if (start == null || end == null) {
+            throw new BusinessException("请选择请假起止日期");
+        }
+        if (end.isBefore(start)) {
+            throw new BusinessException("结束日期不能早于开始日期");
+        }
+        if (start.plusDays(60).isBefore(end)) {
+            throw new BusinessException("单次请假不超过 60 天");
+        }
+        String reason = payload.get("reason") == null ? request.getRemark() : String.valueOf(payload.get("reason"));
+        if (!StringUtils.hasText(reason)) {
+            throw new BusinessException("请填写请假事由");
+        }
+        payload.put("startDate", start.toString());
+        payload.put("endDate", end.toString());
+        payload.put("reason", reason.trim());
+        payload.put("leaveDays", start.datesUntil(end.plusDays(1)).count());
+        if (!StringUtils.hasText(request.getRemark())) {
+            request.setRemark(reason.trim());
+        }
+        if (request.getCompanyId() == null) {
+            throw new BusinessException("请选择所属公司");
+        }
+        leaveService.assertLeaveRangeAvailable(request.getCompanyId(), applicantId, start, end);
+    }
+
+    private LocalDate parseIsoDate(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        if (raw instanceof LocalDate d) {
+            return d;
+        }
+        String text = String.valueOf(raw).trim();
+        if (!StringUtils.hasText(text) || "null".equalsIgnoreCase(text)) {
+            return null;
+        }
+        try {
+            if (text.length() >= 10) {
+                return LocalDate.parse(text.substring(0, 10));
+            }
+            return LocalDate.parse(text);
+        } catch (DateTimeParseException e) {
+            throw new BusinessException("请假日期格式无效");
+        }
+    }
+
+    private void effectLeaveApply(WfApproval approval, JSONObject payload) {
+        LocalDate start = parseIsoDate(payload.get("startDate"));
+        LocalDate end = parseIsoDate(payload.get("endDate"));
+        String reason = payload.getStr("reason", approval.getRemark());
+        leaveService.effectLeaveApproval(
+                approval.getId(),
+                approval.getCompanyId(),
+                approval.getApplicantId(),
+                start,
+                end,
+                reason);
+    }
+
+    private void validateDirectPayoutSubmit(ApprovalSubmitRequest request, long applicantId) {
+        if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("请填写发钱金额");
+        }
+        BigDecimal amount = request.getAmount().setScale(2, RoundingMode.HALF_UP);
+        request.setAmount(amount);
+        Map<String, Object> payload = request.getPayload();
+        if (payload == null) {
+            payload = new HashMap<>();
+            request.setPayload(payload);
+        }
+        Object sourceRaw = payload.get("sourceType");
+        String sourceType = sourceRaw == null ? "" : String.valueOf(sourceRaw).trim().toUpperCase();
+        if (!List.of("COMPANY", "PROJECT").contains(sourceType)) {
+            throw new BusinessException("请选择资金来源：公司余额或项目资金");
+        }
+        payload.put("sourceType", sourceType);
+
+        Long payeeUserId = null;
+        Object payeeRaw = payload.get("payeeUserId");
+        if (payeeRaw instanceof Number n) {
+            payeeUserId = n.longValue();
+        } else if (payeeRaw != null) {
+            String text = String.valueOf(payeeRaw).trim();
+            if (StringUtils.hasText(text) && !"null".equalsIgnoreCase(text)) {
+                try {
+                    payeeUserId = Long.parseLong(text);
+                } catch (NumberFormatException e) {
+                    throw new BusinessException("收款人参数无效");
+                }
+            }
+        }
+        if (payeeUserId == null) {
+            throw new BusinessException("请选择收款人");
+        }
+        SysUser payee = userService.getById(payeeUserId);
+        if (payee == null || (payee.getStatus() != null && payee.getStatus() == 0)) {
+            throw new BusinessException("收款人不存在或已停用");
+        }
+        payload.put("payeeUserId", payeeUserId);
+        payload.put("payeeUserName", StringUtils.hasText(payee.getNickname()) ? payee.getNickname() : payee.getUsername());
+
+        Long companyIdHint = request.getCompanyId();
+        if ("COMPANY".equals(sourceType)) {
+            if (request.getPoolId() == null) {
+                throw new BusinessException("请选择公司资金池");
+            }
+            FinPool pool = resolvePool(request.getPoolId(), companyIdHint);
+            if (pool.getStatus() != null && pool.getStatus() == 0) {
+                throw new BusinessException("公司账户已禁用");
+            }
+            request.setPoolId(pool.getId());
+            request.setProjectId(null);
+            payload.remove("fundType");
+            BigDecimal poolBal = nz(pool.getBalance());
+            if (amount.compareTo(poolBal) > 0) {
+                throw new BusinessException("不能超过公司余额 ¥" + poolBal.toPlainString());
+            }
+            companyIdHint = pool.getCompanyId();
+        } else {
+            if (request.getProjectId() == null) {
+                throw new BusinessException("请选择项目");
+            }
+            projectAccountService.assertMutableProject(request.getProjectId());
+            Object rawFund = payload.get("fundType");
+            String fundType = resolveExpenseFundType(request.getProjectId(), amount,
+                    rawFund == null ? null : String.valueOf(rawFund));
+            payload.put("fundType", fundType);
+            assertExpenseWithinQuota(request.getProjectId(), amount, fundType);
+            PmProject project = projectMapper.selectById(request.getProjectId());
+            if (project == null) {
+                throw new BusinessException("项目不存在");
+            }
+            companyIdHint = project.getCompanyId();
+            if (request.getPoolId() == null && project.getPoolId() != null) {
+                request.setPoolId(project.getPoolId());
+            }
+        }
+
+        if (companyIdHint == null) {
+            throw new BusinessException("无法确定所属公司");
+        }
+        if (!dataScopeService.isGlobalAdmin(applicantId) && !canFinanceHandle(applicantId, companyIdHint)) {
+            throw new BusinessException("仅财务可发起财务发钱");
+        }
+        request.setCompanyId(companyIdHint);
+    }
+
+    private void effectDirectPayout(WfApproval approval, JSONObject payload) {
+        Long payeeUserId = payload.getLong("payeeUserId");
+        if (payeeUserId == null) {
+            throw new BusinessException("财务发钱缺少收款人");
+        }
+        BigDecimal amount = approval.getAmount();
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("财务发钱金额无效");
+        }
+        String sourceType = payload.getStr("sourceType", "").trim().toUpperCase();
+        String title = StringUtils.hasText(approval.getTitle()) ? approval.getTitle() : "财务发钱";
+        if ("COMPANY".equals(sourceType)) {
+            Long poolId = approval.getPoolId() != null ? approval.getPoolId() : payload.getLong("poolId");
+            if (poolId == null) {
+                throw new BusinessException("财务发钱缺少公司资金池");
+            }
+            financeService.payoutPoolToWallet(poolId, payeeUserId, amount, approval.getId(), title, approval.getRemark());
+        } else if ("PROJECT".equals(sourceType)) {
+            if (approval.getProjectId() == null) {
+                throw new BusinessException("财务发钱缺少项目");
+            }
+            String fundType = ProjectFundTypes.normalize(payload.getStr("fundType"));
+            assertExpenseWithinQuota(approval.getProjectId(), amount, fundType);
+            projectAccountService.expenseToWallet(
+                    approval.getProjectId(),
+                    payeeUserId,
+                    amount,
+                    fundType,
+                    approval.getId(),
+                    "PAYOUT",
+                    title,
+                    approval.getRemark());
+        } else {
+            throw new BusinessException("财务发钱资金来源无效");
+        }
+        notificationService.notifyUser(
+                payeeUserId,
+                "已入账 · " + title,
+                "财务发钱 ¥" + amount.setScale(2, RoundingMode.HALF_UP).toPlainString()
+                        + " 已转入你的个人钱包，单号 " + approval.getBizNo(),
+                "approval", approval.getId(), "/account");
+    }
+
+    private void effectDirectPayoutRollback(WfApproval approval, WfApproval origin, BigDecimal amount) {
+        JSONObject originPayload = JSONUtil.parseObj(origin.getPayload());
+        Long payeeUserId = originPayload.getLong("payeeUserId");
+        if (payeeUserId == null) {
+            throw new BusinessException("原单缺少收款人，无法回退");
+        }
+        String sourceType = originPayload.getStr("sourceType", "").trim().toUpperCase();
+        String remark = "回退原单 " + origin.getBizNo();
+        if ("COMPANY".equals(sourceType)) {
+            Long poolId = origin.getPoolId() != null ? origin.getPoolId() : originPayload.getLong("poolId");
+            if (poolId == null) {
+                throw new BusinessException("原单缺少资金池，无法回退");
+            }
+            financeService.reversePayoutPoolFromWallet(
+                    poolId, payeeUserId, amount, approval.getId(), "财务发钱回退", remark);
+            return;
+        }
+        if (!"PROJECT".equals(sourceType)) {
+            throw new BusinessException("原单资金来源无效，无法回退");
+        }
+        if (origin.getProjectId() == null) {
+            throw new BusinessException("原单缺少项目，无法回退");
+        }
+        var account = projectAccountService.getOrCreate(origin.getProjectId());
+        if (nz(account.getExpenseAmount()).compareTo(amount) < 0) {
+            throw new BusinessException("回退金额超过项目累计支出");
+        }
+        boolean creditedWallet = ledgerMapper.selectCount(new LambdaQueryWrapper<FinLedger>()
+                .eq(FinLedger::getApprovalId, origin.getId())
+                .eq(FinLedger::getAccountType, "WALLET")
+                .eq(FinLedger::getUserId, payeeUserId)
+                .gt(FinLedger::getAmount, BigDecimal.ZERO)) > 0;
+        BigDecimal before = nz(account.getBalance());
+        account.setBalance(before.add(amount));
+        account.setExpenseAmount(nz(account.getExpenseAmount()).subtract(amount));
+        creditFundBucketOnAccount(account, originPayload.getStr("fundType"), amount);
+        projectAccountService.updateById(account);
+        Long projectLedger = writeSimpleLedger("ROLLBACK", "PROJECT", origin.getPoolId(), null, amount,
+                before, account.getBalance(), origin.getProjectId(), null, approval.getId(),
+                "财务发钱回退", remark);
+        if (creditedWallet) {
+            HrWallet walletBefore = walletService.getOrCreate(payeeUserId);
+            if (nz(walletBefore.getBalance()).compareTo(amount) < 0) {
+                throw new BusinessException("收款人钱包余额不足，无法回退");
+            }
+            BigDecimal wb = walletBefore.getBalance();
+            HrWallet walletAfter = walletService.changeBalance(payeeUserId, amount.negate());
+            writeSimpleLedger("ROLLBACK", "WALLET", origin.getPoolId(), payeeUserId,
+                    amount.negate(), wb, walletAfter.getBalance(), origin.getProjectId(), projectLedger, approval.getId(),
+                    "财务发钱回退扣个人钱包", remark);
+        }
+        projectAccountService.assertBalanced(origin.getProjectId());
     }
 
     private BigDecimal nz(BigDecimal v) {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
@@ -45,7 +45,6 @@ const voucherFiles = ref<any[]>([])
 const uploadingVoucher = ref(false)
 const myPayMethods = ref<any[]>([])
 const shareForm = reactive({
-  budget: 0,
   reservePercent: 0,
   settlePercent: 100,
   members: [] as Array<{ userId?: number; layer: string; percent: number; remark: string }>,
@@ -79,14 +78,49 @@ const fundSplitOk = computed(() => {
   return settle >= 0 && reserve >= 0 && Math.abs(settle + reserve - 100) <= 0.01
 })
 
-/** 比例计算基数：优先预算，否则已转入 */
-const fundBase = computed(() => {
-  const budget = Number(shareForm.budget || shareDetail.value?.budget || 0)
-  if (budget > 0) return budget
-  return Number(account.value?.advanceAmount || 0)
-})
+/** 分成% + 预留% 联动，合计恒为 100% */
+function clampPercent(v: unknown) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 0
+  return Math.min(100, Math.max(0, Number(n.toFixed(2))))
+}
 
-const settleQuota = computed(() => Number(((fundBase.value * Number(shareForm.settlePercent || 0)) / 100).toFixed(2)))
+function setSettlePercent(v: unknown) {
+  const settle = clampPercent(v)
+  const reserve = Number((100 - settle).toFixed(2))
+  if (shareForm.settlePercent !== settle) shareForm.settlePercent = settle
+  if (shareForm.reservePercent !== reserve) shareForm.reservePercent = reserve
+}
+
+function setReservePercent(v: unknown) {
+  const reserve = clampPercent(v)
+  const settle = Number((100 - reserve).toFixed(2))
+  if (shareForm.reservePercent !== reserve) shareForm.reservePercent = reserve
+  if (shareForm.settlePercent !== settle) shareForm.settlePercent = settle
+}
+
+watch(
+  () => shareForm.settlePercent,
+  (v) => setSettlePercent(v),
+)
+
+watch(
+  () => shareForm.reservePercent,
+  (v) => setReservePercent(v),
+)
+
+/** 加载配置时：以分成%为准，预留%补到 100 */
+function applyFundSplitPercents(settle?: unknown, reserve?: unknown) {
+  const settleRaw = settle != null ? Number(settle) : NaN
+  const reserveRaw = reserve != null ? Number(reserve) : NaN
+  if (Number.isFinite(settleRaw)) {
+    setSettlePercent(settleRaw)
+  } else if (Number.isFinite(reserveRaw)) {
+    setReservePercent(reserveRaw)
+  } else {
+    setSettlePercent(100)
+  }
+}
 
 function formatPeriodMonth(d = new Date()) {
   const m = `${d.getMonth() + 1}`.padStart(2, '0')
@@ -285,9 +319,7 @@ async function loadDetail() {
   childAccounts.value = []
   try {
     shareDetail.value = await bizApi.projectShareDetail(activeId.value)
-    shareForm.budget = Number(shareDetail.value?.budget || 0)
-    shareForm.reservePercent = Number(shareDetail.value?.reservePercent ?? 0)
-    shareForm.settlePercent = Number(shareDetail.value?.settlePercent ?? 100)
+    applyFundSplitPercents(shareDetail.value?.settlePercent, shareDetail.value?.reservePercent)
     const members = shareDetail.value?.members || []
     shareForm.members = members.length
       ? members.map((m: any) => ({
@@ -337,7 +369,7 @@ async function saveShare() {
       poolId: shareDetail.value?.poolId,
       payload: {
         poolId: shareDetail.value?.poolId,
-        budget: shareForm.budget,
+        budget: 0,
         expensePercent: 0,
         reservePercent: shareForm.reservePercent,
         settlePercent: shareForm.settlePercent,
@@ -573,9 +605,7 @@ async function openAdvanceDialog() {
     try {
       const detail = await bizApi.projectShareDetail(activeId.value)
       shareDetail.value = detail
-      shareForm.budget = Number(detail?.budget || 0)
-      shareForm.reservePercent = Number(detail?.reservePercent ?? 0)
-      shareForm.settlePercent = Number(detail?.settlePercent ?? 100)
+      applyFundSplitPercents(detail?.settlePercent, detail?.reservePercent)
       const members = detail?.members || []
       shareForm.members = members.length
         ? members.map((m: any) => ({
@@ -1068,29 +1098,34 @@ onMounted(async () => {
                   <p>只配「分成」和「预留」（合计 100%）。点「自然月分成」时按此比例拆待分成余额；工资/报销不占比例，默认从待分成扣。只改规则，已分/已花不变。</p>
                 </header>
 
-                <div class="budget-line">
-                  <span class="field-label">预算基数</span>
-                  <el-input-number v-model="shareForm.budget" :min="0" :precision="2" controls-position="right" />
-                  <span class="hint">用来算分成/预留额度；为 0 则按已转入 · 当前 ¥{{ fmt(fundBase) }}</span>
-                </div>
-
                 <div class="percent-row two">
                   <div class="percent-item">
                     <span class="field-label">分成 %</span>
-                    <el-input-number v-model="shareForm.settlePercent" :min="0" :max="100" :precision="2" controls-position="right" />
-                    <span class="sub">额度 ¥{{ fmt(settleQuota) }} · 已分 ¥{{ fmt(account.settleAmount) }}</span>
+                    <el-input-number
+                      v-model="shareForm.settlePercent"
+                      :min="0"
+                      :max="100"
+                      :precision="2"
+                      controls-position="right"
+                    />
+                    <span class="sub">已分 ¥{{ fmt(account.settleAmount) }}</span>
                   </div>
                   <div class="percent-item">
                     <span class="field-label">预留 %</span>
-                    <el-input-number v-model="shareForm.reservePercent" :min="0" :max="100" :precision="2" controls-position="right" />
+                    <el-input-number
+                      v-model="shareForm.reservePercent"
+                      :min="0"
+                      :max="100"
+                      :precision="2"
+                      controls-position="right"
+                    />
                     <span class="sub">规划额度 · 分成后进预留占用</span>
                   </div>
                 </div>
-                <div class="sum-line" :class="{ bad: !fundSplitOk }">
+                <div class="sum-line">
                   分成 {{ Number(shareForm.settlePercent || 0).toFixed(2) }}%
                   + 预留 {{ Number(shareForm.reservePercent || 0).toFixed(2) }}%
-                  = {{ (Number(shareForm.settlePercent || 0) + Number(shareForm.reservePercent || 0)).toFixed(2) }}%
-                  （须为 100%；支出不占比例）
+                  = 100%（联动互补；支出不占比例）
                 </div>
 
                 <div class="members-head">
@@ -1742,17 +1777,6 @@ onMounted(async () => {
   font-size: 12px;
   color: #94a3b8;
   line-height: 1.5;
-}
-.budget-line {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-.budget-line .field-label {
-  margin: 0;
-  white-space: nowrap;
 }
 .percent-row {
   display: grid;

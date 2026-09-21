@@ -56,6 +56,15 @@ public final class ApprovalTypes {
 
     public static final String SALARY_MONTHLY = "SALARY_MONTHLY";
 
+    /**
+     * 财务直接发钱：从公司余额或项目资金转入指定个人钱包；
+     * 审批通过即入账（无需回执）；审批人由各公司审批配置指定。
+     */
+    public static final String DIRECT_PAYOUT = "DIRECT_PAYOUT";
+
+    /** 请假申请（通过后写入请假考勤日） */
+    public static final String LEAVE_APPLY = "LEAVE_APPLY";
+
     public static final String RESERVE_RETURN = "RESERVE_RETURN";
 
     /** 公司总账登记：入账 / 出账 */
@@ -118,6 +127,10 @@ public final class ApprovalTypes {
             case SALARY_APPLY -> "工资申请";
 
             case SALARY_MONTHLY -> "月度工资";
+
+            case DIRECT_PAYOUT -> "财务发钱";
+
+            case LEAVE_APPLY -> "请假申请";
 
             case RESERVE_RETURN -> "预留回公司";
 
@@ -189,6 +202,8 @@ public final class ApprovalTypes {
                 || SALARY_APPLY.equals(type)
 
                 || SALARY_MONTHLY.equals(type)
+
+                || DIRECT_PAYOUT.equals(type)
 
                 || RESERVE_RETURN.equals(type)
 

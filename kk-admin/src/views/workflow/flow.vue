@@ -17,6 +17,8 @@ const BUILTIN_TYPES = [
   { type: 'PROJECT_BALANCE_APPLY', name: '项目余额申请' },
   { type: 'SALARY_APPLY', name: '工资申请' },
   { type: 'SALARY_MONTHLY', name: '月度工资' },
+  { type: 'DIRECT_PAYOUT', name: '财务发钱' },
+  { type: 'LEAVE_APPLY', name: '请假申请' },
   { type: 'PROJECT_ADVANCE', name: '项目预支' },
   { type: 'PROJECT_ADVANCE_RETURN', name: '退回公司' },
   { type: 'PROJECT_SETTLE', name: '项目分钱' },

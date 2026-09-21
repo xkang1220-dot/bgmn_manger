@@ -8,12 +8,12 @@ import com.kk.common.entity.BaseEntity;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
-import java.math.BigDecimal;
+import java.time.LocalDate;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
-@TableName("hr_salary_item")
-public class HrSalaryItem extends BaseEntity {
+@TableName("hr_leave_record")
+public class HrLeaveRecord extends BaseEntity {
 
     @TableId(type = IdType.AUTO)
     private Long id;
@@ -22,21 +22,15 @@ public class HrSalaryItem extends BaseEntity {
 
     private Long userId;
 
-    private Long projectId;
+    private LocalDate leaveDate;
 
-    private BigDecimal amount;
+    private Long approvalId;
 
-    /** MONTHLY 月薪 / WEEKLY 周薪 */
-    private String cycleType;
-
-    /** 1 启用 0 停用 */
-    private Integer enabled;
-
-    private String remark;
+    private String reason;
 
     @TableField(exist = false)
     private String userName;
 
     @TableField(exist = false)
-    private String projectName;
+    private String companyName;
 }

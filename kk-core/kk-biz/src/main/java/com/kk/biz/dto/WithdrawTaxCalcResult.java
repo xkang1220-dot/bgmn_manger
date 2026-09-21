@@ -8,7 +8,7 @@ import java.util.List;
 
 @Data
 public class WithdrawTaxCalcResult {
-    /** TIER | FLAT */
+    /** TIER | FLAT | VOUCHER（有凭证免税） */
     private String taxMode;
     /** flat default rate, or null when TIER */
     private BigDecimal taxRate;

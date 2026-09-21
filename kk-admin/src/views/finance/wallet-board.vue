@@ -152,7 +152,7 @@ onMounted(load)
   <div class="page-stack">
     <div class="page-top">
       <div class="page-top__main">
-        <p class="page-desc">看每人余额；点卡片查看钱从哪来（项目分成、报销等到账明细）</p>
+        <p class="page-desc">看每人余额；点卡片查看钱从哪来（项目分成、项目报销等到账明细）</p>
       </div>
     </div>
 

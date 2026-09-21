@@ -52,6 +52,16 @@ public interface FinanceService extends IService<FinPool> {
     void createLedger(LedgerCreateRequest request);
 
     /**
+     * 公司资金池 → 个人钱包（财务发钱生效用）。
+     */
+    void payoutPoolToWallet(Long poolId, Long userId, BigDecimal amount, Long approvalId, String title, String remark);
+
+    /**
+     * 个人钱包 → 公司资金池（财务发钱回退用）。
+     */
+    void reversePayoutPoolFromWallet(Long poolId, Long userId, BigDecimal amount, Long approvalId, String title, String remark);
+
+    /**
      * 公司总账登记入口：入账始终审批；出账按公司阈值分流（未启用则审批）。
      */
     LedgerRegisterResult registerCompanyLedger(LedgerCreateRequest request);

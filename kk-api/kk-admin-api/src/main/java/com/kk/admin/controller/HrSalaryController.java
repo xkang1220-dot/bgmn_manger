@@ -84,6 +84,26 @@ public class HrSalaryController {
         return Result.ok(salaryService.runPreview(companyId, yearMonth, true));
     }
 
+    @GetMapping("/prepare-draft")
+    @SaCheckPermission("hr:salary:run:manual")
+    public Result<List<Map<String, Object>>> prepareDraft(
+            @RequestParam Long companyId,
+            @RequestParam(required = false) String yearMonth) {
+        return Result.ok(salaryService.preparePayDraft(companyId, yearMonth));
+    }
+
+    @PostMapping("/prepare-confirm")
+    @SaCheckPermission("hr:salary:run:manual")
+    @SuppressWarnings("unchecked")
+    public Result<HrSalaryRun> prepareConfirm(@RequestBody Map<String, Object> body) {
+        Long companyId = asLong(body.get("companyId"));
+        String yearMonth = body.get("yearMonth") == null ? null : String.valueOf(body.get("yearMonth"));
+        List<Map<String, Object>> lines = body.get("lines") instanceof List<?> list
+                ? (List<Map<String, Object>>) list
+                : List.of();
+        return Result.ok(salaryService.preparePayConfirm(companyId, yearMonth, lines));
+    }
+
     @PostMapping("/pay")
     @SaCheckPermission("hr:salary:run:manual")
     public Result<HrSalaryRun> pay(@RequestBody Map<String, Object> body) {

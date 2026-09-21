@@ -135,7 +135,7 @@ export const ticketApi = {
       url: '/ticket/order/upload/image',
       method: 'post',
       data: form,
-      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 10 * 60 * 1000,
     })
   },
 }

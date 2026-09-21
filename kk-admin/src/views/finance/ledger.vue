@@ -3,6 +3,7 @@ import { onMounted, reactive, ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
+import { workflowApi } from '@/api/workflow'
 import { approvalFlowTip } from '@/utils/approvalTip'
 import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 
@@ -23,6 +24,19 @@ const pools = ref<any[]>([])
 const channels = ref<any[]>([])
 const projects = ref<any[]>([])
 const dialog = ref(false)
+const payoutDialog = ref(false)
+const payoutSaving = ref(false)
+const payoutUsers = ref<any[]>([])
+const payoutProjectDetail = ref<any>(null)
+const payoutForm = reactive({
+  sourceType: 'COMPANY' as 'COMPANY' | 'PROJECT',
+  poolId: undefined as number | undefined,
+  projectId: undefined as number | undefined,
+  fundType: 'SHARE_PENDING' as string,
+  payeeUserId: undefined as number | undefined,
+  amount: undefined as number | undefined,
+  remark: '',
+})
 const uploading = ref(false)
 const listLoading = ref(false)
 const saving = ref(false)
@@ -67,6 +81,9 @@ const detailVisible = ref(false)
 const detailRow = ref<LedgerRow | null>(null)
 const companyBalanceVisible = ref(false)
 const projectBalanceVisible = ref(false)
+const walletBalanceVisible = ref(false)
+const walletBalances = ref<any[]>([])
+const walletBalancesLoading = ref(false)
 const assetsDetailVisible = ref(false)
 
 const companyBalances = computed(() => {
@@ -169,7 +186,7 @@ const TYPE_LABEL: Record<string, string> = {
   SALARY: '工资',
   ROLLBACK: '回退',
   FEE: '手续费',
-  PAYOUT: '项目余额',
+  PAYOUT: '发钱入钱包',
 }
 
 const TYPE_TAG: Record<string, string> = {
@@ -280,6 +297,13 @@ function resolveLedgerCompany(row: any): { companyId?: number; companyName?: str
   return { companyId, companyName }
 }
 
+function counterpartLabel(row: any) {
+  if (row?.userName) return `个人 · ${row.userName}`
+  if (row?.projectName) return row.projectName
+  if (row?.userId != null) return `个人#${row.userId}`
+  return '—'
+}
+
 /** 只展示公司侧流水，同一笔业务合并成一行 */
 function buildCompanyRows(rows: any[]): LedgerRow[] {
   const poolRows = rows.filter((r) => r.accountType === 'POOL')
@@ -311,17 +335,21 @@ function buildCompanyRows(rows: any[]): LedgerRow[] {
       companyName: company.companyName,
       amount: Number(row.amount),
       afterBalance: Number(row.afterBalance),
-      counterpart: row.projectName || '—',
+      counterpart: counterpartLabel(row),
       vouchers: row.vouchers || [],
     })
   }
 
   for (const [batchId, poolItems] of byBatch) {
     const head = [...poolItems].sort((a, b) => a.id - b.id)[0]
+    // 关联钱包：relatedId 指向本批，或钱包行自身 id == 本批（提现先写钱包再挂公司）
     const relatedWallets = rows.filter(
-      (r) => r.relatedId === batchId && r.accountType === 'WALLET' && Math.abs(Number(r.amount)) > 0,
+      (r) =>
+        r.accountType === 'WALLET'
+        && Math.abs(Number(r.amount)) > 0
+        && (Number(r.relatedId) === Number(batchId) || Number(r.id) === Number(batchId)),
     )
-    let counterpart = head.projectName || '—'
+    let counterpart = counterpartLabel(head)
     if (relatedWallets.length) {
       counterpart = relatedWallets
         .map((w) => `${w.userName || '个人'}${Number(w.amount) > 0 ? '+' : ''}${fmtMoney(w.amount).replace('¥', '')}`)
@@ -410,9 +438,13 @@ async function load() {
       poolList = poolList.filter((r: any) => ledgerCompanyId(r) === cid)
     }
     rawList.value = poolList
-    const needWallet = !query.bizType || ['SETTLE', 'TRANSFER', 'EXPENSE', 'REIMBURSE', 'SALARY', 'PAYOUT', 'ROLLBACK'].includes(query.bizType)
+    const needWallet = !query.bizType || ['SETTLE', 'TRANSFER', 'EXPENSE', 'REIMBURSE', 'SALARY', 'PAYOUT', 'ROLLBACK', 'WITHDRAW'].includes(query.bizType)
     const relatedIds = needWallet
-      ? [...new Set(poolList.map((r: any) => r.relatedId).filter(Boolean))]
+      ? [...new Set(
+          poolList
+            .map((r: any) => Number(r.relatedId))
+            .filter((id: number) => Number.isFinite(id) && id > 0),
+        )]
       : []
     if (relatedIds.length) {
       const walletRes = await bizApi.ledgerPage({
@@ -422,7 +454,12 @@ async function load() {
         bizType: undefined,
       })
       const need = new Set(relatedIds)
-      const extras = walletRes.list.filter((r: any) => need.has(r.relatedId))
+      // relatedId 命中，或钱包行 id 本身就是批次号（提现先写钱包再挂公司）
+      const extras = (walletRes.list || []).filter((r: any) => {
+        const rid = Number(r.relatedId)
+        const id = Number(r.id)
+        return need.has(rid) || need.has(id)
+      })
       rawList.value = [...poolList, ...extras]
     }
     query.page = 1
@@ -473,6 +510,47 @@ function openProjectBalances() {
   projectBalanceVisible.value = true
 }
 
+function walletDisplayName(row: any) {
+  return row.nickname || row.realName || row.username || (row.userId != null ? `用户#${row.userId}` : '—')
+}
+
+async function openWalletBalances() {
+  walletBalanceVisible.value = true
+  walletBalancesLoading.value = true
+  try {
+    // 优先用总账 summary（与公司/项目明细同权限），避免缺 wallet:list 时空白
+    let list: any[] = Array.isArray(summary.value?.walletBalances)
+      ? summary.value.walletBalances
+      : []
+    if (!list.length) {
+      try {
+        await loadSummary()
+        list = Array.isArray(summary.value?.walletBalances) ? summary.value.walletBalances : []
+      } catch {
+        /* ignore, try walletPage */
+      }
+    }
+    if (!list.length) {
+      const res = await bizApi.walletPage({ page: 1, pageSize: 500 })
+      list = res.list || []
+    }
+    walletBalances.value = list
+      .map((r: any) => ({
+        ...r,
+        balance: Number(r.balance || 0),
+        frozen: Number(r.frozen || 0),
+        available: Number(r.available ?? (Number(r.balance || 0) - Number(r.frozen || 0))),
+      }))
+      .filter((r: any) => r.balance !== 0 || r.frozen !== 0)
+      .sort((a: any, b: any) => b.balance - a.balance || b.frozen - a.frozen)
+  } catch (e: any) {
+    walletBalances.value = []
+    ElMessage.error(e?.message || '加载个人钱包明细失败')
+  } finally {
+    walletBalancesLoading.value = false
+  }
+}
+
 function openAssetsDetail() {
   assetsDetailVisible.value = true
 }
@@ -494,6 +572,126 @@ function openDialog() {
   emptyForm()
   void ensureFormOptions()
   dialog.value = true
+}
+
+function emptyPayoutForm() {
+  payoutForm.sourceType = 'COMPANY'
+  payoutForm.poolId = undefined
+  payoutForm.projectId = undefined
+  payoutForm.fundType = 'SHARE_PENDING'
+  payoutForm.payeeUserId = undefined
+  payoutForm.amount = undefined
+  payoutForm.remark = ''
+  payoutProjectDetail.value = null
+}
+
+async function openPayoutDialog() {
+  emptyPayoutForm()
+  await ensureFormOptions()
+  payoutForm.poolId = pools.value.find((p) => p.isDefault === 1)?.id ?? pools.value[0]?.id
+  await loadPayoutUsers()
+  payoutDialog.value = true
+}
+
+const payoutPool = computed(() => pools.value.find((p) => p.id === payoutForm.poolId))
+const payoutCompanyId = computed(() => {
+  if (payoutForm.sourceType === 'COMPANY') return payoutPool.value?.companyId as number | undefined
+  return payoutProjectDetail.value?.companyId as number | undefined
+})
+const payoutPoolBalance = computed(() => Number(payoutPool.value?.balance || 0))
+const payoutFundBalance = computed(() => {
+  const d = payoutProjectDetail.value
+  if (!d) return 0
+  return payoutForm.fundType === 'NON_SHARE'
+    ? Number(d.nonShareBalance || 0)
+    : Number(d.sharePendingBalance || 0)
+})
+
+async function loadPayoutUsers() {
+  const cid = payoutCompanyId.value
+  payoutUsers.value = await sysApi.userList(cid != null ? { companyId: Number(cid) } : undefined)
+}
+
+async function onPayoutSourceChange() {
+  payoutForm.projectId = undefined
+  payoutProjectDetail.value = null
+  if (payoutForm.sourceType === 'COMPANY' && !payoutForm.poolId) {
+    payoutForm.poolId = pools.value.find((p) => p.isDefault === 1)?.id ?? pools.value[0]?.id
+  }
+  await loadPayoutUsers()
+}
+
+async function onPayoutPoolChange() {
+  await loadPayoutUsers()
+}
+
+async function onPayoutProjectChange(projectId?: number) {
+  payoutProjectDetail.value = null
+  if (!projectId) return
+  try {
+    payoutProjectDetail.value = await bizApi.projectAccountDetail(projectId)
+    const pending = Number(payoutProjectDetail.value?.sharePendingBalance || 0)
+    const nonShare = Number(payoutProjectDetail.value?.nonShareBalance || 0)
+    payoutForm.fundType = pending > 0 || nonShare <= 0 ? 'SHARE_PENDING' : 'NON_SHARE'
+    await loadPayoutUsers()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '加载项目账款失败')
+  }
+}
+
+async function submitPayout() {
+  if (!payoutForm.payeeUserId) {
+    ElMessage.warning('请选择收款人')
+    return
+  }
+  const amount = Number(payoutForm.amount)
+  if (!amount || amount <= 0) {
+    ElMessage.warning('请填写发钱金额')
+    return
+  }
+  if (payoutForm.sourceType === 'COMPANY') {
+    if (!payoutForm.poolId) {
+      ElMessage.warning('请选择公司资金池')
+      return
+    }
+    if (amount > payoutPoolBalance.value) {
+      ElMessage.warning(`不能超过公司余额 ¥${payoutPoolBalance.value.toFixed(2)}`)
+      return
+    }
+  } else {
+    if (!payoutForm.projectId) {
+      ElMessage.warning('请选择项目')
+      return
+    }
+    if (amount > payoutFundBalance.value) {
+      ElMessage.warning(`不能超过所选项目资金 ¥${payoutFundBalance.value.toFixed(2)}`)
+      return
+    }
+  }
+  const payee = payoutUsers.value.find((u) => u.id === payoutForm.payeeUserId)
+  const payeeName = payee?.nickname || payee?.username || `#${payoutForm.payeeUserId}`
+  payoutSaving.value = true
+  try {
+    const approval = await workflowApi.submit({
+      type: 'DIRECT_PAYOUT',
+      title: `财务发钱 · ${payeeName}`,
+      amount,
+      poolId: payoutForm.sourceType === 'COMPANY' ? payoutForm.poolId : undefined,
+      projectId: payoutForm.sourceType === 'PROJECT' ? payoutForm.projectId : undefined,
+      companyId: payoutCompanyId.value,
+      remark: payoutForm.remark || undefined,
+      payload: {
+        sourceType: payoutForm.sourceType,
+        payeeUserId: payoutForm.payeeUserId,
+        fundType: payoutForm.sourceType === 'PROJECT' ? payoutForm.fundType : undefined,
+      },
+    })
+    ElMessage.success(`${approvalFlowTip(approval)}。审批通过后将转入收款人钱包`)
+    payoutDialog.value = false
+    await Promise.all([load(), loadSummary()])
+  } finally {
+    payoutSaving.value = false
+  }
 }
 
 async function ensureFormOptions() {
@@ -945,6 +1143,7 @@ onMounted(async () => {
         <span class="threshold-badge">{{ thresholdBadge }}</span>
         <el-button @click="openThresholdDialog">出账阈值</el-button>
         <el-button @click="openTaxDialog">提现税率</el-button>
+        <el-button @click="openPayoutDialog">发钱给个人</el-button>
         <el-button type="primary" @click="openDialog">登记流水</el-button>
       </div>
     </div>
@@ -1008,11 +1207,20 @@ onMounted(async () => {
         </div>
         <el-icon class="summary-glyph" :size="52"><FolderOpened /></el-icon>
       </div>
-      <div class="summary-card summary-card--cyan">
+      <div
+        class="summary-card summary-card--cyan summary-card--clickable"
+        role="button"
+        tabindex="0"
+        @click="openWalletBalances"
+        @keyup.enter="openWalletBalances"
+      >
         <div class="summary-body">
           <div class="summary-label">个人钱包合计</div>
           <div class="summary-value sm">{{ fmtMoney(summary.walletTotal) }}</div>
-          <div class="summary-hint">已分到个人，不会超过系统内资金</div>
+          <div class="summary-hint">
+            <template v-if="Number(summary.walletCount) > 0">共 {{ summary.walletCount }} 人，点击查看明细</template>
+            <template v-else>已分到个人，点击查看明细</template>
+          </div>
         </div>
         <el-icon class="summary-glyph" :size="52"><Wallet /></el-icon>
       </div>
@@ -1041,7 +1249,7 @@ onMounted(async () => {
           <el-option label="项目预支" value="ADVANCE" />
           <el-option label="报销" value="REIMBURSE" />
           <el-option label="工资" value="SALARY" />
-          <el-option label="项目余额" value="PAYOUT" />
+          <el-option label="发钱入钱包" value="PAYOUT" />
           <el-option label="回退" value="ROLLBACK" />
         </el-select>
       </el-form-item>
@@ -1235,6 +1443,39 @@ onMounted(async () => {
       <p class="company-balance-note">按项目列出已预支尚未花完或分完的余额；子项目会单独列出。</p>
     </el-drawer>
 
+    <el-drawer v-model="walletBalanceVisible" title="个人钱包明细" size="560px" append-to-body>
+      <div class="company-balance-head">
+        <span>合计</span>
+        <strong>{{ fmtMoney(summary.walletTotal) }}</strong>
+      </div>
+      <el-table
+        v-loading="walletBalancesLoading"
+        :data="walletBalances"
+        stripe
+        empty-text="暂无个人钱包余额"
+      >
+        <el-table-column label="人员" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">{{ walletDisplayName(row) }}</template>
+        </el-table-column>
+        <el-table-column label="余额" width="120" align="right">
+          <template #default="{ row }">
+            <span class="balance-text">{{ fmtMoney(row.balance) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="冻结" width="110" align="right">
+          <template #default="{ row }">{{ fmtMoney(row.frozen) }}</template>
+        </el-table-column>
+        <el-table-column label="可用" width="120" align="right">
+          <template #default="{ row }">
+            <span class="balance-text">{{ fmtMoney(row.available) }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <p class="company-balance-note">
+        按人列出个人钱包余额；已分到个人，提现只扣个人钱包，不改公司余额。
+      </p>
+    </el-drawer>
+
     <el-drawer v-model="detailVisible" title="流水详细" size="520px" append-to-body>
       <template v-if="detailRow">
         <el-descriptions :column="1" border>
@@ -1376,6 +1617,108 @@ onMounted(async () => {
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="save">{{ submitBtnLabel }}</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="payoutDialog"
+      title="发钱给个人"
+      width="560px"
+      :close-on-click-modal="false"
+      @closed="emptyPayoutForm"
+    >
+      <el-alert
+        title="提交后按该公司「财务发钱」审批配置处理；通过后直接转入收款人个人钱包，无需回执。"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 14px"
+      />
+      <el-form label-width="100px">
+        <el-form-item label="资金来源" required>
+          <el-radio-group v-model="payoutForm.sourceType" @change="onPayoutSourceChange">
+            <el-radio-button value="COMPANY">公司余额</el-radio-button>
+            <el-radio-button value="PROJECT">项目资金</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="payoutForm.sourceType === 'COMPANY'" label="资金池" required>
+          <el-select
+            v-model="payoutForm.poolId"
+            filterable
+            style="width: 100%"
+            placeholder="选择公司资金池"
+            @change="onPayoutPoolChange"
+          >
+            <el-option
+              v-for="p in pools"
+              :key="p.id"
+              :label="`${p.companyName ? p.companyName + ' · ' : ''}${p.name}（¥${Number(p.balance || 0).toFixed(2)}）`"
+              :value="p.id"
+            />
+          </el-select>
+          <div class="form-tip">当前可用 ¥{{ payoutPoolBalance.toFixed(2) }}</div>
+        </el-form-item>
+        <template v-else>
+          <el-form-item label="项目" required>
+            <ProjectCascadeSelect
+              v-model="payoutForm.projectId"
+              :projects="projects"
+              mode="filter"
+              top-placeholder="选择项目"
+              child-placeholder="小项目（可选）"
+              top-width="100%"
+              child-width="100%"
+              @update:model-value="onPayoutProjectChange"
+            />
+          </el-form-item>
+          <el-form-item label="项目资金池" required>
+            <el-radio-group v-model="payoutForm.fundType">
+              <el-radio value="SHARE_PENDING">
+                待分成（¥{{ Number(payoutProjectDetail?.sharePendingBalance || 0).toFixed(2) }}）
+              </el-radio>
+              <el-radio value="NON_SHARE">
+                非分成（¥{{ Number(payoutProjectDetail?.nonShareBalance || 0).toFixed(2) }}）
+              </el-radio>
+            </el-radio-group>
+          </el-form-item>
+        </template>
+        <el-form-item label="收款人" required>
+          <el-select
+            v-model="payoutForm.payeeUserId"
+            filterable
+            style="width: 100%"
+            placeholder="选择收款人"
+          >
+            <el-option
+              v-for="u in payoutUsers"
+              :key="u.id"
+              :label="u.nickname || u.username"
+              :value="u.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="金额" required>
+          <el-input-number
+            v-model="payoutForm.amount"
+            :min="0.01"
+            :precision="2"
+            :step="100"
+            controls-position="right"
+            style="width: 100%"
+          />
+          <div class="form-tip">
+            上限 ¥{{
+              (payoutForm.sourceType === 'COMPANY' ? payoutPoolBalance : payoutFundBalance).toFixed(2)
+            }}
+          </div>
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="payoutForm.remark" type="textarea" :rows="2" placeholder="可选说明" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="payoutDialog = false">取消</el-button>
+        <el-button type="primary" :loading="payoutSaving" @click="submitPayout">提交审批</el-button>
       </template>
     </el-dialog>
 

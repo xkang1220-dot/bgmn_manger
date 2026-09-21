@@ -16,6 +16,7 @@ import com.kk.biz.mapper.HrSalaryRunMapper;
 import com.kk.biz.mapper.HrSalaryScheduleMapper;
 import com.kk.biz.mapper.PmProjectMapper;
 import com.kk.biz.service.FinProjectAccountService;
+import com.kk.biz.service.HrLeaveService;
 import com.kk.biz.service.HrSalaryService;
 import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.workflow.ApprovalTypes;
@@ -39,16 +40,24 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.TemporalAdjusters;
+import java.time.temporal.WeekFields;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -57,6 +66,10 @@ import java.util.stream.Collectors;
 public class HrSalaryServiceImpl implements HrSalaryService {
 
     private static final DateTimeFormatter YM = DateTimeFormatter.ofPattern("yyyy-MM");
+    private static final Pattern ISO_WEEK = Pattern.compile("^(\\d{4})-W(\\d{2})$");
+    private static final String CYCLE_MONTHLY = "MONTHLY";
+    private static final String CYCLE_WEEKLY = "WEEKLY";
+    private static final WeekFields ISO_WEEKS = WeekFields.ISO;
 
     private final HrSalaryItemMapper itemMapper;
     private final HrSalaryScheduleMapper scheduleMapper;
@@ -64,6 +77,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
     private final HrSalaryRunLineMapper lineMapper;
     private final PmProjectMapper projectMapper;
     private final FinProjectAccountService projectAccountService;
+    private final HrLeaveService leaveService;
     private final SysUserService userService;
     private final SysDeptService deptService;
     private final DataScopeService dataScopeService;
@@ -84,6 +98,11 @@ public class HrSalaryServiceImpl implements HrSalaryService {
                 .orderByAsc(HrSalaryItem::getUserId)
                 .orderByAsc(HrSalaryItem::getId));
         fillItemNames(list);
+        for (HrSalaryItem item : list) {
+            if (!StringUtils.hasText(item.getCycleType())) {
+                item.setCycleType(CYCLE_MONTHLY);
+            }
+        }
         return list;
     }
 
@@ -94,7 +113,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             throw new BusinessException("公司、收款人、项目不能为空");
         }
         if (item.getAmount() == null || item.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
-            throw new BusinessException("月薪金额必须大于 0");
+            throw new BusinessException("金额必须大于 0");
         }
         assertCompanyVisible(item.getCompanyId());
         PmProject project = projectMapper.selectById(item.getProjectId());
@@ -110,14 +129,16 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         if (item.getEnabled() == null) {
             item.setEnabled(1);
         }
+        item.setCycleType(normalizeCycleType(item.getCycleType()));
         HrSalaryItem dup = itemMapper.selectOne(new LambdaQueryWrapper<HrSalaryItem>()
                 .eq(HrSalaryItem::getCompanyId, item.getCompanyId())
                 .eq(HrSalaryItem::getUserId, item.getUserId())
                 .eq(HrSalaryItem::getProjectId, item.getProjectId())
+                .eq(HrSalaryItem::getCycleType, item.getCycleType())
                 .ne(item.getId() != null, HrSalaryItem::getId, item.getId())
                 .last("LIMIT 1"));
         if (dup != null) {
-            throw new BusinessException("该用户在此项目已有工资配置");
+            throw new BusinessException("该用户在此项目已有同周期工资配置");
         }
         if (item.getId() == null) {
             itemMapper.insert(item);
@@ -149,11 +170,28 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         if (schedule == null) {
             schedule = new HrSalarySchedule();
             schedule.setCompanyId(companyId);
+            schedule.setCycleType("BOTH");
             schedule.setPayDay(20);
+            schedule.setWeeklyPayDay(1);
             schedule.setPayHour(9);
             schedule.setPayMinute(0);
             schedule.setPreviewDays(3);
+            schedule.setWeeklyPreviewDays(1);
             schedule.setEnabled(1);
+            schedule.setPreviewEnabled(0);
+        } else {
+            if (!StringUtils.hasText(schedule.getCycleType())) {
+                schedule.setCycleType("BOTH");
+            }
+            if (schedule.getWeeklyPayDay() == null) {
+                schedule.setWeeklyPayDay(1);
+            }
+            if (schedule.getWeeklyPreviewDays() == null) {
+                schedule.setWeeklyPreviewDays(1);
+            }
+            if (schedule.getPreviewEnabled() == null) {
+                schedule.setPreviewEnabled(0);
+            }
         }
         fillScheduleNames(schedule);
         return schedule;
@@ -166,25 +204,42 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             throw new BusinessException("请选择公司");
         }
         assertCompanyVisible(schedule.getCompanyId());
-        int day = schedule.getPayDay() == null ? 20 : schedule.getPayDay();
-        if (day < 1 || day > 28) {
-            throw new BusinessException("发薪日仅支持 1–28");
+        // 公司维度月结+周结双开
+        schedule.setCycleType("BOTH");
+        int monthDay = schedule.getPayDay() == null ? 20 : schedule.getPayDay();
+        if (monthDay < 1 || monthDay > 28) {
+            throw new BusinessException("月结发薪日仅支持 1–28");
+        }
+        int weekDay = schedule.getWeeklyPayDay() == null ? 1 : schedule.getWeeklyPayDay();
+        if (weekDay < 1 || weekDay > 7) {
+            throw new BusinessException("周结发薪日仅支持周一至周日（1–7）");
         }
         int hour = schedule.getPayHour() == null ? 9 : schedule.getPayHour();
         int minute = schedule.getPayMinute() == null ? 0 : schedule.getPayMinute();
-        int preview = schedule.getPreviewDays() == null ? 3 : schedule.getPreviewDays();
+        int monthPreview = schedule.getPreviewDays() == null ? 3 : schedule.getPreviewDays();
+        int weekPreview = schedule.getWeeklyPreviewDays() == null ? 1 : schedule.getWeeklyPreviewDays();
         if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
             throw new BusinessException("发薪时间不正确");
         }
-        if (preview < 1 || preview > 27) {
-            throw new BusinessException("预告提前天数需在 1–27");
+        if (monthPreview < 1 || monthPreview > 27) {
+            throw new BusinessException("月结预告提前天数需在 1–27");
         }
-        schedule.setPayDay(day);
+        if (weekPreview < 1 || weekPreview > 6) {
+            throw new BusinessException("周结确认提前天数需在 1–6");
+        }
+        schedule.setPayDay(monthDay);
+        schedule.setWeeklyPayDay(weekDay);
         schedule.setPayHour(hour);
         schedule.setPayMinute(minute);
-        schedule.setPreviewDays(preview);
+        schedule.setPreviewDays(monthPreview);
+        schedule.setWeeklyPreviewDays(weekPreview);
         if (schedule.getEnabled() == null) {
             schedule.setEnabled(1);
+        }
+        if (schedule.getPreviewEnabled() == null) {
+            schedule.setPreviewEnabled(0);
+        } else if (schedule.getPreviewEnabled() != 0 && schedule.getPreviewEnabled() != 1) {
+            throw new BusinessException("定时预告开关仅支持 0/1");
         }
         HrSalarySchedule existing = scheduleMapper.selectOne(new LambdaQueryWrapper<HrSalarySchedule>()
                 .eq(HrSalarySchedule::getCompanyId, schedule.getCompanyId())
@@ -232,16 +287,22 @@ public class HrSalaryServiceImpl implements HrSalaryService {
     @Override
     public List<Map<String, Object>> myConfirmQueue(String yearMonth) {
         long uid = StpUtil.getLoginIdAsLong();
-        String ym = StringUtils.hasText(yearMonth) ? yearMonth : YearMonth.now().format(YM);
+        List<String> periods;
+        if (StringUtils.hasText(yearMonth)) {
+            periods = List.of(normalizePeriod(null, yearMonth.trim()));
+        } else {
+            periods = List.of(YearMonth.now().format(YM), formatIsoWeek(LocalDate.now()));
+        }
         List<HrSalaryRun> previews = runMapper.selectList(new LambdaQueryWrapper<HrSalaryRun>()
-                .eq(HrSalaryRun::getYearMonth, ym)
+                .in(HrSalaryRun::getYearMonth, periods)
                 .eq(HrSalaryRun::getPhase, "PREVIEW")
                 .eq(HrSalaryRun::getStatus, "DONE")
                 .orderByDesc(HrSalaryRun::getId));
         List<Map<String, Object>> result = new ArrayList<>();
-        Set<Long> seenCompanies = new java.util.HashSet<>();
+        Set<String> seen = new java.util.HashSet<>();
         for (HrSalaryRun run : previews) {
-            if (!seenCompanies.add(run.getCompanyId())) {
+            String seenKey = run.getCompanyId() + "|" + run.getYearMonth();
+            if (!seen.add(seenKey)) {
                 continue;
             }
             HrSalaryRunLine line = lineMapper.selectOne(new LambdaQueryWrapper<HrSalaryRunLine>()
@@ -257,7 +318,8 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             row.put("companyId", run.getCompanyId());
             SysDept company = deptService.getById(run.getCompanyId());
             row.put("companyName", company == null ? null : company.getName());
-            row.put("yearMonth", ym);
+            row.put("yearMonth", run.getYearMonth());
+            row.put("cycleType", isWeeklyPeriod(run.getYearMonth()) ? CYCLE_WEEKLY : CYCLE_MONTHLY);
             row.put("status", line.getStatus());
             row.put("totalAmount", line.getTotalAmount());
             row.put("confirmedAt", line.getConfirmedAt());
@@ -294,7 +356,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         }
         HrSalaryRun run = runMapper.selectById(line.getRunId());
         if (run != null && payPhaseStarted(run.getCompanyId(), run.getYearMonth())) {
-            throw new BusinessException("本月发薪已开始，无法撤销确认");
+            throw new BusinessException(periodLabel(run.getYearMonth()) + "发薪已开始，无法撤销确认");
         }
         line.setStatus("PENDING_CONFIRM");
         line.setConfirmedAt(null);
@@ -302,11 +364,297 @@ public class HrSalaryServiceImpl implements HrSalaryService {
     }
 
     @Override
+    public List<Map<String, Object>> preparePayDraft(Long companyId, String yearMonth) {
+        if (companyId == null) {
+            throw new BusinessException("请选择公司");
+        }
+        assertCompanyVisible(companyId);
+        String ym = normalizePeriod(companyId, yearMonth);
+        String cycle = cycleOfPeriod(companyId, ym);
+        Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId, cycle);
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map.Entry<Long, List<HrSalaryItem>> e : byUser.entrySet()) {
+            Long userId = e.getKey();
+            if (hasApprovalCreated(companyId, ym, userId)) {
+                continue;
+            }
+            Map<String, Object> payload = buildPayload(userId, ym, cycle, e.getValue());
+            List<LocalDate> leaveDates = leaveService.listLeaveDates(companyId, userId, ym);
+            int leaveDays = leaveDates.size();
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("userId", userId);
+            row.put("userName", payload.get("userName"));
+            row.put("yearMonth", ym);
+            row.put("cycleType", cycle);
+            row.put("grossAmount", payload.get("totalAmount"));
+            row.put("items", payload.get("items"));
+            row.put("leaveDays", leaveDays);
+            row.put("leaveDates", leaveDates.stream().map(LocalDate::toString).toList());
+            row.put("fullAttendance", leaveDays <= 0);
+            row.put("deductionAmount", BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
+            row.put("deductionRemark", "");
+            row.put("netAmount", payload.get("totalAmount"));
+            HrSalaryRunLine preview = findPreviewLine(companyId, ym, userId);
+            if (preview != null) {
+                row.put("previewStatus", preview.getStatus());
+                row.put("previewLineId", preview.getId());
+            }
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    @Override
+    public HrSalaryRun preparePayConfirm(Long companyId, String yearMonth, List<Map<String, Object>> lines) {
+        if (companyId == null) {
+            throw new BusinessException("请选择公司");
+        }
+        assertCompanyVisible(companyId);
+        if (lines == null || lines.isEmpty()) {
+            throw new BusinessException("请至少选择一名发薪人员");
+        }
+        String ym = normalizePeriod(companyId, yearMonth);
+        String cycle = cycleOfPeriod(companyId, ym);
+        String periodWord = CYCLE_WEEKLY.equals(cycle) ? "周度" : "月度";
+        Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId, cycle);
+
+        // 先完整校验，避免中途失败留下 RUNNING 批次 / 作废旧确认却看不到新确认
+        List<Map<String, Object>> prepared = new ArrayList<>();
+        Set<Long> seenUsers = new HashSet<>();
+        for (Map<String, Object> input : lines) {
+            Long userId = toLong(input.get("userId"));
+            if (userId == null) {
+                throw new BusinessException("发薪确认缺少人员");
+            }
+            if (!seenUsers.add(userId)) {
+                throw new BusinessException(userDisplayName(userId) + " 重复提交，请合并为一条");
+            }
+            List<HrSalaryItem> items = byUser.get(userId);
+            if (items == null || items.isEmpty()) {
+                throw new BusinessException("用户 " + userDisplayName(userId) + " 当期无启用工资配置");
+            }
+            if (hasApprovalCreated(companyId, ym, userId)) {
+                throw new BusinessException(userDisplayName(userId) + " 本期已生成审批，勿重复确认");
+            }
+            Map<String, Object> base = buildPayload(userId, ym, cycle, items);
+            BigDecimal gross = asAmount(base.get("totalAmount"));
+            BigDecimal deduction = asAmount(input.get("deductionAmount"));
+            String remark = input.get("deductionRemark") == null ? "" : String.valueOf(input.get("deductionRemark")).trim();
+            List<LocalDate> leaveDates = leaveService.listLeaveDates(companyId, userId, ym);
+            int leaveDays = leaveDates.size();
+            if (leaveDays > 0 && !StringUtils.hasText(remark)) {
+                throw new BusinessException(userDisplayName(userId) + " 非全勤，请填写扣款备注");
+            }
+            if (leaveDays <= 0 && deduction.compareTo(BigDecimal.ZERO) > 0 && !StringUtils.hasText(remark)) {
+                throw new BusinessException(userDisplayName(userId) + " 扣款请填写备注");
+            }
+            if (deduction.compareTo(BigDecimal.ZERO) < 0) {
+                throw new BusinessException(userDisplayName(userId) + " 扣款不能为负");
+            }
+            if (deduction.compareTo(gross) > 0) {
+                throw new BusinessException(userDisplayName(userId) + " 扣款不能超过应发 ¥" + gross.toPlainString());
+            }
+            Map<String, Object> payload = applySalaryDeduction(base, deduction, remark, leaveDays, leaveDates);
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("userId", userId);
+            row.put("payload", payload);
+            prepared.add(row);
+        }
+
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+        HrSalaryRun run = tx.execute(status -> {
+            HrSalaryRun r = new HrSalaryRun();
+            r.setCompanyId(companyId);
+            r.setYearMonth(ym);
+            r.setPhase("PREVIEW");
+            r.setStatus("RUNNING");
+            r.setTriggerType("MANUAL");
+            r.setStartedAt(LocalDateTime.now());
+            runMapper.insert(r);
+            return r;
+        });
+        if (run == null || run.getId() == null) {
+            throw new BusinessException("创建发薪确认批次失败");
+        }
+
+        TransactionTemplate requiresNew = requiresNewTx();
+        int notified = 0;
+        try {
+            for (Map<String, Object> row : prepared) {
+                Long userId = toLong(row.get("userId"));
+                @SuppressWarnings("unchecked")
+                Map<String, Object> payload = (Map<String, Object>) row.get("payload");
+                // 作废同周期旧待确认/已确认预告，以本次财务确认为准
+                invalidateOldPreviewLines(requiresNew, companyId, ym, userId);
+
+                Long lineId = requiresNew.execute(status -> {
+                    HrSalaryRunLine line = new HrSalaryRunLine();
+                    line.setRunId(run.getId());
+                    line.setUserId(userId);
+                    line.setStatus("PENDING_CONFIRM");
+                    line.setTotalAmount(asAmount(payload.get("totalAmount")));
+                    line.setPayloadSnapshot(JSONUtil.toJsonStr(payload));
+                    lineMapper.insert(line);
+                    return line.getId();
+                });
+                String content = buildPayConfirmContent(payload);
+                notificationService.notifyUser(
+                        userId,
+                        "工资确认 · " + ym,
+                        truncate(content, 480),
+                        "salary_preview",
+                        lineId,
+                        "/account/salary-confirm?yearMonth=" + ym);
+                notified++;
+            }
+
+            int finalNotified = notified;
+            tx.executeWithoutResult(status -> {
+                HrSalaryRun fresh = runMapper.selectById(run.getId());
+                if (fresh == null) {
+                    return;
+                }
+                fresh.setStatus("DONE");
+                fresh.setFinishedAt(LocalDateTime.now());
+                fresh.setMessage(periodWord + "发薪确认已发送 " + finalNotified + " 人");
+                runMapper.updateById(fresh);
+                run.setStatus(fresh.getStatus());
+                run.setFinishedAt(fresh.getFinishedAt());
+                run.setMessage(fresh.getMessage());
+            });
+            return run;
+        } catch (RuntimeException ex) {
+            int finalNotified = notified;
+            tx.executeWithoutResult(status -> {
+                HrSalaryRun fresh = runMapper.selectById(run.getId());
+                if (fresh == null || !"RUNNING".equals(fresh.getStatus())) {
+                    return;
+                }
+                // 已写入的明细挂在本批次上：有成功发出的则标 DONE，避免员工确认队列读不到
+                if (finalNotified > 0) {
+                    fresh.setStatus("DONE");
+                    fresh.setFinishedAt(LocalDateTime.now());
+                    fresh.setMessage(periodWord + "发薪确认部分发送 " + finalNotified
+                            + " 人后中断：" + truncate(ex.getMessage(), 160));
+                } else {
+                    fresh.setStatus("FAILED");
+                    fresh.setFinishedAt(LocalDateTime.now());
+                    fresh.setMessage("发薪确认失败：" + truncate(ex.getMessage(), 200));
+                }
+                runMapper.updateById(fresh);
+            });
+            throw ex;
+        }
+    }
+
+    private void invalidateOldPreviewLines(TransactionTemplate requiresNew, Long companyId, String ym, Long userId) {
+        requiresNew.executeWithoutResult(s -> {
+            List<HrSalaryRun> previewRuns = runMapper.selectList(new LambdaQueryWrapper<HrSalaryRun>()
+                    .eq(HrSalaryRun::getCompanyId, companyId)
+                    .eq(HrSalaryRun::getYearMonth, ym)
+                    .eq(HrSalaryRun::getPhase, "PREVIEW"));
+            if (previewRuns.isEmpty()) {
+                return;
+            }
+            List<Long> runIds = previewRuns.stream().map(HrSalaryRun::getId).toList();
+            List<HrSalaryRunLine> oldLines = lineMapper.selectList(new LambdaQueryWrapper<HrSalaryRunLine>()
+                    .in(HrSalaryRunLine::getRunId, runIds)
+                    .eq(HrSalaryRunLine::getUserId, userId)
+                    .in(HrSalaryRunLine::getStatus, "PENDING_CONFIRM", "CONFIRMED"));
+            for (HrSalaryRunLine old : oldLines) {
+                old.setStatus("SKIPPED");
+                old.setSkipReason("已被新的发薪确认覆盖");
+                lineMapper.updateById(old);
+            }
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> applySalaryDeduction(Map<String, Object> base, BigDecimal deduction, String remark,
+                                                     int leaveDays, List<LocalDate> leaveDates) {
+        Map<String, Object> payload = new LinkedHashMap<>(base);
+        BigDecimal gross = asAmount(base.get("totalAmount")).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal ded = deduction == null ? BigDecimal.ZERO : deduction.setScale(2, RoundingMode.HALF_UP);
+        BigDecimal net = gross.subtract(ded).setScale(2, RoundingMode.HALF_UP);
+        List<Map<String, Object>> items = (List<Map<String, Object>>) base.get("items");
+        List<Map<String, Object>> adjusted = new ArrayList<>();
+        if (items != null && !items.isEmpty()) {
+            if (ded.compareTo(BigDecimal.ZERO) == 0 || gross.compareTo(BigDecimal.ZERO) == 0) {
+                for (Map<String, Object> item : items) {
+                    adjusted.add(new LinkedHashMap<>(item));
+                }
+            } else {
+                BigDecimal allocated = BigDecimal.ZERO;
+                for (int i = 0; i < items.size(); i++) {
+                    Map<String, Object> src = items.get(i);
+                    Map<String, Object> row = new LinkedHashMap<>(src);
+                    BigDecimal origin = asAmount(src.get("amount")).setScale(2, RoundingMode.HALF_UP);
+                    BigDecimal next;
+                    if (i == items.size() - 1) {
+                        next = net.subtract(allocated).setScale(2, RoundingMode.HALF_UP);
+                    } else {
+                        next = origin.multiply(net).divide(gross, 2, RoundingMode.HALF_UP);
+                        allocated = allocated.add(next);
+                    }
+                    if (next.compareTo(BigDecimal.ZERO) < 0) {
+                        next = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+                    }
+                    row.put("amount", next);
+                    row.put("originAmount", origin);
+                    adjusted.add(row);
+                }
+            }
+        }
+        payload.put("items", adjusted);
+        payload.put("grossAmount", gross);
+        payload.put("deductionAmount", ded);
+        payload.put("deductionRemark", StringUtils.hasText(remark) ? remark : null);
+        payload.put("leaveDays", leaveDays);
+        payload.put("leaveDates", leaveDates == null ? List.of()
+                : leaveDates.stream().map(LocalDate::toString).toList());
+        payload.put("fullAttendance", leaveDays <= 0);
+        payload.put("totalAmount", net);
+        return payload;
+    }
+
+    private String buildPayConfirmContent(Map<String, Object> payload) {
+        boolean weekly = CYCLE_WEEKLY.equals(String.valueOf(payload.get("cycleType")));
+        String scope = weekly ? "本周" : "本月";
+        StringBuilder sb = new StringBuilder();
+        sb.append(scope).append("应发 ").append(payload.get("grossAmount")).append(" 元");
+        BigDecimal ded = asAmount(payload.get("deductionAmount"));
+        if (ded.compareTo(BigDecimal.ZERO) > 0) {
+            sb.append("，扣款 ").append(ded).append(" 元");
+            Object remark = payload.get("deductionRemark");
+            if (remark != null && StringUtils.hasText(String.valueOf(remark))) {
+                sb.append("（").append(remark).append("）");
+            }
+        }
+        sb.append("，实发 ").append(payload.get("totalAmount")).append(" 元，请确认");
+        return sb.toString();
+    }
+
+    private Long toLong(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        if (raw instanceof Number n) {
+            return n.longValue();
+        }
+        try {
+            return Long.parseLong(String.valueOf(raw).trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    @Override
     public HrSalaryRun runPreview(Long companyId, String yearMonth, boolean manual) {
         if (companyId == null) {
             throw new BusinessException("请选择公司");
         }
-        String ym = normalizeYm(yearMonth);
+        String ym = normalizePeriod(companyId, yearMonth);
+        String cycle = cycleOfPeriod(companyId, ym);
         if (!manual) {
             assertCompanyExists(companyId);
         } else {
@@ -317,7 +665,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             return existing;
         }
 
-        Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId);
+        Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId, cycle);
         boolean hasNew = byUser.keySet().stream().anyMatch(uid -> findPreviewLine(companyId, ym, uid) == null);
         if (!hasNew) {
             if (existing != null) {
@@ -349,7 +697,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             if (findPreviewLine(companyId, ym, userId) != null) {
                 continue;
             }
-            Map<String, Object> payload = buildPayload(userId, ym, e.getValue());
+            Map<String, Object> payload = buildPayload(userId, ym, cycle, e.getValue());
             Long lineId = requiresNew.execute(status -> {
                 HrSalaryRunLine line = new HrSalaryRunLine();
                 line.setRunId(run.getId());
@@ -391,14 +739,16 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         if (companyId == null) {
             throw new BusinessException("请选择公司");
         }
-        String ym = normalizeYm(yearMonth);
+        String ym = normalizePeriod(companyId, yearMonth);
+        String cycle = cycleOfPeriod(companyId, ym);
+        String periodWord = CYCLE_WEEKLY.equals(cycle) ? "周度" : "月度";
         if (manual) {
             assertCompanyVisible(companyId);
         } else {
             assertCompanyExists(companyId);
         }
 
-        // 本月是否已有发薪批次：后续补跑不再给「未确认」重复记跳过
+        // 本周期是否已有发薪批次：后续补跑不再给「未确认」重复记跳过
         boolean firstPayWave = latestDone(companyId, ym, "PAY") == null;
 
         TransactionTemplate tx = new TransactionTemplate(transactionManager);
@@ -418,7 +768,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         }
 
         Long submitterId = resolveSubmitter(companyId, manual);
-        Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId);
+        Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId, cycle);
         int created = 0;
         int skipped = 0;
         TransactionTemplate requiresNew = requiresNewTx();
@@ -429,7 +779,14 @@ public class HrSalaryServiceImpl implements HrSalaryService {
                 continue;
             }
             HrSalaryRunLine previewLine = findPreviewLine(companyId, ym, userId);
-            Map<String, Object> payload = buildPayload(userId, ym, e.getValue());
+            Map<String, Object> payload;
+            if (previewLine != null && StringUtils.hasText(previewLine.getPayloadSnapshot())) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> snap = JSONUtil.parseObj(previewLine.getPayloadSnapshot());
+                payload = snap;
+            } else {
+                payload = buildPayload(userId, ym, cycle, e.getValue());
+            }
 
             if (previewLine == null || !"CONFIRMED".equals(previewLine.getStatus())) {
                 if (firstPayWave) {
@@ -438,7 +795,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
                 }
                 continue;
             }
-            String balanceReason = checkBalances(e.getValue());
+            String balanceReason = checkPayloadBalances(payload);
             if (balanceReason != null) {
                 insertPayLine(requiresNew, run.getId(), userId, payload, "SKIPPED", balanceReason, null, previewLine.getConfirmedAt());
                 skipped++;
@@ -453,9 +810,9 @@ public class HrSalaryServiceImpl implements HrSalaryService {
                     req.setType(ApprovalTypes.SALARY_MONTHLY);
                     req.setCompanyId(companyId);
                     req.setAmount(asAmount(payload.get("totalAmount")));
-                    req.setTitle("月度工资 · " + userDisplayName(userId) + " · " + ym);
+                    req.setTitle(periodWord + "工资 · " + userDisplayName(userId) + " · " + ym);
                     req.setPayload(payload);
-                    req.setRemark("月度工资 " + ym);
+                    req.setRemark(periodWord + "工资 " + ym);
                     var approval = approvalService.submitAs(submitterId, req);
                     HrSalaryRunLine line = new HrSalaryRunLine();
                     line.setRunId(run.getId());
@@ -472,7 +829,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
                     created++;
                 }
             } catch (Exception ex) {
-                log.warn("月度工资生成审批失败 userId={}: {}", userId, ex.getMessage());
+                log.warn("{}工资生成审批失败 userId={}: {}", periodWord, userId, ex.getMessage());
                 insertPayLine(requiresNew, run.getId(), userId, payload, "FAILED",
                         truncate(ex.getMessage(), 480), null, previewLine.getConfirmedAt());
                 skipped++;
@@ -505,17 +862,34 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         List<HrSalarySchedule> schedules = scheduleMapper.selectList(new LambdaQueryWrapper<HrSalarySchedule>()
                 .eq(HrSalarySchedule::getEnabled, 1));
         for (HrSalarySchedule schedule : schedules) {
+            Long companyId = schedule.getCompanyId();
             try {
-                String previewYm = resolvePreviewYearMonth(schedule, now);
-                if (previewYm != null && latestDone(schedule.getCompanyId(), previewYm, "PREVIEW") == null) {
-                    self.runPreview(schedule.getCompanyId(), previewYm, false);
+                String monthlyPreview = resolveMonthlyPreview(schedule, now);
+                if (monthlyPreview != null
+                        && Integer.valueOf(1).equals(schedule.getPreviewEnabled())
+                        && latestDone(companyId, monthlyPreview, "PREVIEW") == null) {
+                    self.runPreview(companyId, monthlyPreview, false);
                 }
-                String payYm = resolvePayYearMonth(schedule, now);
-                if (payYm != null && shouldCronPay(schedule.getCompanyId(), payYm)) {
-                    self.runPay(schedule.getCompanyId(), payYm, false);
+                String monthlyPay = resolveMonthlyPay(schedule, now);
+                if (monthlyPay != null && shouldCronPay(companyId, monthlyPay)) {
+                    self.runPay(companyId, monthlyPay, false);
                 }
             } catch (Exception e) {
-                log.error("工资定时任务失败 companyId={}: {}", schedule.getCompanyId(), e.getMessage());
+                log.error("月结工资定时任务失败 companyId={}: {}", companyId, e.getMessage());
+            }
+            try {
+                String weeklyPreview = resolveWeeklyPreview(schedule, now);
+                if (weeklyPreview != null
+                        && Integer.valueOf(1).equals(schedule.getPreviewEnabled())
+                        && latestDone(companyId, weeklyPreview, "PREVIEW") == null) {
+                    self.runPreview(companyId, weeklyPreview, false);
+                }
+                String weeklyPay = resolveWeeklyPay(schedule, now);
+                if (weeklyPay != null && shouldCronPay(companyId, weeklyPay)) {
+                    self.runPay(companyId, weeklyPay, false);
+                }
+            } catch (Exception e) {
+                log.error("周结工资定时任务失败 companyId={}: {}", companyId, e.getMessage());
             }
         }
     }
@@ -564,24 +938,23 @@ public class HrSalaryServiceImpl implements HrSalaryService {
     }
 
     /**
-     * 预告日可能落在「发薪月」的上月末（例如发薪日=1、提前3天）。
-     * @return 应对齐的发薪月份 yyyy-MM；今天不是预告日则 null
+     * 月结预告日可能落在上月末。
      */
-    private String resolvePreviewYearMonth(HrSalarySchedule s, LocalDateTime now) {
+    private String resolveMonthlyPreview(HrSalarySchedule s, LocalDateTime now) {
         if (!timeReached(s, now)) {
             return null;
         }
         LocalDate today = now.toLocalDate();
         YearMonth cur = YearMonth.from(now);
         for (YearMonth ym : List.of(cur, cur.plusMonths(1))) {
-            if (today.equals(previewDateOf(ym, s))) {
+            if (today.equals(monthlyPreviewDateOf(ym, s))) {
                 return ym.format(YM);
             }
         }
         return null;
     }
 
-    private String resolvePayYearMonth(HrSalarySchedule s, LocalDateTime now) {
+    private String resolveMonthlyPay(HrSalarySchedule s, LocalDateTime now) {
         if (!timeReached(s, now)) {
             return null;
         }
@@ -589,6 +962,34 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         YearMonth cur = YearMonth.from(now);
         if (today.getDayOfMonth() == clampDay(s.getPayDay()) && today.equals(payDateOf(cur, s))) {
             return cur.format(YM);
+        }
+        return null;
+    }
+
+    private String resolveWeeklyPreview(HrSalarySchedule s, LocalDateTime now) {
+        if (!timeReached(s, now)) {
+            return null;
+        }
+        LocalDate today = now.toLocalDate();
+        LocalDate weekStart = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+        for (int offset = 0; offset <= 1; offset++) {
+            LocalDate monday = weekStart.plusWeeks(offset);
+            LocalDate payDate = monday.plusDays(clampWeekDay(s.getWeeklyPayDay()) - 1L);
+            LocalDate previewDate = payDate.minusDays(weeklyPreviewDaysOf(s));
+            if (today.equals(previewDate)) {
+                return formatIsoWeek(payDate);
+            }
+        }
+        return null;
+    }
+
+    private String resolveWeeklyPay(HrSalarySchedule s, LocalDateTime now) {
+        if (!timeReached(s, now)) {
+            return null;
+        }
+        LocalDate today = now.toLocalDate();
+        if (today.getDayOfWeek().getValue() == clampWeekDay(s.getWeeklyPayDay())) {
+            return formatIsoWeek(today);
         }
         return null;
     }
@@ -601,13 +1002,21 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         return ym.atDay(clampDay(s.getPayDay()));
     }
 
-    private LocalDate previewDateOf(YearMonth ym, HrSalarySchedule s) {
-        int days = s.getPreviewDays() == null ? 3 : s.getPreviewDays();
-        return payDateOf(ym, s).minusDays(days);
+    private LocalDate monthlyPreviewDateOf(YearMonth ym, HrSalarySchedule s) {
+        return payDateOf(ym, s).minusDays(monthlyPreviewDaysOf(s));
+    }
+
+    private int monthlyPreviewDaysOf(HrSalarySchedule s) {
+        return s.getPreviewDays() == null ? 3 : s.getPreviewDays();
+    }
+
+    private int weeklyPreviewDaysOf(HrSalarySchedule s) {
+        return s.getWeeklyPreviewDays() == null ? 1 : s.getWeeklyPreviewDays();
     }
 
     private boolean shouldCronPay(Long companyId, String ym) {
-        Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId);
+        String cycle = isWeeklyPeriod(ym) ? CYCLE_WEEKLY : CYCLE_MONTHLY;
+        Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId, cycle);
         for (Long userId : byUser.keySet()) {
             if (hasApprovalCreated(companyId, ym, userId)) {
                 continue;
@@ -617,13 +1026,18 @@ public class HrSalaryServiceImpl implements HrSalaryService {
                 return true;
             }
         }
-        // 首轮：把未确认记为跳过
-        return latestDone(companyId, ym, "PAY") == null && !byUser.isEmpty();
+        // 无人确认则不跑定时发薪，避免空批次把未确认全标成「跳过」
+        return false;
     }
 
     private int clampDay(Integer day) {
         int d = day == null ? 20 : day;
         return Math.max(1, Math.min(28, d));
+    }
+
+    private int clampWeekDay(Integer day) {
+        int d = day == null ? 1 : day;
+        return Math.max(1, Math.min(7, d));
     }
 
     private int nzHour(Integer h) {
@@ -655,7 +1069,8 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         throw new BusinessException("未配置发薪代提交人，且公司无管理员/财务");
     }
 
-    private Map<Long, List<HrSalaryItem>> enabledItemsByUser(Long companyId) {
+    private Map<Long, List<HrSalaryItem>> enabledItemsByUser(Long companyId, String cycleType) {
+        String cycle = normalizeCycleType(cycleType);
         List<HrSalaryItem> items = itemMapper.selectList(new LambdaQueryWrapper<HrSalaryItem>()
                 .eq(HrSalaryItem::getCompanyId, companyId)
                 .eq(HrSalaryItem::getEnabled, 1));
@@ -665,6 +1080,12 @@ public class HrSalaryServiceImpl implements HrSalaryService {
                 .collect(Collectors.toMap(PmProject::getId, p -> p, (a, b) -> a));
         Map<Long, List<HrSalaryItem>> map = new LinkedHashMap<>();
         for (HrSalaryItem item : items) {
+            String itemCycle = StringUtils.hasText(item.getCycleType())
+                    ? normalizeCycleType(item.getCycleType())
+                    : CYCLE_MONTHLY;
+            if (!cycle.equals(itemCycle)) {
+                continue;
+            }
             PmProject project = projects.get(item.getProjectId());
             if (!ProjectScales.isSalaryEligible(project)) {
                 continue;
@@ -674,7 +1095,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         return map;
     }
 
-    private Map<String, Object> buildPayload(Long userId, String ym, List<HrSalaryItem> items) {
+    private Map<String, Object> buildPayload(Long userId, String ym, String cycleType, List<HrSalaryItem> items) {
         List<Map<String, Object>> rows = new ArrayList<>();
         BigDecimal total = BigDecimal.ZERO;
         for (HrSalaryItem item : items) {
@@ -699,14 +1120,17 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         payload.put("userId", userId);
         payload.put("userName", userDisplayName(userId));
         payload.put("yearMonth", ym);
+        payload.put("cycleType", cycleType);
         payload.put("totalAmount", total);
         payload.put("items", rows);
         return payload;
     }
 
     private String buildPreviewContent(Map<String, Object> payload) {
+        boolean weekly = CYCLE_WEEKLY.equals(String.valueOf(payload.get("cycleType")));
+        String scope = weekly ? "本周" : "本月";
         StringBuilder sb = new StringBuilder();
-        sb.append("本月工资合计 ").append(payload.get("totalAmount")).append(" 元：");
+        sb.append(scope).append("工资合计 ").append(payload.get("totalAmount")).append(" 元：");
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> items = (List<Map<String, Object>>) payload.get("items");
         if (items != null) {
@@ -718,7 +1142,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
                 sb.append(it.get("projectName")).append(" ").append(it.get("amount"));
             }
         }
-        sb.append("。请尽快在「工资确认」中确认，未确认将不进入本月发薪。");
+        sb.append("。请尽快在「工资确认」中确认，未确认将不进入").append(scope).append("发薪。");
         return sb.toString();
     }
 
@@ -741,6 +1165,43 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         return sb.length() == 0 ? null : sb.toString();
     }
 
+    @SuppressWarnings("unchecked")
+    private String checkPayloadBalances(Map<String, Object> payload) {
+        if (payload == null) {
+            return "工资明细为空";
+        }
+        Object rawItems = payload.get("items");
+        if (!(rawItems instanceof List<?> list) || list.isEmpty()) {
+            return "工资明细为空";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Object raw : list) {
+            Map<String, Object> row;
+            if (raw instanceof Map<?, ?> m) {
+                row = (Map<String, Object>) m;
+            } else {
+                continue;
+            }
+            Long projectId = toLong(row.get("projectId"));
+            BigDecimal amount = asAmount(row.get("amount"));
+            if (projectId == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+                continue;
+            }
+            FinProjectAccount account = projectAccountService.getOrCreate(projectId);
+            try {
+                ProjectFundTypes.pickExpensePool(
+                        account.getSharePendingBalance(), account.getNonShareBalance(), amount);
+            } catch (BusinessException ex) {
+                String name = row.get("projectName") == null ? ("#" + projectId) : String.valueOf(row.get("projectName"));
+                if (sb.length() > 0) {
+                    sb.append("；");
+                }
+                sb.append("项目 ").append(name).append(" ").append(ex.getMessage());
+            }
+        }
+        return sb.length() == 0 ? null : sb.toString();
+    }
+
     private HrSalaryRunLine findPreviewLine(Long companyId, String ym, Long userId) {
         List<HrSalaryRun> runs = runMapper.selectList(new LambdaQueryWrapper<HrSalaryRun>()
                 .eq(HrSalaryRun::getCompanyId, companyId)
@@ -748,16 +1209,24 @@ public class HrSalaryServiceImpl implements HrSalaryService {
                 .eq(HrSalaryRun::getPhase, "PREVIEW")
                 .eq(HrSalaryRun::getStatus, "DONE")
                 .orderByDesc(HrSalaryRun::getId));
+        HrSalaryRunLine fallback = null;
         for (HrSalaryRun run : runs) {
             HrSalaryRunLine line = lineMapper.selectOne(new LambdaQueryWrapper<HrSalaryRunLine>()
                     .eq(HrSalaryRunLine::getRunId, run.getId())
                     .eq(HrSalaryRunLine::getUserId, userId)
+                    .in(HrSalaryRunLine::getStatus, "PENDING_CONFIRM", "CONFIRMED")
+                    .orderByDesc(HrSalaryRunLine::getId)
                     .last("LIMIT 1"));
             if (line != null) {
-                return line;
+                if ("CONFIRMED".equals(line.getStatus())) {
+                    return line;
+                }
+                if (fallback == null) {
+                    fallback = line;
+                }
             }
         }
-        return null;
+        return fallback;
     }
 
     private boolean hasApprovalCreated(Long companyId, String ym, Long userId) {
@@ -809,15 +1278,68 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         return line;
     }
 
-    private String normalizeYm(String yearMonth) {
-        if (!StringUtils.hasText(yearMonth)) {
+    private String normalizePeriod(Long companyId, String period) {
+        if (!StringUtils.hasText(period)) {
+            // 双开后空参数默认当前自然月；周结请显式传 yyyy-Www
             return YearMonth.now().format(YM);
         }
-        try {
-            return YearMonth.parse(yearMonth.trim(), YM).format(YM);
-        } catch (Exception e) {
-            throw new BusinessException("月份格式应为 yyyy-MM");
+        String text = period.trim();
+        Matcher week = ISO_WEEK.matcher(text);
+        if (week.matches()) {
+            int year = Integer.parseInt(week.group(1));
+            int w = Integer.parseInt(week.group(2));
+            if (w < 1 || w > 53) {
+                throw new BusinessException("周次格式应为 yyyy-Www（周 01–53）");
+            }
+            String normalized = String.format(Locale.ROOT, "%04d-W%02d", year, w);
+            try {
+                LocalDate monday = LocalDate.of(year, 1, 4)
+                        .with(ISO_WEEKS.weekBasedYear(), year)
+                        .with(ISO_WEEKS.weekOfWeekBasedYear(), w)
+                        .with(DayOfWeek.MONDAY);
+                if (!normalized.equals(formatIsoWeek(monday))) {
+                    throw new BusinessException("无效的 ISO 周：" + text);
+                }
+            } catch (BusinessException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new BusinessException("无效的 ISO 周：" + text);
+            }
+            return normalized;
         }
+        try {
+            return YearMonth.parse(text, YM).format(YM);
+        } catch (Exception e) {
+            throw new BusinessException("周期格式应为 yyyy-MM 或 yyyy-Www");
+        }
+    }
+
+    private String normalizeCycleType(String raw) {
+        if (!StringUtils.hasText(raw) || CYCLE_MONTHLY.equalsIgnoreCase(raw.trim())) {
+            return CYCLE_MONTHLY;
+        }
+        if (CYCLE_WEEKLY.equalsIgnoreCase(raw.trim())) {
+            return CYCLE_WEEKLY;
+        }
+        throw new BusinessException("结算周期仅支持月结或周结");
+    }
+
+    private boolean isWeeklyPeriod(String period) {
+        return StringUtils.hasText(period) && ISO_WEEK.matcher(period.trim()).matches();
+    }
+
+    private String cycleOfPeriod(Long companyId, String period) {
+        return isWeeklyPeriod(period) ? CYCLE_WEEKLY : CYCLE_MONTHLY;
+    }
+
+    private String formatIsoWeek(LocalDate date) {
+        int weekYear = date.get(ISO_WEEKS.weekBasedYear());
+        int week = date.get(ISO_WEEKS.weekOfWeekBasedYear());
+        return String.format(Locale.ROOT, "%04d-W%02d", weekYear, week);
+    }
+
+    private String periodLabel(String period) {
+        return isWeeklyPeriod(period) ? "本周" : "本月";
     }
 
     private void assertCompanyVisible(Long companyId) {
