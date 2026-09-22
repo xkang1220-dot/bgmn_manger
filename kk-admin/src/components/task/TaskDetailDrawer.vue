@@ -96,7 +96,13 @@ function emptyForm() {
 }
 
 function imageUrl(file: { id?: number; url?: string }) {
-  return file.url || `/api/file/preview/${file.id}`
+  if (file.id != null) return `/api/file/preview/${file.id}`
+  const url = String(file.url || '')
+  if (url.includes('/api/file/download/')) {
+    const id = url.split('/').pop()
+    if (id) return `/api/file/preview/${id}`
+  }
+  return url || ''
 }
 
 function isVideoFile(file: { contentType?: string; name?: string; originalName?: string; url?: string }) {

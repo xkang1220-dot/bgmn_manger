@@ -62,12 +62,14 @@ const voucherFiles = ref<any[]>([])
 const withdrawVoucherFiles = ref<any[]>([])
 const balanceApplyFiles = ref<any[]>([])
 const uploading = ref(false)
-const withdrawUploading = ref(false)
+const withdrawUploading = ref(0)
 const balanceUploading = ref(0)
 const submittingBalance = ref(false)
 const MAX_BALANCE_FILES = 9
+const MAX_WITHDRAW_VOUCHERS = 10
 const balanceBusy = computed(() => balanceUploading.value > 0 || submittingBalance.value)
 let balanceUploadGen = 0
+let withdrawUploadGen = 0
 const myPayMethods = ref<any[]>([])
 const withdrawTaxRate = ref(0.2)
 const withdrawTaxMode = ref<'FLAT' | 'TIER'>('FLAT')
@@ -512,9 +514,11 @@ watch(
   () => [withdrawForm.companyId, withdrawForm.amount, withdrawForm.withVoucher] as const,
   ([, , withVoucher], prev) => {
     if (!withdrawDialog.value) return
-    // 切到无凭证时清掉已传凭证，避免误以为还会带上
+    // 切到无凭证时清掉已传凭证，并作废进行中的上传
     if (prev && withVoucher === false && prev[2] === true) {
-      withdrawVoucherFiles.value = []
+      withdrawUploadGen++
+      clearWithdrawVouchers()
+      withdrawUploading.value = 0
     }
     void refreshWithdrawTax()
   },
@@ -540,26 +544,90 @@ function removeVoucher(index: number) {
 }
 
 async function onUploadWithdrawVoucher(options: any) {
-  withdrawUploading.value = true
+  if (!withdrawForm.withVoucher) {
+    options.onError?.(new Error('not voucher mode'))
+    return
+  }
+  if (withdrawVoucherFiles.value.length + withdrawUploading.value >= MAX_WITHDRAW_VOUCHERS) {
+    ElMessage.warning(`最多上传 ${MAX_WITHDRAW_VOUCHERS} 个凭证`)
+    options.onError?.(new Error('too many'))
+    return
+  }
+  const gen = withdrawUploadGen
+  const localUrl = options.file instanceof File ? URL.createObjectURL(options.file) : ''
+  withdrawUploading.value++
   try {
     const file = await workflowApi.uploadVoucher(options.file)
-    withdrawVoucherFiles.value.push(file)
-    ElMessage.success('凭证已上传')
+    if (gen !== withdrawUploadGen || !withdrawForm.withVoucher) {
+      if (localUrl) URL.revokeObjectURL(localUrl)
+      options.onError?.(new Error('cancelled'))
+      return
+    }
+    if (file?.id == null) {
+      throw new Error('上传结果无效')
+    }
+    if (withdrawVoucherFiles.value.some((f) => f.id === file.id)) {
+      if (localUrl) URL.revokeObjectURL(localUrl)
+      options.onSuccess?.(file)
+      return
+    }
+    if (withdrawVoucherFiles.value.length >= MAX_WITHDRAW_VOUCHERS) {
+      if (localUrl) URL.revokeObjectURL(localUrl)
+      ElMessage.warning(`最多上传 ${MAX_WITHDRAW_VOUCHERS} 个凭证`)
+      options.onError?.(new Error('too many'))
+      return
+    }
+    withdrawVoucherFiles.value.push({
+      ...file,
+      localUrl,
+      // 本地存储上传后 url 常是 download，缩略图改走 preview
+      url: file.id != null ? `/api/file/preview/${file.id}` : file.url,
+    })
     options.onSuccess?.(file)
   } catch (e: any) {
-    ElMessage.error(e.message || '上传失败')
+    if (localUrl) URL.revokeObjectURL(localUrl)
+    if (gen === withdrawUploadGen) {
+      ElMessage.error(e.message || '上传失败')
+    }
     options.onError?.(e)
   } finally {
-    withdrawUploading.value = false
+    if (gen === withdrawUploadGen) {
+      withdrawUploading.value = Math.max(0, withdrawUploading.value - 1)
+    }
   }
 }
 
 function removeWithdrawVoucher(index: number) {
+  const file = withdrawVoucherFiles.value[index]
+  if (file?.localUrl) {
+    URL.revokeObjectURL(file.localUrl)
+  }
   withdrawVoucherFiles.value.splice(index, 1)
 }
 
+function clearWithdrawVouchers() {
+  for (const file of withdrawVoucherFiles.value) {
+    if (file?.localUrl) URL.revokeObjectURL(file.localUrl)
+  }
+  withdrawVoucherFiles.value = []
+}
+
+function onWithdrawDialogClosed() {
+  withdrawUploadGen++
+  clearWithdrawVouchers()
+  withdrawUploading.value = 0
+}
+
 function fileUrl(file: any) {
-  return file?.url || `/api/file/preview/${file?.id}`
+  if (file?.localUrl) return file.localUrl
+  if (file?.id != null) return `/api/file/preview/${file.id}`
+  const url = String(file?.url || '')
+  // download 带 attachment，img 无法预览
+  if (url.includes('/api/file/download/')) {
+    const id = url.split('/').pop()
+    if (id) return `/api/file/preview/${id}`
+  }
+  return url || ''
 }
 
 function isImage(file: any) {
@@ -652,8 +720,15 @@ async function submitWithdraw() {
     ElMessage.warning('有凭证提现请上传凭证')
     return
   }
-  if (withdrawUploading.value) {
+  if (withdrawUploading.value > 0) {
     ElMessage.warning('凭证正在上传，请稍候')
+    return
+  }
+  const voucherIds = withdrawForm.withVoucher
+    ? withdrawVoucherFiles.value.map((f) => f.id).filter((id) => id != null)
+    : undefined
+  if (withdrawForm.withVoucher && !voucherIds?.length) {
+    ElMessage.warning('有凭证提现请上传凭证')
     return
   }
   const available = Number(wallet.value?.available ?? wallet.value?.balance ?? 0)
@@ -667,7 +742,7 @@ async function submitWithdraw() {
     amount: withdrawForm.amount,
     companyId: withdrawForm.companyId,
     remark: withdrawForm.remark,
-    voucherFileIds: withdrawForm.withVoucher ? withdrawVoucherFiles.value.map((f) => f.id) : undefined,
+    voucherFileIds: voucherIds,
     payload: {
       withVoucher: withdrawForm.withVoucher,
       taxMode: withdrawForm.withVoucher ? 'VOUCHER' : withdrawTaxMode.value,
@@ -680,11 +755,14 @@ async function submitWithdraw() {
       net: withdrawNet.value,
       taxBreakdown: withdrawForm.withVoucher ? [] : withdrawTaxBreakdown.value,
       payMethodId: withdrawForm.payMethodId,
+      voucherFileIds: voucherIds,
     },
   })
   ElMessage.success(`${approvalFlowTip(approval)}。后续：财务回执 → 确认到账`)
   withdrawDialog.value = false
-  withdrawVoucherFiles.value = []
+  withdrawUploadGen++
+  clearWithdrawVouchers()
+  withdrawUploading.value = 0
   // 提交即冻结，立刻刷新可用余额，避免界面仍显示旧可用额
   await Promise.all([loadBalance(), loadBoard(), loadApprovals()])
 }
@@ -1323,7 +1401,12 @@ watch(
       </template>
     </el-dialog>
 
-    <el-dialog v-model="withdrawDialog" title="申请提现" width="480px" @closed="withdrawVoucherFiles = []">
+    <el-dialog
+      v-model="withdrawDialog"
+      title="申请提现"
+      width="480px"
+      @closed="onWithdrawDialogClosed"
+    >
       <el-form label-width="88px">
         <el-form-item label="所属公司" required>
           <el-select v-model="withdrawForm.companyId" filterable placeholder="选择公司" style="width: 100%">
@@ -1341,14 +1424,31 @@ watch(
         </el-form-item>
         <template v-if="withdrawForm.withVoucher">
           <el-form-item label="凭证" required>
-            <el-upload :http-request="onUploadWithdrawVoucher" :show-file-list="false" accept="image/*,.pdf">
-              <el-button :loading="withdrawUploading" size="small">上传凭证</el-button>
-            </el-upload>
-            <div v-for="(f, i) in withdrawVoucherFiles" :key="f.id" class="voucher-row">
-              <span>{{ f.originalName || f.name || f.id }}</span>
-              <el-button link type="danger" @click="removeWithdrawVoucher(i)">移除</el-button>
+            <div class="attach-field">
+              <el-upload
+                :http-request="onUploadWithdrawVoucher"
+                :show-file-list="false"
+                accept="image/*,.pdf"
+                multiple
+                :disabled="withdrawVoucherFiles.length >= MAX_WITHDRAW_VOUCHERS"
+              >
+                <el-button :loading="withdrawUploading > 0" size="small">上传凭证</el-button>
+              </el-upload>
+              <p class="sec-tip">
+                有凭证提现须上传至少 1 个凭证，确认后不扣税；支持一次选择多张图片或 PDF，最多 {{ MAX_WITHDRAW_VOUCHERS }} 个
+              </p>
+              <div v-if="withdrawVoucherFiles.length" class="attach-gallery">
+                <div v-for="(f, i) in withdrawVoucherFiles" :key="f.id ?? i" class="attach-item">
+                  <a v-if="isImage(f)" :href="fileUrl(f)" target="_blank" rel="noopener" class="attach-thumb">
+                    <img :src="fileUrl(f)" :alt="f.originalName || f.name" />
+                  </a>
+                  <a :href="fileUrl(f)" target="_blank" rel="noopener" class="attach-name">
+                    {{ f.originalName || f.name || f.id }}
+                  </a>
+                  <el-button link type="danger" @click="removeWithdrawVoucher(i)">移除</el-button>
+                </div>
+              </div>
             </div>
-            <div v-if="!withdrawVoucherFiles.length" class="sec-tip">有凭证提现须上传至少 1 个凭证，确认后不扣税</div>
           </el-form-item>
           <el-form-item label="税额">
             <span>¥ 0.00（有凭证免税）</span>
@@ -1401,7 +1501,7 @@ watch(
       </el-form>
       <template #footer>
         <el-button @click="withdrawDialog = false">取消</el-button>
-        <el-button type="primary" @click="submitWithdraw">提交审批</el-button>
+        <el-button type="primary" :disabled="withdrawUploading > 0" @click="submitWithdraw">提交审批</el-button>
       </template>
     </el-dialog>
 

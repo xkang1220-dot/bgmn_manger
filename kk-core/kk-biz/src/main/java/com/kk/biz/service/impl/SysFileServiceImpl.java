@@ -10,10 +10,10 @@ import com.kk.biz.service.SysFileService;
 import com.kk.common.exception.BusinessException;
 import com.kk.oss.FileStorage;
 import com.kk.oss.FileStorageProperties;
-import com.kk.oss.LocalFileStorage;
 import com.kk.system.entity.SysUser;
 import com.kk.system.service.SysUserService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
@@ -57,7 +57,7 @@ public class SysFileServiceImpl implements SysFileService {
         String storagePath = storageProperties.buildStoragePath(datePath, bizType);
         String objectPath = storagePath + "/" + stored;
         try (InputStream inputStream = file.getInputStream()) {
-            String url = fileStorage.upload(
+            fileStorage.upload(
                     inputStream,
                     storagePath,
                     stored,
@@ -68,17 +68,15 @@ public class SysFileServiceImpl implements SysFileService {
             record.setOriginalName(original);
             record.setStoredName(stored);
             record.setPath(objectPath);
-            record.setUrl(url);
             record.setStorageType(fileStorage.getStorageType());
             record.setContentType(file.getContentType());
             record.setSize(file.getSize());
             record.setBizType(bizType);
             record.setBizId(bizId);
             fileMapper.insert(record);
-            if (url == null) {
-                record.setUrl("/api/file/download/" + record.getId());
-                fileMapper.updateById(record);
-            }
+            // 对外一律返回后端预览地址，避免把 RustFS/MinIO 外网域名写回前端（公网常 502）
+            record.setUrl("/api/file/preview/" + record.getId());
+            fileMapper.updateById(record);
             return record;
         } catch (BusinessException e) {
             throw e;
@@ -110,10 +108,14 @@ public class SysFileServiceImpl implements SysFileService {
         if (!StringUtils.hasText(bizType) || bizId == null) {
             return List.of();
         }
-        return fileMapper.selectList(new LambdaQueryWrapper<SysFile>()
+        List<SysFile> files = fileMapper.selectList(new LambdaQueryWrapper<SysFile>()
                 .eq(SysFile::getBizType, bizType)
                 .eq(SysFile::getBizId, bizId)
                 .orderByAsc(SysFile::getId));
+        for (SysFile file : files) {
+            ensureDownloadUrl(file);
+        }
+        return files;
     }
 
     @Override
@@ -156,10 +158,35 @@ public class SysFileServiceImpl implements SysFileService {
         if (!fileStorage.exists(file.getPath())) {
             throw new BusinessException("文件不存在");
         }
+        // Spring 6 ResourceHttpMessageConverter 会先调 contentLength()；
+        // InputStreamResource 默认读流算长度，写响应时流已耗尽 → 500。
+        // 有库内 size 时直接返回长度；没有则读入内存用 ByteArrayResource。
+        Long storedSize = file.getSize();
+        if (storedSize == null || storedSize < 0) {
+            try (InputStream inputStream = fileStorage.open(file.getPath())) {
+                byte[] bytes = inputStream.readAllBytes();
+                return new ByteArrayResource(bytes) {
+                    @Override
+                    public String getFilename() {
+                        return file.getOriginalName();
+                    }
+                };
+            } catch (BusinessException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new BusinessException("文件读取失败: " + e.getMessage());
+            }
+        }
+        long contentLength = storedSize;
         return new InputStreamResource(fileStorage.open(file.getPath())) {
             @Override
             public String getFilename() {
                 return file.getOriginalName();
+            }
+
+            @Override
+            public long contentLength() {
+                return contentLength;
             }
         };
     }
@@ -205,8 +232,10 @@ public class SysFileServiceImpl implements SysFileService {
     }
 
     private void ensureDownloadUrl(SysFile file) {
-        if (file.getUrl() == null && LocalFileStorage.STORAGE_TYPE.equals(file.getStorageType())) {
-            file.setUrl("/api/file/download/" + file.getId());
+        if (file.getId() == null) {
+            return;
         }
+        // 对外统一给后端预览地址；勿把对象存储外网 URL 直接给前端，公网常不可达
+        file.setUrl("/api/file/preview/" + file.getId());
     }
 }

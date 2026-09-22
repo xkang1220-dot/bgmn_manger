@@ -84,10 +84,22 @@ function itemTypeLabel(code?: string) {
 
 function previewUrl(fileOrId?: any) {
   if (!fileOrId) return ''
-  if (typeof fileOrId === 'string') return fileOrId
-  if (fileOrId.url) return fileOrId.url
-  const id = typeof fileOrId === 'number' ? fileOrId : fileOrId.id
-  return id ? `/api/file/preview/${id}` : ''
+  if (typeof fileOrId === 'number') return `/api/file/preview/${fileOrId}`
+  if (typeof fileOrId === 'string') {
+    if (fileOrId.includes('/api/file/download/')) {
+      const id = fileOrId.split('/').pop()
+      return id ? `/api/file/preview/${id}` : fileOrId
+    }
+    return fileOrId
+  }
+  const id = fileOrId.id ?? fileOrId.imageFileId
+  if (id != null) return `/api/file/preview/${id}`
+  const url = String(fileOrId.url || fileOrId.imageUrl || '')
+  if (url.includes('/api/file/download/')) {
+    const fromUrl = url.split('/').pop()
+    if (fromUrl) return `/api/file/preview/${fromUrl}`
+  }
+  return url
 }
 
 async function loadCompanies() {

@@ -131,7 +131,14 @@ async function onUploadReceipt(options: any) {
 }
 
 function fileUrl(file: any) {
-  return file?.url || `/api/file/preview/${file?.id}`
+  if (file?.id != null) return `/api/file/preview/${file.id}`
+  const url = String(file?.url || '')
+  // download 带 attachment，img 无法预览
+  if (url.includes('/api/file/download/')) {
+    const id = url.split('/').pop()
+    if (id) return `/api/file/preview/${id}`
+  }
+  return url || ''
 }
 
 function isImage(file: any) {

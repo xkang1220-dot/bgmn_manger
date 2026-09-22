@@ -52,30 +52,39 @@ public class FileController {
     @GetMapping("/download/{id}")
     public ResponseEntity<Resource> download(@PathVariable Long id) {
         SysFile meta = fileService.get(id);
-        if (StringUtils.hasText(meta.getUrl()) && !meta.getUrl().startsWith("/api/")) {
-            return ResponseEntity.status(302).location(java.net.URI.create(meta.getUrl())).build();
-        }
+        // 始终经后端读存储再输出，避免对象存储外网域名不可达（502）导致无法下载
         Resource resource = fileService.load(id);
         String filename = URLEncoder.encode(meta.getOriginalName(), StandardCharsets.UTF_8).replaceAll("\\+", "%20");
-        MediaType mediaType = StringUtils.hasText(meta.getContentType())
-                ? MediaType.parseMediaType(meta.getContentType())
-                : MediaType.APPLICATION_OCTET_STREAM;
-        return ResponseEntity.ok()
-                .contentType(mediaType)
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename*=UTF-8''" + filename)
-                .body(resource);
+        ResponseEntity.BodyBuilder builder = ResponseEntity.ok()
+                .contentType(resolveMediaType(meta.getContentType()))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename*=UTF-8''" + filename);
+        if (meta.getSize() != null && meta.getSize() >= 0) {
+            builder.contentLength(meta.getSize());
+        }
+        return builder.body(resource);
     }
 
     @GetMapping("/preview/{id}")
     public ResponseEntity<Resource> preview(@PathVariable Long id) {
         SysFile meta = fileService.get(id);
-        if (StringUtils.hasText(meta.getUrl()) && !meta.getUrl().startsWith("/api/")) {
-            return ResponseEntity.status(302).location(java.net.URI.create(meta.getUrl())).build();
-        }
+        // 预览必须走后端代理：公网直连 MinIO/RustFS 域名常 502，img 无法显示
         Resource resource = fileService.load(id);
-        MediaType mediaType = StringUtils.hasText(meta.getContentType())
-                ? MediaType.parseMediaType(meta.getContentType())
-                : MediaType.APPLICATION_OCTET_STREAM;
-        return ResponseEntity.ok().contentType(mediaType).body(resource);
+        ResponseEntity.BodyBuilder builder = ResponseEntity.ok()
+                .contentType(resolveMediaType(meta.getContentType()));
+        if (meta.getSize() != null && meta.getSize() >= 0) {
+            builder.contentLength(meta.getSize());
+        }
+        return builder.body(resource);
+    }
+
+    private static MediaType resolveMediaType(String contentType) {
+        if (!StringUtils.hasText(contentType)) {
+            return MediaType.APPLICATION_OCTET_STREAM;
+        }
+        try {
+            return MediaType.parseMediaType(contentType);
+        } catch (Exception ignored) {
+            return MediaType.APPLICATION_OCTET_STREAM;
+        }
     }
 }
