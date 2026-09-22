@@ -38,6 +38,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'ticket/submissions', component: () => import('@/views/ticket/submissions.vue'), meta: { title: '我的工单' } },
       { path: 'ticket/dashboard', component: () => import('@/views/ticket/dashboard.vue'), meta: { title: '任务看板' } },
       { path: 'hr/archive', component: () => import('@/views/hr/archive.vue'), meta: { title: '人员档案' } },
+      { path: 'hr/labor-agreement', component: () => import('@/views/hr/labor-agreement/index.vue'), meta: { title: '劳务协议' } },
       { path: 'hr/depr-category', component: () => import('@/views/hr/depr-category.vue'), meta: { title: '折旧类别' } },
       { path: 'hr/asset', component: () => import('@/views/hr/asset.vue'), meta: { title: '资产台账' } },
       { path: 'hr/salary', component: () => import('@/views/hr/salary.vue'), meta: { title: '工资配置' } },

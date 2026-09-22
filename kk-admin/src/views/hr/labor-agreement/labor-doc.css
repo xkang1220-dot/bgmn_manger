@@ -1,0 +1,147 @@
+/* 劳务协议正文排版（预览 + 导出同源） */
+.labor-doc-shell {
+  background: #e8e8ed;
+  border-radius: 14px;
+  padding: 20px;
+  overflow: auto;
+  max-height: calc(100vh - 220px);
+}
+
+#labor-contract-preview {
+  width: 794px;
+  min-height: 1123px;
+  margin: 0 auto;
+  background: #fff;
+  color: #000;
+  box-sizing: border-box;
+  padding: 56px 64px 72px;
+  font-family: 'Songti SC', 'Noto Serif SC', 'SimSun', '宋体', serif;
+  font-size: 12pt;
+  line-height: 1.9;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 14px 40px rgba(0, 0, 0, 0.08);
+}
+
+#labor-contract-preview .doc-title {
+  text-align: center;
+  font-size: 22pt;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  margin: 0 0 8px;
+  line-height: 1.4;
+}
+
+#labor-contract-preview .doc-title-en {
+  text-align: center;
+  font-size: 10.5pt;
+  font-weight: 400;
+  margin: 0 0 28px;
+  color: #222;
+}
+
+#labor-contract-preview .doc-section-title {
+  text-align: center;
+  font-size: 14pt;
+  font-weight: 700;
+  margin: 28px 0 16px;
+  letter-spacing: 0.08em;
+}
+
+#labor-contract-preview .doc-info-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 24px;
+  font-size: 12pt;
+}
+
+#labor-contract-preview .doc-info-table td {
+  border: 1px solid #000;
+  padding: 8px 12px;
+  vertical-align: top;
+}
+
+#labor-contract-preview .doc-label {
+  width: 28%;
+  background: #fafafa;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+#labor-contract-preview .doc-value {
+  width: 72%;
+}
+
+#labor-contract-preview .doc-p {
+  margin: 0 0 10px;
+  font-size: 12pt;
+  line-height: 1.9;
+  text-align: justify;
+  text-indent: 0;
+}
+
+#labor-contract-preview .doc-indent-spacer {
+  display: inline-block;
+  width: 2em;
+  min-width: 2em;
+  height: 1em;
+  vertical-align: baseline;
+}
+
+#labor-contract-preview .doc-clause {
+  padding-left: 0;
+  text-indent: 0;
+}
+
+#labor-contract-preview .doc-article {
+  margin: 18px 0 8px;
+}
+
+#labor-contract-preview .doc-article-title {
+  font-size: 12pt;
+  font-weight: 700;
+  margin: 0 0 8px;
+}
+
+#labor-contract-preview .doc-sign-block {
+  /* 上方留白便于 PDF 在签署区前换页，避免把日期截到下一页 */
+  margin-top: 56px;
+  padding-top: 28px;
+}
+
+#labor-contract-preview .doc-sign-title {
+  margin-top: 0;
+}
+
+#labor-contract-preview .doc-sign-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 36px;
+  margin-top: 18px;
+  align-items: stretch;
+}
+
+#labor-contract-preview .doc-sign-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 200px;
+  box-sizing: border-box;
+}
+
+#labor-contract-preview .doc-sign-col-body {
+  flex: 1 1 auto;
+}
+
+#labor-contract-preview .doc-sign-col .doc-p {
+  margin-bottom: 8px;
+}
+
+#labor-contract-preview .doc-sign-seal {
+  margin-top: 40px !important;
+  margin-bottom: 8px !important;
+  min-height: 2.4em;
+}
+
+#labor-contract-preview .doc-sign-date {
+  margin-top: auto !important;
+  margin-bottom: 0 !important;
+  padding-top: 12px;
+}

@@ -19,8 +19,23 @@ const ticketSubmitOpen = ref(false)
 
 const canSubmitTicket = computed(() => userStore.hasPermission('ticket:submit'))
 
-const visibleMenus = computed(() =>
-  (userStore.menus || [])
+/** 临时入口：方便联调劳务协议；正式菜单由管理员在后台配置后可删掉这段 */
+const TEMP_LABOR_AGREEMENT_MENU: MenuInfo = {
+  id: -90001,
+  parentId: 0,
+  name: '劳务协议',
+  type: 2,
+  path: '/hr/labor-agreement',
+  component: 'hr/labor-agreement/index',
+  permission: '',
+  icon: 'Document',
+  sort: 9999,
+  visible: 1,
+  status: 1,
+}
+
+const visibleMenus = computed(() => {
+  const menus = (userStore.menus || [])
     .filter((m) => m.visible !== 0 && m.type !== 3)
     // 目录无可见子项时不展示（避免资产迁走后残留空「人事」）
     .filter((m) => {
@@ -31,8 +46,33 @@ const visibleMenus = computed(() =>
     .map((m) => ({
       ...m,
       children: (m.children || []).filter((c: MenuInfo) => c.type !== 3 && c.visible !== 0),
-    })),
-)
+    }))
+
+  const already =
+    menus.some((m) => m.path === TEMP_LABOR_AGREEMENT_MENU.path) ||
+    menus.some((m) => (m.children || []).some((c) => c.path === TEMP_LABOR_AGREEMENT_MENU.path))
+  if (already) return menus
+
+  const hrParent = menus.find(
+    (m) =>
+      m.name === '人事' ||
+      m.name === '人力资源' ||
+      (m.children || []).some((c) => String(c.path || '').includes('/hr/')),
+  )
+  if (hrParent) {
+    return menus.map((m) => {
+      if (m.id !== hrParent.id) return m
+      return {
+        ...m,
+        children: [
+          ...(m.children || []),
+          { ...TEMP_LABOR_AGREEMENT_MENU, parentId: m.id },
+        ],
+      }
+    })
+  }
+  return [...menus, TEMP_LABOR_AGREEMENT_MENU]
+})
 
 const pageTitle = computed(() => String(route.meta.title || '工作台'))
 

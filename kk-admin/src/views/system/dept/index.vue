@@ -61,7 +61,7 @@ onMounted(load)
         <el-table-column prop="leader" label="负责人" width="140">
           <template #default="{ row }">{{ row.leader || '—' }}</template>
         </el-table-column>
-        <el-table-column prop="phone" label="电话" width="140">
+        <el-table-column prop="phone" label="社会统一信用代码" min-width="180">
           <template #default="{ row }">{{ row.phone || '—' }}</template>
         </el-table-column>
         <el-table-column prop="sort" label="排序" width="80" align="right" />
@@ -92,7 +92,7 @@ onMounted(load)
       <el-form label-width="90px">
         <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="负责人"><el-input v-model="form.leader" /></el-form-item>
-        <el-form-item label="电话"><el-input v-model="form.phone" /></el-form-item>
+        <el-form-item label="社会统一信用代码"><el-input v-model="form.phone" placeholder="公司填写信用代码" /></el-form-item>
         <el-form-item label="排序"><el-input-number v-model="form.sort" /></el-form-item>
       </el-form>
       <template #footer>
