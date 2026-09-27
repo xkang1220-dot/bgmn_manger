@@ -67,6 +67,13 @@ public class TaskController {
         return Result.ok(taskService.managementSummary(projectId, priority, participantId, title));
     }
 
+    @GetMapping("/management/dashboard")
+    @SaCheckPermission("project:task:list")
+    public Result<Map<String, Object>> managementDashboard(
+            Long projectId, Integer priority, Long participantId, String title) {
+        return Result.ok(taskService.managementDashboard(projectId, priority, participantId, title));
+    }
+
     /** 当前登录用户相关任务：参与或自己创建 */
     @GetMapping("/related")
     public Result<List<PmTask>> related() {

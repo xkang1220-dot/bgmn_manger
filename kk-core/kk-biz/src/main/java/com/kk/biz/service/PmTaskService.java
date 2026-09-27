@@ -31,6 +31,8 @@ public interface PmTaskService extends IService<PmTask> {
     /** 任务管理页统计，范围规则与 {@link #pageManagementTasks} 一致。 */
     Map<String, Object> managementSummary(Long projectId, Integer priority, Long participantId, String title);
 
+    Map<String, Object> managementDashboard(Long projectId, Integer priority, Long participantId, String title);
+
     /** 看板用：按项目拉取任务（不分页，排除已关闭） */
     List<PmTask> listBoardTasks(Long projectId);
 

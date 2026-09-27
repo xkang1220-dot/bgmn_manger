@@ -211,6 +211,14 @@ export const bizApi = {
   }) {
     return request<any>({ url: '/task/management/summary', method: 'get', params: params || {} })
   },
+  managementTaskDashboard(params?: {
+    projectId?: number
+    priority?: number
+    participantId?: number
+    title?: string
+  }) {
+    return request<any>({ url: '/task/management/dashboard', method: 'get', params: params || {} })
+  },
   taskDetail(id: number) {
     return request<any>({ url: `/task/${id}`, method: 'get' })
   },

@@ -59,12 +59,17 @@ const form = reactive<any>({
   id: undefined,
   title: '',
   projectId: undefined,
+  assigneeId: undefined,
   participantIds: [] as number[],
   status: 0,
   priority: 2,
   startDate: '',
   dueDate: '',
   progress: 0,
+  estimatedHours: undefined,
+  blocked: false,
+  blockedReason: '',
+  riskLevel: 'NORMAL',
   content: '',
   imageFileIds: [] as number[],
 })
@@ -85,12 +90,17 @@ function emptyForm() {
     id: undefined,
     title: '',
     projectId: props.defaultProjectId != null ? Number(props.defaultProjectId) : undefined,
+    assigneeId: selfId,
     participantIds: selfId != null ? [selfId] : ([] as number[]),
     status: 0,
     priority: 2,
     startDate: '',
     dueDate: '',
     progress: 0,
+    estimatedHours: undefined,
+    blocked: false,
+    blockedReason: '',
+    riskLevel: 'NORMAL',
     content: '',
     imageFileIds: [] as number[],
   }
@@ -171,7 +181,6 @@ async function loadDetail(id: number) {
       participantIds: full.participantIds || [],
       imageFileIds: (full.images || []).map((f: any) => f.id),
     })
-    delete form.assigneeId
     await loadProjectCandidates(full.projectId)
     imageFileList.value = (full.images || []).map(toUploadFile)
     comments.value = commentList
@@ -240,6 +249,7 @@ async function loadProjectCandidates(projectId?: number) {
     })
   }
   candidateUsers.value = [...map.values()]
+  if (form.assigneeId == null && d.ownerId != null) form.assigneeId = Number(d.ownerId)
   candidateProjectId.value = projectId
   const have = new Set(candidateUsers.value.map((u) => Number(u.id)))
   const ids = form.participantIds || []
@@ -350,6 +360,14 @@ async function save() {
     ElMessage.warning('请至少选择一名参与人')
     return
   }
+  if (!form.assigneeId) {
+    ElMessage.warning('请选择任务主责人')
+    return
+  }
+  if (form.blocked && !String(form.blockedReason || '').trim()) {
+    ElMessage.warning('请填写阻塞原因')
+    return
+  }
   const eligibleIds = new Set(
     candidateUsers.value.filter(isEligibleCandidate).map((u) => Number(u.id)),
   )
@@ -362,8 +380,7 @@ async function save() {
   saving.value = true
   try {
     const payload = { ...form }
-    // 持有人字段已停用；去掉仅展示用字段，避免污染请求体
-    delete payload.assigneeId
+    // 去掉仅展示用字段，避免污染请求体
     delete payload.assigneeName
     delete payload.canTransfer
     delete payload.canEdit
@@ -590,6 +607,7 @@ function canDeleteComment(c: any) {
 
         <el-descriptions :column="1" border class="detail-desc">
           <el-descriptions-item label="项目">{{ detail.projectName || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="主责人">{{ detail.assigneeName || '未指定' }}</el-descriptions-item>
           <el-descriptions-item label="参与人员">
             {{ detail.participantNames?.length ? detail.participantNames.join('、') : '无' }}
           </el-descriptions-item>
@@ -598,6 +616,16 @@ function canDeleteComment(c: any) {
           </el-descriptions-item>
           <el-descriptions-item label="周期">
             {{ detail.startDate || '—' }} ~ {{ detail.dueDate || '—' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="交付数据">
+            实际开始 {{ fmtTime(detail.startedAt) }} · 实际完成 {{ fmtTime(detail.completedAt) }} · 最后推进 {{ fmtTime(detail.lastActivityAt) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="风险状态">
+            <el-tag v-if="detail.blocked" type="danger" size="small">已阻塞</el-tag>
+            <el-tag v-else :type="detail.riskLevel === 'DANGER' ? 'danger' : detail.riskLevel === 'WARNING' ? 'warning' : 'success'" size="small">
+              {{ detail.riskLevel === 'DANGER' ? '高风险' : detail.riskLevel === 'WARNING' ? '需关注' : '正常' }}
+            </el-tag>
+            <span v-if="detail.blockedReason" style="margin-left: 8px">{{ detail.blockedReason }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="描述">
             <div class="content-text">{{ detail.content || '暂无描述' }}</div>
@@ -738,6 +766,11 @@ function canDeleteComment(c: any) {
               <el-option v-for="u in candidateUsers" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
             </el-select>
           </el-form-item>
+          <el-form-item label="主责人" required>
+            <el-select v-model="form.assigneeId" filterable placeholder="唯一交付责任人" style="width: 100%">
+              <el-option v-for="u in candidateUsers.filter(isEligibleCandidate)" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="优先级">
             <el-select v-model="form.priority" style="width: 100%">
               <el-option :value="1" label="高" />
@@ -763,6 +796,22 @@ function canDeleteComment(c: any) {
               <el-slider v-model="form.progress" :min="0" :max="100" :disabled="form.status === 2" style="flex: 1" />
               <span style="width: 40px; text-align: right">{{ form.progress }}%</span>
             </div>
+          </el-form-item>
+          <el-form-item label="预计工时">
+            <el-input-number v-model="form.estimatedHours" :min="0" :precision="1" :step="1" style="width: 100%" />
+          </el-form-item>
+          <el-form-item label="风险等级">
+            <el-select v-model="form.riskLevel" style="width: 100%">
+              <el-option value="NORMAL" label="正常" />
+              <el-option value="WARNING" label="需关注" />
+              <el-option value="DANGER" label="高风险" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="阻塞状态">
+            <el-switch v-model="form.blocked" active-text="已阻塞" inactive-text="未阻塞" />
+          </el-form-item>
+          <el-form-item v-if="form.blocked" label="阻塞原因" required>
+            <el-input v-model="form.blockedReason" type="textarea" :rows="2" maxlength="500" show-word-limit />
           </el-form-item>
           <el-form-item label="描述">
             <el-input v-model="form.content" type="textarea" :rows="4" maxlength="1000" show-word-limit />

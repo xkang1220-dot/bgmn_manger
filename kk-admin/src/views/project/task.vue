@@ -116,12 +116,16 @@ function onStatClick(key: string) {
 }
 
 const riskTypeMap: Record<string, { label: string; type: 'danger' | 'warning' | 'info' | 'success' }> = {
+  BLOCKED: { label: '已阻塞', type: 'danger' },
   OVERDUE: { label: '已逾期', type: 'danger' },
   DUE_SOON: { label: '即将到期', type: 'warning' },
   STALE: { label: '长期未更新', type: 'warning' },
   NO_DUE_DATE: { label: '未设截止时间', type: 'info' },
   PENDING: { label: '待确认', type: 'success' },
 }
+
+const maxTrend = computed(() => Math.max(1, ...(summary.value.trend || []).flatMap((item: any) => [item.created || 0, item.completed || 0])))
+const maxOwnerLoad = computed(() => Math.max(1, ...(summary.value.ownerLoad || []).map((item: any) => item.open || 0)))
 
 const healthMap: Record<string, { label: string; type: 'danger' | 'warning' | 'success' }> = {
   DANGER: { label: '危险', type: 'danger' },
@@ -145,7 +149,7 @@ async function loadSummary() {
   if (query.projectId != null) params.projectId = query.projectId
   if (query.priority != null) params.priority = query.priority
   if (query.title.trim()) params.title = query.title.trim()
-  summary.value = await bizApi.managementTaskSummary(params)
+  summary.value = await bizApi.managementTaskDashboard(params)
 }
 
 async function load() {
@@ -357,6 +361,40 @@ onMounted(async () => {
       </section>
     </div>
 
+    <div class="insight-grid">
+      <section class="page-card performance-panel">
+        <div class="section-head">
+          <div><h3>交付效率</h3><p>按实际开始和完成时间计算</p></div>
+        </div>
+        <div class="performance-metrics">
+          <div><span>按期完成率</span><strong>{{ summary.onTimeRate == null ? '—' : `${summary.onTimeRate}%` }}</strong></div>
+          <div><span>平均交付周期</span><strong>{{ summary.avgCycleDays == null ? '—' : `${summary.avgCycleDays}天` }}</strong></div>
+          <div><span>当前阻塞</span><strong :class="{ danger: summary.blocked > 0 }">{{ summary.blocked ?? 0 }}</strong></div>
+        </div>
+        <div class="trend-legend"><span class="created-dot" />新增任务 <span class="completed-dot" />完成任务</div>
+        <div class="trend-chart">
+          <div v-for="item in summary.trend || []" :key="item.label" class="trend-column">
+            <div class="trend-bars">
+              <i class="created" :style="{ height: `${Math.max(3, item.created / maxTrend * 72)}px` }" :title="`新增 ${item.created}`" />
+              <i class="completed" :style="{ height: `${Math.max(3, item.completed / maxTrend * 72)}px` }" :title="`完成 ${item.completed}`" />
+            </div>
+            <span>{{ item.label }}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="page-card owner-panel">
+        <div class="section-head"><div><h3>主责人负载</h3><p>未结任务及风险分布</p></div></div>
+        <div v-if="summary.ownerLoad?.length" class="owner-list">
+          <div v-for="item in summary.ownerLoad" :key="item.ownerId" class="owner-row">
+            <div class="owner-line"><strong>{{ item.ownerName }}</strong><span>{{ item.open }}项 · 逾期{{ item.overdue }} · 阻塞{{ item.blocked }}</span></div>
+            <div class="owner-bar"><i :style="{ width: `${item.open / maxOwnerLoad * 100}%` }" /></div>
+          </div>
+        </div>
+        <el-empty v-else description="暂无主责人负载数据" :image-size="56" />
+      </section>
+    </div>
+
     <el-form class="filter-bar" @submit.prevent="onFilter">
       <el-form-item label="标题">
         <el-input
@@ -417,12 +455,15 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <el-table-column prop="projectName" label="项目" width="140" show-overflow-tooltip />
+        <el-table-column prop="assigneeName" label="主责人" width="110" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.assigneeName || '未指定' }}</template>
+        </el-table-column>
         <el-table-column label="优先级" width="80" align="center">
           <template #default="{ row }">
             <el-tag :type="priorityType[row.priority] || 'info'" size="small">{{ priorityMap[row.priority] || '中' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="参与人员" min-width="160" show-overflow-tooltip>
+        <el-table-column label="协作人员" min-width="150" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.participantNames?.length ? row.participantNames.join('、') : '—' }}
           </template>
@@ -630,6 +671,27 @@ onMounted(async () => {
 .health-metrics b { margin-right: 3px; font-size: 14px; color: var(--kk-text); }
 .health-metrics .danger b { color: var(--kk-danger); }
 .task-section-head { padding: 2px 2px 12px; margin-bottom: 0; }
+.insight-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(340px, .75fr); gap: 14px; }
+.performance-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.performance-metrics div { padding: 10px 12px; border-radius: 8px; background: var(--kk-bg-muted, #f5f7fa); }
+.performance-metrics span { display: block; font-size: 12px; color: var(--kk-text-muted); }
+.performance-metrics strong { display: block; margin-top: 5px; font-size: 21px; color: var(--kk-text); }
+.performance-metrics strong.danger { color: var(--kk-danger); }
+.trend-legend { display: flex; align-items: center; gap: 6px; margin-top: 16px; font-size: 11px; color: var(--kk-text-muted); }
+.trend-legend span { width: 8px; height: 8px; border-radius: 2px; }
+.created-dot, .trend-bars .created { background: #94a3b8; }
+.completed-dot, .trend-bars .completed { background: var(--kk-primary); }
+.trend-chart { display: grid; grid-template-columns: repeat(6, 1fr); align-items: end; gap: 10px; height: 112px; margin-top: 6px; }
+.trend-column { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.trend-column > span { font-size: 11px; color: var(--kk-text-muted); }
+.trend-bars { height: 76px; display: flex; align-items: end; gap: 3px; }
+.trend-bars i { display: block; width: 10px; min-height: 3px; border-radius: 3px 3px 0 0; }
+.owner-list { display: flex; flex-direction: column; gap: 13px; }
+.owner-line { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
+.owner-line strong { font-size: 13px; }
+.owner-line span { color: var(--kk-text-muted); }
+.owner-bar { height: 7px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: var(--kk-bg-muted, #ebeef5); }
+.owner-bar i { display: block; height: 100%; border-radius: inherit; background: var(--kk-primary); }
 .task-progress { display: flex; align-items: center; }
 .task-progress__bar { flex: 1; }
 .task-progress__status {
@@ -649,6 +711,7 @@ onMounted(async () => {
 @media (max-width: 1100px) {
   .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .management-grid { grid-template-columns: 1fr; }
+  .insight-grid { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-transparency: reduce) {
   .stat-card {
