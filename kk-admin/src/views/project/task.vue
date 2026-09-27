@@ -438,78 +438,60 @@ onMounted(async () => {
       <div class="section-head task-section-head">
         <div><h3>任务明细</h3><p>用于筛选、下钻和日常执行</p></div>
       </div>
-      <el-table v-loading="listLoading" :data="list" row-key="id" stripe empty-text="暂无任务">
-        <el-table-column label="风险" width="90" align="center">
-          <template #default="{ row }">
-            <el-tag v-if="row.overdue" type="danger" size="small">逾期</el-tag>
-            <el-tag v-else-if="!row.dueDate && [0, 1].includes(row.status)" type="info" size="small">无日期</el-tag>
-            <span v-else>—</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="任务" min-width="220">
+      <el-table v-loading="listLoading" :data="list" row-key="id" stripe empty-text="暂无任务" class="task-table">
+        <el-table-column label="任务" min-width="320">
           <template #default="{ row }">
             <div class="task-title-cell">
-              <el-link type="primary" :underline="false" @click="open(row)">{{ row.title }}</el-link>
+              <div class="task-title-line">
+                <el-link type="primary" :underline="false" @click="open(row)">{{ row.title }}</el-link>
+                <el-tag v-if="row.blocked" type="danger" size="small" effect="light">阻塞</el-tag>
+                <el-tag v-else-if="row.overdue" type="danger" size="small" effect="light">逾期</el-tag>
+                <el-tag v-else-if="!row.dueDate && [0, 1].includes(row.status)" type="info" size="small" effect="plain">无日期</el-tag>
+                <el-tag :type="priorityType[row.priority] || 'info'" size="small" effect="plain">
+                  {{ priorityMap[row.priority] || '中' }}优先级
+                </el-tag>
+              </div>
               <div v-if="row.content" class="task-content-preview">{{ row.content }}</div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="projectName" label="项目" width="140" show-overflow-tooltip />
-        <el-table-column prop="assigneeName" label="主责人" width="110" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.assigneeName || '未指定' }}</template>
-        </el-table-column>
-        <el-table-column label="优先级" width="80" align="center">
+        <el-table-column prop="projectName" label="所属项目" min-width="150" show-overflow-tooltip />
+        <el-table-column label="负责人" min-width="190">
           <template #default="{ row }">
-            <el-tag :type="priorityType[row.priority] || 'info'" size="small">{{ priorityMap[row.priority] || '中' }}</el-tag>
+            <div class="task-owner-cell">
+              <strong>{{ row.assigneeName || '未指定' }}</strong>
+              <span v-if="row.participantNames?.length">
+                协作：{{ row.participantNames.filter((name: string) => name !== row.assigneeName).join('、') || '—' }}
+              </span>
+              <span v-else>暂无协作人员</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="协作人员" min-width="150" show-overflow-tooltip>
+        <el-table-column label="交付进度" min-width="180">
           <template #default="{ row }">
-            {{ row.participantNames?.length ? row.participantNames.join('、') : '—' }}
-          </template>
-        </el-table-column>
-        <el-table-column label="进度" width="130">
-          <template #default="{ row }">
-            <div v-if="progressStatus(row) === 'warning'" class="task-progress">
+            <div class="delivery-cell">
+              <div class="delivery-head">
+                <el-tag :type="statusType[row.status]" size="small">{{ statusMap[row.status] }}</el-tag>
+                <span>{{ row.progress ?? 0 }}%</span>
+              </div>
               <el-progress
-                class="task-progress__bar"
                 :percentage="row.progress ?? 0"
-                status="warning"
-                :stroke-width="8"
+                :status="progressStatus(row)"
+                :stroke-width="6"
                 :show-text="false"
               />
-              <span class="task-progress__status">
-                <el-tooltip v-if="!row.dueDate" content="当前任务暂未设置截至时间。" placement="top">
-                  <el-icon class="task-progress__warning-icon" aria-label="当前任务暂未设置截至时间。">
-                    <WarningFilled />
-                  </el-icon>
-                </el-tooltip>
-                <el-icon v-else class="task-progress__warning-icon"><WarningFilled /></el-icon>
-              </span>
             </div>
-            <el-progress
-              v-else
-              :percentage="row.progress ?? 0"
-              :status="progressStatus(row)"
-              :stroke-width="8"
-            />
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="90" align="center">
-          <template #default="{ row }">
-            <el-tag :type="statusType[row.status]" size="small">{{ statusMap[row.status] }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="计划周期" width="180">
+        <el-table-column label="计划时间" min-width="190">
           <template #default="{ row }">
             <div class="task-date-range">
-              <span>{{ row.startDate || '—' }}</span>
-              <span class="date-sep">~</span>
-              <span :class="{ overdue: row.overdue }">{{ row.dueDate || '—' }}</span>
+              <span><i>开始</i>{{ row.startDate || '未设置' }}</span>
+              <span :class="{ overdue: row.overdue }"><i>截止</i>{{ row.dueDate || '未设置' }}</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" :width="isTaskManager ? 220 : 100" fixed="right" align="center">
+        <el-table-column label="操作" :width="isTaskManager ? 200 : 88" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" @click="open(row)">详情</el-button>
             <template v-if="isTaskManager && row.status === 4">
@@ -612,7 +594,14 @@ onMounted(async () => {
   color: var(--kk-text);
 }
 
-.task-title-cell { line-height: 1.4; }
+.task-table :deep(.el-table__cell) { padding: 13px 0; }
+.task-table :deep(.el-table__header .el-table__cell) { padding: 11px 0; }
+.task-table :deep(.el-table__row) { height: 66px; }
+.task-title-cell { min-width: 0; line-height: 1.4; }
+.task-title-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.task-title-line .el-link { min-width: 0; max-width: 250px; font-weight: 600; }
+.task-title-line :deep(.el-link__inner) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-title-line .el-tag { flex-shrink: 0; }
 .task-content-preview {
   margin-top: 4px;
   font-size: 12px;
@@ -620,8 +609,14 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 280px;
+  max-width: 440px;
 }
+.task-owner-cell { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.task-owner-cell strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--kk-text); }
+.task-owner-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--kk-text-muted); }
+.delivery-cell { max-width: 170px; }
+.delivery-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+.delivery-head > span { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--kk-text-secondary); }
 .stat-hint { margin-top: 3px; font-size: 12px; color: var(--kk-text-muted); }
 
 .management-grid {
@@ -704,8 +699,9 @@ onMounted(async () => {
   color: var(--el-color-warning);
   cursor: help;
 }
-.task-date-range { font-size: 13px; color: var(--kk-text-secondary); }
-.date-sep { margin: 0 4px; color: var(--kk-text-muted); }
+.task-date-range { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--kk-text-secondary); }
+.task-date-range span { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.task-date-range i { width: 28px; flex-shrink: 0; font-style: normal; color: var(--kk-text-muted); }
 .overdue { color: var(--kk-danger); font-weight: 500; }
 
 @media (max-width: 1100px) {
