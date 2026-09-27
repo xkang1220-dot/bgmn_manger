@@ -32,9 +32,12 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -189,7 +192,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     private Map<String, Object> summaryInternal(Long projectId, Integer priority, Long participantId, String title,
                                                 boolean managementScope) {
         LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<PmTask>()
-                .select(PmTask::getStatus, PmTask::getDueDate)
+                .select(PmTask::getId, PmTask::getProjectId, PmTask::getTitle, PmTask::getStatus,
+                        PmTask::getPriority, PmTask::getProgress, PmTask::getDueDate, PmTask::getUpdateTime)
                 .eq(priority != null, PmTask::getPriority, priority)
                 .like(StringUtils.hasText(title), PmTask::getTitle, title);
         applyProjectIdFilter(wrapper, projectId);
@@ -200,27 +204,128 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         List<PmTask> rows = list(wrapper);
         LocalDate today = LocalDate.now();
-        long todo = 0, doing = 0, done = 0, cancelled = 0, overdue = 0;
+        long todo = 0, doing = 0, done = 0, cancelled = 0, pending = 0;
+        long overdue = 0, dueSoon = 0, noDueDate = 0, stale = 0, done30 = 0;
+        LocalDate dueSoonEnd = today.plusDays(7);
+        LocalDateTime staleBefore = LocalDateTime.now().minusDays(7);
+        LocalDateTime recentBefore = LocalDateTime.now().minusDays(30);
+        Set<Long> taskIds = rows.stream().map(PmTask::getId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Set<Long> recentlyCompletedTaskIds = taskIds.isEmpty() ? Set.of()
+                : flowMapper.selectList(new LambdaQueryWrapper<PmTaskFlow>()
+                        .in(PmTaskFlow::getTaskId, taskIds)
+                        .eq(PmTaskFlow::getToStatus, 2)
+                        .ge(PmTaskFlow::getCreateTime, recentBefore)
+                        .select(PmTaskFlow::getTaskId))
+                .stream().map(PmTaskFlow::getTaskId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Set<Long> projectIds = rows.stream().map(PmTask::getProjectId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<Long, PmProject> projectMap = projectIds.isEmpty() ? Map.of()
+                : projectMapper.selectList(new LambdaQueryWrapper<PmProject>().in(PmProject::getId, projectIds)).stream()
+                .collect(Collectors.toMap(PmProject::getId, p -> p, (a, b) -> a));
+        Set<Long> ownerIds = projectMap.values().stream().map(PmProject::getOwnerId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<Long, SysUser> ownerMap = loadUserMap(ownerIds);
+        Map<Long, Map<String, Object>> healthByProject = new HashMap<>();
+        List<Map<String, Object>> riskTasks = new ArrayList<>();
         for (PmTask row : rows) {
             Integer status = row.getStatus() == null ? 0 : row.getStatus();
             switch (status) {
                 case 1 -> doing++;
                 case 2 -> done++;
                 case 3 -> cancelled++;
+                case 4 -> pending++;
                 default -> todo++;
             }
-            if (row.getDueDate() != null && row.getDueDate().isBefore(today) && (status == 0 || status == 1)) {
+            boolean open = status == 0 || status == 1;
+            boolean rowOverdue = row.getDueDate() != null && row.getDueDate().isBefore(today) && open;
+            boolean rowDueSoon = row.getDueDate() != null && !row.getDueDate().isBefore(today)
+                    && !row.getDueDate().isAfter(dueSoonEnd) && open;
+            boolean rowNoDueDate = row.getDueDate() == null && open;
+            boolean rowStale = status == 1 && row.getUpdateTime() != null && row.getUpdateTime().isBefore(staleBefore);
+            if (rowOverdue) {
                 overdue++;
             }
+            if (rowDueSoon) dueSoon++;
+            if (rowNoDueDate) noDueDate++;
+            if (rowStale) stale++;
+            if (status == 2 && recentlyCompletedTaskIds.contains(row.getId())) done30++;
+
+            PmProject project = projectMap.get(row.getProjectId());
+            if (project != null && (open || status == 4)) {
+                Map<String, Object> health = healthByProject.computeIfAbsent(project.getId(), id -> {
+                    Map<String, Object> item = new HashMap<>();
+                    item.put("projectId", id);
+                    item.put("projectName", project.getName());
+                    SysUser owner = ownerMap.get(project.getOwnerId());
+                    item.put("ownerName", owner == null ? "未指定" : userName(owner));
+                    item.put("open", 0L);
+                    item.put("overdue", 0L);
+                    item.put("dueSoon", 0L);
+                    item.put("highRisk", 0L);
+                    item.put("pending", 0L);
+                    return item;
+                });
+                increment(health, "open");
+                if (rowOverdue) increment(health, "overdue");
+                if (rowDueSoon) increment(health, "dueSoon");
+                if (Integer.valueOf(1).equals(row.getPriority()) && (rowOverdue || rowDueSoon || rowStale)) increment(health, "highRisk");
+                if (status == 4) increment(health, "pending");
+            }
+
+            if (rowOverdue || rowDueSoon || rowNoDueDate || rowStale || status == 4) {
+                Map<String, Object> risk = new LinkedHashMap<>();
+                risk.put("id", row.getId());
+                risk.put("title", row.getTitle());
+                risk.put("projectName", project == null ? "未关联项目" : project.getName());
+                risk.put("ownerName", project == null || ownerMap.get(project.getOwnerId()) == null
+                        ? "未指定" : userName(ownerMap.get(project.getOwnerId())));
+                risk.put("dueDate", row.getDueDate());
+                risk.put("progress", row.getProgress());
+                risk.put("priority", row.getPriority());
+                risk.put("status", status);
+                risk.put("riskType", rowOverdue ? "OVERDUE" : rowDueSoon ? "DUE_SOON"
+                        : rowStale ? "STALE" : rowNoDueDate ? "NO_DUE_DATE" : "PENDING");
+                risk.put("riskScore", rowOverdue ? 50 : rowDueSoon ? 40 : rowStale ? 30 : rowNoDueDate ? 20 : 10);
+                riskTasks.add(risk);
+            }
         }
+        List<Map<String, Object>> projectHealth = new ArrayList<>(healthByProject.values());
+        for (Map<String, Object> health : projectHealth) {
+            long projectOverdue = ((Number) health.get("overdue")).longValue();
+            long projectDueSoon = ((Number) health.get("dueSoon")).longValue();
+            long highRisk = ((Number) health.get("highRisk")).longValue();
+            String level = projectOverdue > 0 || highRisk > 0 ? "DANGER" : projectDueSoon > 0 ? "WARNING" : "HEALTHY";
+            health.put("level", level);
+            health.put("riskScore", projectOverdue * 10 + highRisk * 6 + projectDueSoon * 3);
+        }
+        projectHealth.sort(Comparator.comparingLong(item -> -((Number) item.get("riskScore")).longValue()));
+        riskTasks.sort(Comparator.comparingInt(item -> -((Number) item.get("riskScore")).intValue()));
+        Set<Long> riskProjectIds = projectHealth.stream()
+                .filter(item -> !"HEALTHY".equals(item.get("level")))
+                .map(item -> ((Number) item.get("projectId")).longValue())
+                .collect(Collectors.toSet());
         Map<String, Object> map = new HashMap<>();
         map.put("total", rows.size());
         map.put("todo", todo);
         map.put("doing", doing);
         map.put("done", done);
+        map.put("done30", done30);
+        map.put("pending", pending);
         map.put("cancelled", cancelled);
         map.put("overdue", overdue);
+        map.put("dueSoon", dueSoon);
+        map.put("noDueDate", noDueDate);
+        map.put("stale", stale);
+        map.put("riskProjects", riskProjectIds.size());
+        map.put("projectHealth", projectHealth.stream().limit(8).toList());
+        map.put("riskTasks", riskTasks.stream().limit(8).toList());
         return map;
+    }
+
+    private void increment(Map<String, Object> item, String key) {
+        item.put(key, ((Number) item.getOrDefault(key, 0L)).longValue() + 1);
+    }
+
+    private String userName(SysUser user) {
+        return StringUtils.hasText(user.getNickname()) ? user.getNickname() : user.getUsername();
     }
 
     /** 仅供 /project/task：普通用户按本人负责或直接参与的项目收口。 */
