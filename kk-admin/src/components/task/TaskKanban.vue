@@ -32,6 +32,7 @@ const columns = [
   { status: 0, label: '待办', tone: 'todo' },
   { status: 1, label: '进行中', tone: 'doing' },
   { status: 2, label: '已完成', tone: 'done' },
+  { status: 4, label: '待确认', tone: 'doing' },
 ]
 
 const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
@@ -72,10 +73,10 @@ function extraPeople(task: any) {
 }
 
 const grouped = computed(() => {
-  const map: Record<number, any[]> = { 0: [], 1: [], 2: [] }
+  const map: Record<number, any[]> = { 0: [], 1: [], 2: [], 4: [] }
   for (const t of boardTasks.value) {
     const s = Number(t.status)
-    if (s === 0 || s === 1 || s === 2) map[s].push(t)
+    if (s === 0 || s === 1 || s === 2 || s === 4) map[s].push(t)
   }
   return map
 })
@@ -158,7 +159,8 @@ async function onDrop(e: DragEvent, status: number) {
   else if (status === 0) task.progress = 0
   try {
     await bizApi.updateTaskStatus(id, status)
-    ElMessage.success('状态已更新')
+    ElMessage.success(status === 2 && !userStore.hasPermission('project:task:confirm') ? '已提交完成，等待任务管理员确认' : '状态已更新')
+    await load()
     emit('changed')
   } catch (err: any) {
     task.status = prev

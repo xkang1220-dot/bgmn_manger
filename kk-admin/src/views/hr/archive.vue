@@ -3,6 +3,11 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
+const canManageAttendance = computed(() => userStore.hasPermission('hr:attendance:edit'))
+const canMaintainArchive = computed(() => userStore.hasPermission('hr:archive:add') || userStore.hasPermission('hr:archive:edit'))
 
 const query = reactive({ page: 1, pageSize: 12, realName: '', employeeNo: '' })
 const list = ref<any[]>([])
@@ -13,6 +18,7 @@ const detailDrawer = ref(false)
 const isEdit = ref(false)
 const saving = ref(false)
 const detail = ref<any>(null)
+const attendanceSavingIds = ref<number[]>([])
 const form = reactive<any>({
   userId: undefined,
   realName: '',
@@ -185,8 +191,26 @@ async function remove(id: number) {
   await load()
 }
 
+async function toggleAttendance(row: any) {
+  const id = Number(row.id)
+  const enabled = Number(row.attendanceEnabled) === 1 ? 1 : 0
+  attendanceSavingIds.value.push(id)
+  try {
+    await bizApi.setArchiveAttendanceEnabled(id, enabled)
+    ElMessage.success(enabled ? '已启用该员工考勤' : '已停用该员工考勤')
+    if (detail.value?.id === id) detail.value.attendanceEnabled = enabled
+    const listRow = list.value.find((item) => Number(item.id) === id)
+    if (listRow) listRow.attendanceEnabled = enabled
+  } catch (e) {
+    row.attendanceEnabled = enabled === 1 ? 0 : 1
+    throw e
+  } finally {
+    attendanceSavingIds.value = attendanceSavingIds.value.filter((value) => value !== id)
+  }
+}
+
 onMounted(async () => {
-  users.value = await sysApi.userList()
+  if (canMaintainArchive.value) users.value = await sysApi.userList()
   await load()
 })
 </script>
@@ -247,6 +271,16 @@ onMounted(async () => {
           <div><span>账号</span><b>{{ row.username || '—' }}</b></div>
           <div><span>入职</span><b>{{ row.entryDate || '—' }}</b></div>
           <div><span>电话</span><b>{{ row.phone || '—' }}</b></div>
+          <div v-if="canManageAttendance" class="attendance-field" @click.stop>
+            <span>启用考勤</span>
+            <el-switch
+              v-model="row.attendanceEnabled"
+              :active-value="1"
+              :inactive-value="0"
+              :loading="attendanceSavingIds.includes(Number(row.id))"
+              @change="toggleAttendance(row)"
+            />
+          </div>
         </div>
         <div class="person-ops" @click.stop>
           <el-button
@@ -306,6 +340,16 @@ onMounted(async () => {
         <el-form-item label="紧急联系人"><el-input v-model="form.emergencyContact" /></el-form-item>
         <el-form-item label="紧急电话"><el-input v-model="form.emergencyPhone" /></el-form-item>
         <el-form-item label="备注"><el-input v-model="form.remark" type="textarea" :rows="2" /></el-form-item>
+        <el-form-item v-if="canManageAttendance && isEdit" label="启用考勤">
+          <el-switch
+            v-model="form.attendanceEnabled"
+            :active-value="1"
+            :inactive-value="0"
+            :loading="attendanceSavingIds.includes(Number(form.id))"
+            @change="toggleAttendance(form)"
+          />
+          <span class="attendance-tip">开启后，该员工才会出现在考勤一览和请假设置中</span>
+        </el-form-item>
         <el-form-item label="收款方式">
           <div class="pay-box">
             <div v-for="(m, index) in form.payMethods" :key="index" class="pay-row">
@@ -348,6 +392,15 @@ onMounted(async () => {
           <el-descriptions-item label="紧急联系人">{{ detail.emergencyContact || '—' }}</el-descriptions-item>
           <el-descriptions-item label="紧急电话">{{ detail.emergencyPhone || '—' }}</el-descriptions-item>
           <el-descriptions-item label="备注">{{ detail.remark || '—' }}</el-descriptions-item>
+          <el-descriptions-item v-if="canManageAttendance" label="启用考勤">
+            <el-switch
+              v-model="detail.attendanceEnabled"
+              :active-value="1"
+              :inactive-value="0"
+              :loading="attendanceSavingIds.includes(Number(detail.id))"
+              @change="toggleAttendance(detail)"
+            />
+          </el-descriptions-item>
           <el-descriptions-item label="收款方式">
             <div v-if="detail.payMethods?.length" class="pay-detail">
               <div v-for="m in detail.payMethods" :key="m.id" class="pay-detail-row">
@@ -484,6 +537,9 @@ onMounted(async () => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.attendance-field { display: flex; align-items: center; justify-content: space-between; }
+.attendance-field span { color: var(--kk-text-muted); }
+.attendance-tip { margin-left: 10px; color: var(--kk-text-muted); font-size: 12px; }
 .drawer-actions {
   display: flex;
   justify-content: flex-end;

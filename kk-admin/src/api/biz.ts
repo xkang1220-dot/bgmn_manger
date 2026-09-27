@@ -122,6 +122,9 @@ export const bizApi = {
   deleteArchive(id: number) {
     return request<void>({ url: `/hr/archive/${id}`, method: 'delete' })
   },
+  setArchiveAttendanceEnabled(id: number, enabled: number) {
+    return request<void>({ url: `/hr/archive/${id}/attendance-enabled`, method: 'put', data: { enabled } })
+  },
   faCategoryPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/fa/category/page', method: 'get', params })
   },
@@ -162,6 +165,9 @@ export const bizApi = {
   projectList() {
     return request<any[]>({ url: '/project/list', method: 'get' })
   },
+  taskManagementProjects() {
+    return request<any[]>({ url: '/project/task-options', method: 'get' })
+  },
   myProjects() {
     return request<any[]>({ url: '/project/mine', method: 'get' })
   },
@@ -183,6 +189,9 @@ export const bizApi = {
   taskPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/task/page', method: 'get', params })
   },
+  managementTaskPage(params: Record<string, unknown>) {
+    return request<PageResult<any>>({ url: '/task/management/page', method: 'get', params })
+  },
   taskRelated() {
     return request<any[]>({ url: '/task/related', method: 'get' })
   },
@@ -193,6 +202,14 @@ export const bizApi = {
     title?: string
   }) {
     return request<any>({ url: '/task/summary', method: 'get', params: params || {} })
+  },
+  managementTaskSummary(params?: {
+    projectId?: number
+    priority?: number
+    participantId?: number
+    title?: string
+  }) {
+    return request<any>({ url: '/task/management/summary', method: 'get', params: params || {} })
   },
   taskDetail(id: number) {
     return request<any>({ url: `/task/${id}`, method: 'get' })
@@ -205,6 +222,9 @@ export const bizApi = {
   },
   updateTaskStatus(id: number, status: number, imageFileIds?: number[], remark?: string) {
     return request<void>({ url: `/task/${id}/status`, method: 'put', data: { status, imageFileIds, remark } })
+  },
+  reviewTaskCompletion(id: number, approved: boolean, remark?: string) {
+    return request<void>({ url: `/task/${id}/completion-review`, method: 'put', data: { approved, remark } })
   },
   taskComments(taskId: number) {
     return request<any[]>({ url: `/task/${taskId}/comments`, method: 'get' })
@@ -298,13 +318,19 @@ export const bizApi = {
   revokeSalaryConfirm(lineId: number) {
     return request<void>({ url: `/hr/salary/my-confirm/${lineId}/revoke`, method: 'post' })
   },
-  submitLeave(data: { companyId: number; startDate: string; endDate: string; reason: string }) {
-    return request<any>({ url: '/hr/leave/mine', method: 'post', data })
-  },
   myLeave(params?: { companyId?: number; start?: string; end?: string }) {
     return request<any[]>({ url: '/hr/leave/mine', method: 'get', params })
   },
-  companyLeave(params: { companyId: number; start?: string; end?: string }) {
-    return request<any[]>({ url: '/hr/leave/company', method: 'get', params })
+  attendance(params: { start?: string; end?: string }) {
+    return request<any[]>({ url: '/hr/leave/attendance', method: 'get', params })
+  },
+  attendanceUsers() {
+    return request<any[]>({ url: '/hr/leave/attendance-users', method: 'get' })
+  },
+  attendanceMonthlyDetail(month: string) {
+    return request<any>({ url: '/hr/leave/attendance-monthly-detail', method: 'get', params: { month } })
+  },
+  setAttendanceDay(data: { date: string; userIds: number[] }) {
+    return request<void>({ url: '/hr/leave/attendance-day', method: 'put', data })
   },
 }

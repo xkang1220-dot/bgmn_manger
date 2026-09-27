@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { bizApi } from '@/api/biz'
-import { sysApi } from '@/api/system'
 import { useUserStore } from '@/stores/user'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
 import CompanyTaskShareDialog from '@/components/task/CompanyTaskShareDialog.vue'
@@ -11,13 +11,10 @@ import { companyTaskShareApi, type CompanyTaskShareOption } from '@/api/companyT
 
 const route = useRoute()
 const userStore = useUserStore()
+const isTaskManager = computed(() => userStore.hasPermission('project:task:confirm'))
 
-function currentUserId() {
-  return userStore.user?.id as number | undefined
-}
-
-/** 默认：待办 + 进行中 */
-const OPEN_STATUSES = [0, 1]
+/** “待办与进行中”快捷筛选包含待确认完成 */
+const OPEN_STATUSES = [0, 1, 4]
 
 const query = reactive({
   page: 1,
@@ -25,9 +22,8 @@ const query = reactive({
   title: '',
   projectId: undefined as number | undefined,
   status: undefined as number | undefined,
-  statuses: [...OPEN_STATUSES] as number[] | undefined,
+  statuses: undefined as number[] | undefined,
   priority: undefined as number | undefined,
-  participantId: currentUserId(),
   overdue: undefined as boolean | undefined,
 })
 
@@ -35,20 +31,20 @@ const list = ref<any[]>([])
 const total = ref(0)
 const summary = ref<Record<string, number>>({})
 const projects = ref<any[]>([])
-const users = ref<any[]>([])
 const taskDrawer = ref(false)
 const activeTaskId = ref<number | null>(null)
 const listLoading = ref(false)
 const shareOpen = ref(false)
 const shareCompanies = ref<CompanyTaskShareOption[]>([])
 
-const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭' }
+const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭', 4: '待确认完成' }
 const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
 const statusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'> = {
   0: 'info',
   1: 'warning',
   2: 'success',
   3: 'info',
+  4: 'warning',
 }
 const priorityType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'> = {
   1: 'danger',
@@ -61,13 +57,14 @@ const statusFilterOptions = [
   { value: '0', label: '待办' },
   { value: '1', label: '进行中' },
   { value: '2', label: '已完成' },
+  { value: '4', label: '待确认完成' },
   { value: '3', label: '已关闭' },
 ]
 
 const statusFilterKey = computed({
   get: (): string | undefined => {
     if (query.overdue) return undefined
-    if (query.statuses?.length === 2 && query.statuses.includes(0) && query.statuses.includes(1) && query.status == null) {
+    if (query.statuses?.length === OPEN_STATUSES.length && OPEN_STATUSES.every((status) => query.statuses?.includes(status)) && query.status == null) {
       return 'open'
     }
     if (query.status !== undefined && query.status !== null) return String(query.status)
@@ -130,18 +127,16 @@ function onStatClick(key: string) {
 }
 
 async function loadSummary() {
-  // 统计随筛选变：项目/标题/优先级/参与人；状态与逾期由卡片本身表达，不传入
+  // 统计随筛选变：项目/标题/优先级；状态与逾期由卡片本身表达，不传入
   const params: {
     projectId?: number
     priority?: number
-    participantId?: number
     title?: string
   } = {}
   if (query.projectId != null) params.projectId = query.projectId
   if (query.priority != null) params.priority = query.priority
-  if (query.participantId != null) params.participantId = query.participantId
   if (query.title.trim()) params.title = query.title.trim()
-  summary.value = await bizApi.taskSummary(params)
+  summary.value = await bizApi.managementTaskSummary(params)
 }
 
 async function load() {
@@ -154,7 +149,6 @@ async function load() {
     if (query.title.trim()) params.title = query.title.trim()
     if (query.projectId != null) params.projectId = query.projectId
     if (query.priority != null) params.priority = query.priority
-    if (query.participantId != null) params.participantId = query.participantId
     if (query.overdue) {
       params.overdue = true
     } else if (query.statuses?.length) {
@@ -162,7 +156,7 @@ async function load() {
     } else if (query.status !== undefined && query.status !== null) {
       params.status = query.status
     }
-    const res = await bizApi.taskPage(params)
+    const res = await bizApi.managementTaskPage(params)
     list.value = res.list
     total.value = res.total
     await loadSummary()
@@ -182,9 +176,8 @@ function resetQuery() {
     title: '',
     projectId: undefined,
     status: undefined,
-    statuses: [...OPEN_STATUSES],
+    statuses: undefined,
     priority: undefined,
-    participantId: currentUserId(),
     overdue: undefined,
   })
   load()
@@ -211,6 +204,28 @@ function open(row?: any) {
   taskDrawer.value = true
 }
 
+async function review(row: any, approved: boolean) {
+  let remark = ''
+  if (approved) {
+    try {
+      await ElMessageBox.confirm(`确认任务「${row.title}」已经完成？`, '确认完成', {
+        confirmButtonText: '确认完成', cancelButtonText: '取消', type: 'success',
+      })
+    } catch { return }
+  } else {
+    try {
+      const result = await ElMessageBox.prompt(`请输入驳回「${row.title}」完成申请的原因`, '驳回完成申请', {
+        confirmButtonText: '确认驳回', cancelButtonText: '取消', inputType: 'textarea',
+        inputValidator: (value) => !!String(value || '').trim() || '请填写驳回原因',
+      })
+      remark = result.value.trim()
+    } catch { return }
+  }
+  await bizApi.reviewTaskCompletion(row.id, approved, remark)
+  ElMessage.success(approved ? '任务已确认完成' : '完成申请已驳回')
+  await load()
+}
+
 function progressStatus(row: any) {
   if (row.status === 2) return 'success'
   if (row.overdue) return 'exception'
@@ -219,14 +234,10 @@ function progressStatus(row: any) {
 }
 
 onMounted(async () => {
-  projects.value = await bizApi.projectList()
-  users.value = await sysApi.userList()
+  projects.value = await bizApi.taskManagementProjects()
   shareCompanies.value = userStore.hasPermission('project:task:share')
     ? await companyTaskShareApi.options().catch(() => [])
     : []
-  if (query.participantId == null) {
-    query.participantId = currentUserId()
-  }
   const pid = route.query.projectId
   if (pid) {
     const num = Number(pid)
@@ -245,7 +256,9 @@ onMounted(async () => {
   <div class="page-stack">
     <div class="page-top">
       <div class="page-top__main">
-        <p class="page-desc">全局任务列表；项目内请用「看板」拖拽改状态、点卡片看详情与评论</p>
+        <p class="page-desc">
+          {{ isTaskManager ? '查看系统全部任务，并处理普通用户提交的完成申请。' : '查看本人负责或参与项目中的任务；项目内可用「看板」更新状态。' }}
+        </p>
       </div>
       <div class="page-actions">
         <el-button v-if="shareCompanies.length" v-permission="'project:task:share'" @click="shareOpen = true">今日工作外链</el-button>
@@ -303,11 +316,6 @@ onMounted(async () => {
           <el-option v-for="(label, value) in priorityMap" :key="value" :label="label" :value="Number(value)" />
         </el-select>
       </el-form-item>
-      <el-form-item label="参与人">
-        <el-select v-model="query.participantId" clearable filterable placeholder="全部" class="filter-select--wide">
-          <el-option v-for="u in users" :key="u.id" :label="u.nickname || u.username" :value="u.id" />
-        </el-select>
-      </el-form-item>
       <el-form-item class="filter-actions">
         <el-button type="primary" native-type="submit" :loading="listLoading">查询</el-button>
         <el-button @click="resetQuery">重置</el-button>
@@ -337,7 +345,29 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="进度" width="130">
           <template #default="{ row }">
-            <el-progress :percentage="row.progress ?? 0" :status="progressStatus(row)" :stroke-width="8" />
+            <div v-if="progressStatus(row) === 'warning'" class="task-progress">
+              <el-progress
+                class="task-progress__bar"
+                :percentage="row.progress ?? 0"
+                status="warning"
+                :stroke-width="8"
+                :show-text="false"
+              />
+              <span class="task-progress__status">
+                <el-tooltip v-if="!row.dueDate" content="当前任务暂未设置截至时间。" placement="top">
+                  <el-icon class="task-progress__warning-icon" aria-label="当前任务暂未设置截至时间。">
+                    <WarningFilled />
+                  </el-icon>
+                </el-tooltip>
+                <el-icon v-else class="task-progress__warning-icon"><WarningFilled /></el-icon>
+              </span>
+            </div>
+            <el-progress
+              v-else
+              :percentage="row.progress ?? 0"
+              :status="progressStatus(row)"
+              :stroke-width="8"
+            />
           </template>
         </el-table-column>
         <el-table-column label="状态" width="90" align="center">
@@ -354,9 +384,13 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100" fixed="right" align="center">
+        <el-table-column label="操作" :width="isTaskManager ? 220 : 100" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" @click="open(row)">详情</el-button>
+            <template v-if="isTaskManager && row.status === 4">
+              <el-button link type="success" @click="review(row, true)">确认完成</el-button>
+              <el-button link type="danger" @click="review(row, false)">驳回</el-button>
+            </template>
           </template>
         </el-table-column>
       </el-table>
@@ -461,6 +495,18 @@ onMounted(async () => {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 280px;
+}
+.task-progress { display: flex; align-items: center; }
+.task-progress__bar { flex: 1; }
+.task-progress__status {
+  min-width: 50px;
+  margin-left: 5px;
+  line-height: 1;
+}
+.task-progress__warning-icon {
+  display: block;
+  color: var(--el-color-warning);
+  cursor: help;
 }
 .task-date-range { font-size: 13px; color: var(--kk-text-secondary); }
 .date-sep { margin: 0 4px; color: var(--kk-text-muted); }

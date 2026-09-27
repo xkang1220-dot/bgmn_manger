@@ -36,6 +36,17 @@ public class TaskController {
                 taskService.pageTasks(page, pageSize, projectId, status, statuses, priority, participantId, title, overdue)));
     }
 
+    @GetMapping("/management/page")
+    @SaCheckPermission("project:task:list")
+    public Result<PageResult<PmTask>> managementPage(
+            @RequestParam(defaultValue = "1") long page,
+            @RequestParam(defaultValue = "10") long pageSize,
+            Long projectId, Integer status, String statuses,
+            Integer priority, Long participantId, String title, Boolean overdue) {
+        return Result.ok(PageResult.of(taskService.pageManagementTasks(
+                page, pageSize, projectId, status, statuses, priority, participantId, title, overdue)));
+    }
+
     @GetMapping("/board")
     @SaCheckPermission("project:task:list")
     public Result<List<PmTask>> board(@RequestParam Long projectId) {
@@ -47,6 +58,13 @@ public class TaskController {
     public Result<Map<String, Object>> summary(
             Long projectId, Integer priority, Long participantId, String title) {
         return Result.ok(taskService.summary(projectId, priority, participantId, title));
+    }
+
+    @GetMapping("/management/summary")
+    @SaCheckPermission("project:task:list")
+    public Result<Map<String, Object>> managementSummary(
+            Long projectId, Integer priority, Long participantId, String title) {
+        return Result.ok(taskService.managementSummary(projectId, priority, participantId, title));
     }
 
     /** 当前登录用户相关任务：参与或自己创建 */
@@ -79,6 +97,13 @@ public class TaskController {
     @SaCheckPermission("project:task:edit")
     public Result<Void> updateStatus(@PathVariable Long id, @RequestBody StatusRequest request) {
         taskService.updateStatus(id, request.getStatus(), request.getImageFileIds(), request.getRemark());
+        return Result.ok();
+    }
+
+    @PutMapping("/{id}/completion-review")
+    @SaCheckPermission("project:task:confirm")
+    public Result<Void> reviewCompletion(@PathVariable Long id, @RequestBody CompletionReviewRequest request) {
+        taskService.reviewCompletion(id, Boolean.TRUE.equals(request.getApproved()), request.getRemark());
         return Result.ok();
     }
 
@@ -128,7 +153,7 @@ public class TaskController {
     }
 
     @PutMapping("/{id}/transfer")
-    @SaCheckPermission(value = {"project:task:edit", "project:task:list"}, mode = SaMode.OR)
+    @SaCheckPermission("project:task:add")
     public Result<Void> transfer(@PathVariable Long id, @RequestBody TransferRequest request) {
         taskService.transfer(id, request.getAssigneeId(), request.getRemark(), request.getImageFileIds());
         return Result.ok();
@@ -145,6 +170,12 @@ public class TaskController {
     @Data
     public static class CommentRequest {
         private String content;
+    }
+
+    @Data
+    public static class CompletionReviewRequest {
+        private Boolean approved;
+        private String remark;
     }
 
     @Data

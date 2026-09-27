@@ -7,6 +7,7 @@ import com.kk.biz.entity.HrPayMethod;
 import com.kk.biz.service.HrArchiveService;
 import com.kk.common.result.PageResult;
 import com.kk.common.result.Result;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -25,7 +26,9 @@ public class HrArchiveController {
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long pageSize,
             String realName, String employeeNo) {
-        return Result.ok(PageResult.of(archiveService.pageArchives(page, pageSize, realName, employeeNo)));
+        Page<HrArchive> result = archiveService.pageArchives(page, pageSize, realName, employeeNo);
+        maskAttendanceIfNeeded(result.getRecords());
+        return Result.ok(PageResult.of(result));
     }
 
     /** 当前登录人可用的个人收款方式（申请工资/报销用） */
@@ -37,7 +40,9 @@ public class HrArchiveController {
     /** 当前登录人自己的员工档案 */
     @GetMapping("/mine")
     public Result<HrArchive> mine() {
-        return Result.ok(archiveService.getMine(StpUtil.getLoginIdAsLong()));
+        HrArchive archive = archiveService.getMine(StpUtil.getLoginIdAsLong());
+        archive.setAttendanceEnabled(null);
+        return Result.ok(archive);
     }
 
     /** 当前登录人保存自己的员工档案（同步到人事档案） */
@@ -50,7 +55,9 @@ public class HrArchiveController {
     @GetMapping("/{id}")
     @SaCheckPermission("hr:archive:list")
     public Result<HrArchive> get(@PathVariable Long id) {
-        return Result.ok(archiveService.getDetail(id));
+        HrArchive archive = archiveService.getDetail(id);
+        maskAttendanceIfNeeded(List.of(archive));
+        return Result.ok(archive);
     }
 
     @PostMapping
@@ -67,10 +74,25 @@ public class HrArchiveController {
         return Result.ok();
     }
 
+    @PutMapping("/{id}/attendance-enabled")
+    @SaCheckPermission("hr:attendance:edit")
+    public Result<Void> setAttendanceEnabled(@PathVariable Long id, @RequestBody AttendanceEnabledBody body) {
+        archiveService.setAttendanceEnabled(id, body.enabled());
+        return Result.ok();
+    }
+
     @DeleteMapping("/{id}")
     @SaCheckPermission("hr:archive:remove")
     public Result<Void> delete(@PathVariable Long id) {
         archiveService.deleteArchive(id);
         return Result.ok();
     }
+
+    private void maskAttendanceIfNeeded(List<HrArchive> archives) {
+        if (!StpUtil.hasPermission("hr:attendance:edit")) {
+            archives.forEach(archive -> archive.setAttendanceEnabled(null));
+        }
+    }
+
+    public record AttendanceEnabledBody(Integer enabled) {}
 }

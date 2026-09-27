@@ -7,6 +7,7 @@ import com.kk.biz.dto.ApprovalSubmitRequest;
 import com.kk.biz.entity.HrLeaveRecord;
 import com.kk.biz.entity.WfApproval;
 import com.kk.biz.mapper.HrLeaveRecordMapper;
+import com.kk.biz.mapper.HrArchiveMapper;
 import com.kk.biz.mapper.WfApprovalMapper;
 import com.kk.biz.service.HrLeaveService;
 import com.kk.biz.service.WfApprovalService;
@@ -31,6 +32,7 @@ import java.time.temporal.IsoFields;
 import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -46,6 +48,7 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
 
     private final DataScopeService dataScopeService;
     private final SysUserService userService;
+    private final HrArchiveMapper archiveMapper;
     private final SysDeptService deptService;
     private final WfApprovalMapper approvalMapper;
     @Lazy
@@ -102,7 +105,6 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
         long loginId = StpUtil.getLoginIdAsLong();
         LambdaQueryWrapper<HrLeaveRecord> q = new LambdaQueryWrapper<HrLeaveRecord>()
                 .eq(HrLeaveRecord::getUserId, loginId)
-                .eq(companyId != null, HrLeaveRecord::getCompanyId, companyId)
                 .ge(start != null, HrLeaveRecord::getLeaveDate, start)
                 .le(end != null, HrLeaveRecord::getLeaveDate, end)
                 .orderByDesc(HrLeaveRecord::getLeaveDate);
@@ -112,14 +114,13 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
     }
 
     @Override
-    public List<HrLeaveRecord> listByCompany(Long companyId, LocalDate start, LocalDate end) {
-        long loginId = StpUtil.getLoginIdAsLong();
-        if (companyId == null) {
-            throw new BusinessException("请选择公司");
+    public List<HrLeaveRecord> listAttendance(LocalDate start, LocalDate end) {
+        Set<Long> attendanceUserIds = attendanceUserIds();
+        if (attendanceUserIds.isEmpty()) {
+            return List.of();
         }
-        assertCompanyVisible(loginId, companyId);
         LambdaQueryWrapper<HrLeaveRecord> q = new LambdaQueryWrapper<HrLeaveRecord>()
-                .eq(HrLeaveRecord::getCompanyId, companyId)
+                .in(HrLeaveRecord::getUserId, attendanceUserIds)
                 .ge(start != null, HrLeaveRecord::getLeaveDate, start)
                 .le(end != null, HrLeaveRecord::getLeaveDate, end)
                 .orderByDesc(HrLeaveRecord::getLeaveDate)
@@ -127,6 +128,137 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
         List<HrLeaveRecord> list = list(q);
         fillNames(list);
         return list;
+    }
+
+    @Override
+    public List<Map<String, Object>> listAttendanceUsers() {
+        Set<Long> attendanceUserIds = attendanceUserIds();
+        if (attendanceUserIds.isEmpty()) {
+            return List.of();
+        }
+        return userService.list(new LambdaQueryWrapper<com.kk.system.entity.SysUser>()
+                        .in(com.kk.system.entity.SysUser::getId, attendanceUserIds)
+                        .eq(com.kk.system.entity.SysUser::getStatus, 1)
+                        .orderByAsc(com.kk.system.entity.SysUser::getNickname)
+                        .orderByAsc(com.kk.system.entity.SysUser::getUsername))
+                .stream().map(u -> {
+                    Map<String, Object> row = new HashMap<>();
+                    row.put("id", u.getId());
+                    row.put("name", StringUtils.hasText(u.getNickname()) ? u.getNickname() : u.getUsername());
+                    row.put("username", u.getUsername());
+                    return row;
+                }).toList();
+    }
+
+    @Override
+    public Map<String, Object> monthlyAttendanceDetail(String month) {
+        YearMonth yearMonth;
+        try {
+            yearMonth = YearMonth.parse(month, YM);
+        } catch (Exception e) {
+            throw new BusinessException("月份格式应为 yyyy-MM");
+        }
+        LocalDate start = yearMonth.atDay(1);
+        LocalDate end = yearMonth.atEndOfMonth();
+        Set<Long> attendanceUserIds = attendanceUserIds();
+        if (attendanceUserIds.isEmpty()) {
+            Map<String, Object> empty = new LinkedHashMap<>();
+            empty.put("month", yearMonth.toString());
+            empty.put("workdayCount", yearMonth.lengthOfMonth());
+            empty.put("employees", List.of());
+            return empty;
+        }
+        List<com.kk.system.entity.SysUser> enabledUsers = userService.list(
+                new LambdaQueryWrapper<com.kk.system.entity.SysUser>()
+                        .in(com.kk.system.entity.SysUser::getId, attendanceUserIds)
+                        .eq(com.kk.system.entity.SysUser::getStatus, 1)
+                        .orderByAsc(com.kk.system.entity.SysUser::getNickname)
+                        .orderByAsc(com.kk.system.entity.SysUser::getUsername));
+        List<HrLeaveRecord> absences = list(new LambdaQueryWrapper<HrLeaveRecord>()
+                .ge(HrLeaveRecord::getLeaveDate, start)
+                .le(HrLeaveRecord::getLeaveDate, end)
+                .orderByAsc(HrLeaveRecord::getLeaveDate));
+        Map<Long, Map<LocalDate, HrLeaveRecord>> absenceByUser = absences.stream()
+                .filter(row -> row.getUserId() != null && row.getLeaveDate() != null)
+                .collect(Collectors.groupingBy(HrLeaveRecord::getUserId,
+                        Collectors.toMap(HrLeaveRecord::getLeaveDate, row -> row, (left, right) -> left)));
+        Set<Long> operatorIds = absences.stream().map(HrLeaveRecord::getCreateBy)
+                .filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<Long, String> operatorNames = new HashMap<>();
+        if (!operatorIds.isEmpty()) {
+            userService.listByIds(operatorIds).forEach(user -> operatorNames.put(user.getId(),
+                    StringUtils.hasText(user.getNickname()) ? user.getNickname() : user.getUsername()));
+        }
+        int workdayCount = yearMonth.lengthOfMonth();
+        List<Map<String, Object>> employees = new ArrayList<>();
+        for (com.kk.system.entity.SysUser user : enabledUsers) {
+            Map<LocalDate, HrLeaveRecord> userAbsences = absenceByUser.getOrDefault(user.getId(), Map.of());
+            List<Map<String, Object>> days = new ArrayList<>();
+            List<String> absentDates = new ArrayList<>();
+            int absentWorkdays = 0;
+            for (LocalDate date = start; !date.isAfter(end); date = date.plusDays(1)) {
+                HrLeaveRecord absence = userAbsences.get(date);
+                boolean workday = true;
+                if (absence != null) {
+                    absentDates.add(date.toString());
+                    if (workday) absentWorkdays++;
+                }
+                Map<String, Object> day = new LinkedHashMap<>();
+                day.put("date", date.toString());
+                day.put("weekday", "星期" + "一二三四五六日".charAt(date.getDayOfWeek().getValue() - 1));
+                day.put("workday", workday);
+                day.put("status", absence == null ? "PRESENT" : "ABSENT");
+                day.put("reason", absence == null ? null : absence.getReason());
+                day.put("operatorName", absence == null ? null : operatorNames.get(absence.getCreateBy()));
+                day.put("registeredAt", absence == null ? null : absence.getCreateTime());
+                days.add(day);
+            }
+            Map<String, Object> employee = new LinkedHashMap<>();
+            employee.put("userId", user.getId());
+            employee.put("employeeName", StringUtils.hasText(user.getNickname()) ? user.getNickname() : user.getUsername());
+            employee.put("username", user.getUsername());
+            employee.put("expectedDays", workdayCount);
+            employee.put("presentDays", Math.max(0, workdayCount - absentWorkdays));
+            employee.put("absentDays", absentWorkdays);
+            employee.put("attendanceRate", workdayCount == 0 ? 100D
+                    : Math.round((workdayCount - absentWorkdays) * 10000D / workdayCount) / 100D);
+            employee.put("absentDates", absentDates);
+            employee.put("days", days);
+            employees.add(employee);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("month", yearMonth.toString());
+        result.put("workdayCount", workdayCount);
+        result.put("employees", employees);
+        return result;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void setAbsentUsers(LocalDate leaveDate, List<Long> userIds) {
+        if (leaveDate == null) {
+            throw new BusinessException("请选择日期");
+        }
+        Set<Long> attendanceUserIds = attendanceUserIds();
+        Set<Long> enabledUsers = attendanceUserIds.isEmpty() ? Set.of() : userService.list(new LambdaQueryWrapper<com.kk.system.entity.SysUser>()
+                        .select(com.kk.system.entity.SysUser::getId)
+                        .in(com.kk.system.entity.SysUser::getId, attendanceUserIds)
+                        .eq(com.kk.system.entity.SysUser::getStatus, 1))
+                .stream().map(com.kk.system.entity.SysUser::getId).collect(Collectors.toSet());
+        Set<Long> selected = userIds == null ? Set.of() : userIds.stream()
+                .filter(Objects::nonNull).collect(Collectors.toSet());
+        if (!enabledUsers.containsAll(selected)) {
+            throw new BusinessException("所选员工不存在或已停用");
+        }
+        baseMapper.deleteAttendanceDay(leaveDate);
+        for (Long userId : selected) {
+            HrLeaveRecord row = new HrLeaveRecord();
+            row.setCompanyId(0L);
+            row.setUserId(userId);
+            row.setLeaveDate(leaveDate);
+            row.setReason("考勤管理员登记未出勤");
+            save(row);
+        }
     }
 
     @Override
@@ -142,7 +274,6 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
         }
         return list(new LambdaQueryWrapper<HrLeaveRecord>()
                 .eq(HrLeaveRecord::getUserId, userId)
-                .eq(companyId != null, HrLeaveRecord::getCompanyId, companyId)
                 .ge(HrLeaveRecord::getLeaveDate, range[0])
                 .le(HrLeaveRecord::getLeaveDate, range[1])
                 .orderByAsc(HrLeaveRecord::getLeaveDate))
@@ -237,6 +368,14 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
             return LocalDate.parse(text.substring(0, 10));
         }
         return LocalDate.parse(text);
+    }
+
+    private Set<Long> attendanceUserIds() {
+        return archiveMapper.selectList(new LambdaQueryWrapper<com.kk.biz.entity.HrArchive>()
+                        .select(com.kk.biz.entity.HrArchive::getUserId)
+                        .eq(com.kk.biz.entity.HrArchive::getAttendanceEnabled, 1))
+                .stream().map(com.kk.biz.entity.HrArchive::getUserId)
+                .filter(Objects::nonNull).collect(Collectors.toSet());
     }
 
     public static LocalDate[] periodRange(String periodKey) {

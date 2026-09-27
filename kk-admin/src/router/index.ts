@@ -43,7 +43,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'hr/asset', component: () => import('@/views/hr/asset.vue'), meta: { title: '资产台账' } },
       { path: 'hr/salary', component: () => import('@/views/hr/salary.vue'), meta: { title: '工资配置' } },
       { path: 'hr/salary-run', component: () => import('@/views/hr/salary-run.vue'), meta: { title: '发薪记录' } },
-      { path: 'hr/attendance', component: () => import('@/views/hr/attendance.vue'), meta: { title: '考勤一览' } },
+      { path: 'hr/attendance', component: () => import('@/views/hr/attendance.vue'), meta: { title: '考勤一览', permission: 'hr:attendance:list' } },
       { path: 'file/list', component: () => import('@/views/file/list.vue'), meta: { title: '文件管理' } },
       { path: 'system/user', component: () => import('@/views/system/user/index.vue'), meta: { title: '账号管理' } },
       { path: 'system/role', component: () => import('@/views/system/role/index.vue'), meta: { title: '角色权限' } },
@@ -59,6 +59,12 @@ const routes: RouteRecordRaw[] = [
       { path: 'account/projects', redirect: '/account' },
       { path: 'account/calendar', redirect: '/account' },
     ],
+  },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'not-found',
+    component: () => import('@/views/error/404.vue'),
+    meta: { title: '页面不存在', requiresAuth: false },
   },
 ]
 
@@ -83,6 +89,8 @@ router.beforeEach(async (to) => {
       return '/login'
     }
   }
+  const permission = to.meta.permission as string | undefined
+  if (permission && !userStore.hasPermission(permission)) return '/account'
   return true
 })
 

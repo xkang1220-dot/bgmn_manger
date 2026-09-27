@@ -2380,7 +2380,7 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
             validateDirectPayoutSubmit(request, applicantId);
         }
         if (ApprovalTypes.LEAVE_APPLY.equals(type)) {
-            validateLeaveApplySubmit(request, applicantId);
+            throw new BusinessException("员工请假申请功能已停用，请由考勤管理员登记未出勤");
         }
         if (ApprovalTypes.REIMBURSE_PERSONAL.equals(type)
                 || ApprovalTypes.REIMBURSE_PROJECT.equals(type)) {

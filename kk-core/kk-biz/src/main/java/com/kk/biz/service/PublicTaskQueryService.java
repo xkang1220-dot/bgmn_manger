@@ -24,7 +24,8 @@ public class PublicTaskQueryService {
             0, "待办",
             1, "进行中",
             2, "已完成",
-            3, "已关闭"
+            3, "已关闭",
+            4, "待确认完成"
     );
 
     private final SysUserService userService;

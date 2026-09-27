@@ -112,6 +112,46 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         return list;
     }
 
+    @Override
+    public List<PmProject> listTaskManagementOptions() {
+        long userId = StpUtil.getLoginIdAsLong();
+        LambdaQueryWrapper<PmProject> wrapper = new LambdaQueryWrapper<PmProject>()
+                .and(w -> w.isNull(PmProject::getApproveStatus).or().eq(PmProject::getApproveStatus, 1));
+        if (!dataScopeService.isGlobalAdmin(userId) && !StpUtil.hasPermission("project:task:confirm")) {
+            Set<Long> projectIds = memberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
+                            .eq(PmProjectMember::getUserId, userId)
+                            .select(PmProjectMember::getProjectId))
+                    .stream()
+                    .map(PmProjectMember::getProjectId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+            list(new LambdaQueryWrapper<PmProject>()
+                            .eq(PmProject::getOwnerId, userId)
+                            .select(PmProject::getId))
+                    .stream()
+                    .map(PmProject::getId)
+                    .filter(Objects::nonNull)
+                    .forEach(projectIds::add);
+            if (!projectIds.isEmpty()) {
+                List<PmProject> related = list(new LambdaQueryWrapper<PmProject>()
+                        .and(w -> w.in(PmProject::getId, projectIds).or().in(PmProject::getParentId, projectIds))
+                        .select(PmProject::getId, PmProject::getParentId));
+                related.stream().map(PmProject::getId).filter(Objects::nonNull).forEach(projectIds::add);
+                related.stream().map(PmProject::getParentId).filter(Objects::nonNull).forEach(projectIds::add);
+            }
+            if (projectIds.isEmpty()) {
+                wrapper.eq(PmProject::getId, -1L);
+            } else {
+                wrapper.in(PmProject::getId, projectIds);
+            }
+        }
+        wrapper.orderByDesc(PmProject::getId);
+        List<PmProject> projects = list(wrapper);
+        fillExtras(projects);
+        projects.forEach(this::maskFinanceFields);
+        return projects;
+    }
+
     /** 下拉可选：含小项目（任务/配薪等）；重大外壳仍返回，由调用方过滤 */
     private List<PmProject> listSelectable(Long userId) {
         if (userId == null) {

@@ -49,6 +49,12 @@ public class ProjectController {
         return Result.ok(financePick ? projectService.listApproved() : projectService.listVisible());
     }
 
+    @GetMapping("/task-options")
+    @SaCheckPermission("project:task:list")
+    public Result<List<PmProject>> taskOptions() {
+        return Result.ok(projectService.listTaskManagementOptions());
+    }
+
     /** 个人中心：只返回当前用户负责或参与的项目 */
     @GetMapping("/mine")
     public Result<List<PmProject>> mine() {

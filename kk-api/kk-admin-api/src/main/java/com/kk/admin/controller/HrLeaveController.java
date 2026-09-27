@@ -1,7 +1,6 @@
 package com.kk.admin.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
-import cn.dev33.satoken.annotation.SaMode;
 import com.kk.biz.entity.HrLeaveRecord;
 import com.kk.biz.service.HrLeaveService;
 import com.kk.common.result.Result;
@@ -20,18 +19,8 @@ public class HrLeaveController {
 
     private final HrLeaveService leaveService;
 
-    @PostMapping("/mine")
-    @SaCheckPermission("hr:leave:submit")
-    public Result<Map<String, Object>> submitMine(@RequestBody Map<String, Object> body) {
-        Long companyId = body.get("companyId") == null ? null : Long.valueOf(String.valueOf(body.get("companyId")));
-        LocalDate start = parseDate(body.get("startDate"));
-        LocalDate end = parseDate(body.get("endDate"));
-        String reason = body.get("reason") == null ? null : String.valueOf(body.get("reason"));
-        return Result.ok(leaveService.submitMine(companyId, start, end, reason));
-    }
-
     @GetMapping("/mine")
-    @SaCheckPermission(value = {"hr:leave:mine", "hr:leave:submit"}, mode = SaMode.OR)
+    @SaCheckPermission("hr:leave:mine")
     public Result<List<HrLeaveRecord>> mine(
             @RequestParam(required = false) Long companyId,
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate start,
@@ -39,13 +28,36 @@ public class HrLeaveController {
         return Result.ok(leaveService.listMine(companyId, start, end));
     }
 
-    @GetMapping("/company")
+    @GetMapping("/attendance")
     @SaCheckPermission("hr:attendance:list")
-    public Result<List<HrLeaveRecord>> company(
-            @RequestParam Long companyId,
+    public Result<List<HrLeaveRecord>> attendance(
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate start,
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate end) {
-        return Result.ok(leaveService.listByCompany(companyId, start, end));
+        return Result.ok(leaveService.listAttendance(start, end));
+    }
+
+    @GetMapping("/attendance-users")
+    @SaCheckPermission("hr:attendance:list")
+    public Result<List<Map<String, Object>>> attendanceUsers() {
+        return Result.ok(leaveService.listAttendanceUsers());
+    }
+
+    @GetMapping("/attendance-monthly-detail")
+    @SaCheckPermission("hr:attendance:list")
+    public Result<Map<String, Object>> attendanceMonthlyDetail(@RequestParam String month) {
+        return Result.ok(leaveService.monthlyAttendanceDetail(month));
+    }
+
+    @PutMapping("/attendance-day")
+    @SaCheckPermission("hr:attendance:edit")
+    public Result<Void> setAttendanceDay(@RequestBody Map<String, Object> body) {
+        LocalDate date = parseDate(body.get("date"));
+        Object raw = body.get("userIds");
+        List<Long> userIds = raw instanceof List<?> values
+                ? values.stream().map(v -> Long.valueOf(String.valueOf(v))).toList()
+                : List.of();
+        leaveService.setAbsentUsers(date, userIds);
+        return Result.ok();
     }
 
     private LocalDate parseDate(Object raw) {

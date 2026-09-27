@@ -43,6 +43,9 @@ public class HrArchive extends BaseEntity {
 
     private String remark;
 
+    /** 是否纳入考勤（0否 1是） */
+    private Integer attendanceEnabled;
+
     @TableField(exist = false)
     private String username;
 

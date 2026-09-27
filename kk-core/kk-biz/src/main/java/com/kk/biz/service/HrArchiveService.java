@@ -17,6 +17,8 @@ public interface HrArchiveService extends IService<HrArchive> {
 
     void updateArchive(HrArchive archive);
 
+    void setAttendanceEnabled(Long id, Integer enabled);
+
     void deleteArchive(Long id);
 
     HrArchive getByUserId(Long userId);

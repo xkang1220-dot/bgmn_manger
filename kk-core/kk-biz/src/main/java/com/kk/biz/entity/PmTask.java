@@ -28,7 +28,7 @@ public class PmTask extends BaseEntity {
 
     private String content;
 
-    /** 0待办 1进行中 2已完成 3已关闭 */
+    /** 0待办 1进行中 2已完成 3已关闭 4待确认完成 */
     private Integer status;
 
     /** 1高 2中 3低 */

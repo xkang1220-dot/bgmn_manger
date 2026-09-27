@@ -69,13 +69,14 @@ const form = reactive<any>({
   imageFileIds: [] as number[],
 })
 
-const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭' }
+const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭', 4: '待确认完成' }
 const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
 const statusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'> = {
   0: 'info',
   1: 'warning',
   2: 'success',
   3: 'info',
+  4: 'warning',
 }
 
 function emptyForm() {
@@ -632,7 +633,7 @@ function canDeleteComment(c: any) {
             @click="editing = true"
           >编辑</el-button>
           <el-button
-            v-if="userStore.hasPermission('project:task:edit') && detail.canTransfer && detail.status !== 3"
+            v-if="userStore.hasPermission('project:task:add') && detail.canTransfer && detail.status !== 3"
             @click="openTransfer"
           >移交</el-button>
           <el-button
@@ -733,7 +734,7 @@ function canDeleteComment(c: any) {
             />
           </el-form-item>
           <el-form-item label="参与人员">
-            <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="仅可选项目负责人/参与人" style="width: 100%" :disabled="!form.projectId">
+            <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="仅可选项目负责人/参与人" style="width: 100%" :disabled="!form.projectId || (!isNew && !userStore.hasPermission('project:task:add'))">
               <el-option v-for="u in candidateUsers" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
             </el-select>
           </el-form-item>
@@ -748,7 +749,7 @@ function canDeleteComment(c: any) {
             <el-select v-model="form.status" style="width: 100%" @change="onStatusChange">
               <el-option :value="0" label="待办" />
               <el-option :value="1" label="进行中" />
-              <el-option :value="2" label="已完成" />
+              <el-option :value="2" :label="userStore.hasPermission('project:task:confirm') ? '已完成' : '提交完成'" />
             </el-select>
           </el-form-item>
           <el-form-item label="开始日期">

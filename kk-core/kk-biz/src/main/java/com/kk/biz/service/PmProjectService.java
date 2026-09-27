@@ -18,6 +18,9 @@ public interface PmProjectService extends IService<PmProject> {
     /** 财务选项目：返回全部已生效项目（不含待审；含小项目） */
     java.util.List<PmProject> listApproved();
 
+    /** 任务管理页项目下拉：普通用户仅本人负责/参与项目，任务管理员和超管不限制。 */
+    java.util.List<PmProject> listTaskManagementOptions();
+
     /** 重大项目下的未删小项目 */
     java.util.List<PmProject> listChildren(Long parentId);
 

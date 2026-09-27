@@ -90,17 +90,6 @@ const taskScope = ref<'mine' | 'all'>('mine')
 let taskLoadSeq = 0
 let leaveLoadSeq = 0
 
-const leaveDialog = ref(false)
-const leaveSubmitting = ref(false)
-const leaveForm = reactive({
-  companyId: undefined as number | undefined,
-  range: [] as string[],
-  reason: '',
-})
-const leaveCompanies = ref<any[]>([])
-
-/** 提交请假：角色权限里勾选「提交请假」 */
-const canSubmitLeave = computed(() => userStore.hasPermission('hr:leave:submit'))
 /** 日历考勤标记：角色权限里勾选「查看考勤」 */
 const canViewLeave = computed(() => userStore.hasPermission('hr:leave:mine'))
 
@@ -840,53 +829,6 @@ async function loadLeaves() {
   }
 }
 
-async function openLeaveDialog() {
-  if (!canSubmitLeave.value) {
-    ElMessage.warning('暂无请假权限')
-    return
-  }
-  try {
-    leaveCompanies.value = await sysApi.myCompanies()
-  } catch {
-    leaveCompanies.value = []
-  }
-  if (!leaveForm.companyId && leaveCompanies.value.length) {
-    leaveForm.companyId = leaveCompanies.value[0].id
-  }
-  leaveForm.range = []
-  leaveForm.reason = ''
-  leaveDialog.value = true
-}
-
-async function submitLeave() {
-  if (!leaveForm.companyId) {
-    ElMessage.warning('请选择公司')
-    return
-  }
-  if (!leaveForm.range?.length || leaveForm.range.length < 2) {
-    ElMessage.warning('请选择请假起止日期')
-    return
-  }
-  if (!String(leaveForm.reason || '').trim()) {
-    ElMessage.warning('请填写请假事由')
-    return
-  }
-  leaveSubmitting.value = true
-  try {
-    const res = await bizApi.submitLeave({
-      companyId: leaveForm.companyId,
-      startDate: leaveForm.range[0],
-      endDate: leaveForm.range[1],
-      reason: String(leaveForm.reason).trim(),
-    })
-    ElMessage.success(approvalFlowTip(res))
-    leaveDialog.value = false
-    await Promise.all([loadLeaves(), loadApprovals()])
-  } finally {
-    leaveSubmitting.value = false
-  }
-}
-
 async function loadProjects() {
   try {
     myProjects.value = (await bizApi.myProjects()) || []
@@ -941,7 +883,6 @@ watch(
         <p class="welcome-desc">先看待办和余额，再按需查流水或进对应模块处理</p>
       </div>
       <div class="page-actions">
-        <el-button v-if="canSubmitLeave" @click="openLeaveDialog">请假</el-button>
         <el-button v-if="!canSeeWallet" type="primary" @click="openReimburse">去发起报销</el-button>
       </div>
     </div>
@@ -1177,7 +1118,6 @@ watch(
             <el-radio-button value="mine">我的</el-radio-button>
             <el-radio-button value="all">全部</el-radio-button>
           </el-radio-group>
-          <el-button v-if="canSubmitLeave" @click="openLeaveDialog">请假</el-button>
           <el-button
             v-if="userStore.hasPermission('project:task:list')"
             plain
@@ -1332,34 +1272,6 @@ watch(
         <div v-if="!myProjects.length" class="empty">{{ seeAllProjects ? '暂无项目' : '暂无参与项目' }}</div>
       </section>
     </div>
-
-    <el-dialog v-model="leaveDialog" title="提交请假" width="480px">
-      <p class="sec-tip" style="margin-top: 0">默认全勤；审批通过后记入考勤，财务发薪时可手工扣款。</p>
-      <el-form label-width="88px">
-        <el-form-item label="所属公司" required>
-          <el-select v-model="leaveForm.companyId" filterable style="width: 100%">
-            <el-option v-for="c in leaveCompanies" :key="c.id" :label="c.name" :value="c.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="请假日期" required>
-          <el-date-picker
-            v-model="leaveForm.range"
-            type="daterange"
-            value-format="YYYY-MM-DD"
-            start-placeholder="开始"
-            end-placeholder="结束"
-            style="width: 100%"
-          />
-        </el-form-item>
-        <el-form-item label="事由" required>
-          <el-input v-model="leaveForm.reason" type="textarea" :rows="3" maxlength="500" show-word-limit />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="leaveDialog = false">取消</el-button>
-        <el-button type="primary" :loading="leaveSubmitting" @click="submitLeave">提交审批</el-button>
-      </template>
-    </el-dialog>
 
     <el-dialog v-model="reimburseDialog" title="个人报销" width="480px" @closed="voucherFiles = []">
       <p class="sec-tip" style="margin: 0 0 12px">财务回执并由你确认到账后，只从公司总账扣款；个人钱包余额不变。收款方式用于线下打款。</p>

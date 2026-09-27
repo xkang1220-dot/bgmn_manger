@@ -14,8 +14,17 @@ public interface HrLeaveService {
     /** 我的请假记录 */
     List<HrLeaveRecord> listMine(Long companyId, LocalDate start, LocalDate end);
 
-    /** 公司考勤一览（请假日） */
-    List<HrLeaveRecord> listByCompany(Long companyId, LocalDate start, LocalDate end);
+    /** 全局考勤一览（未出勤日） */
+    List<HrLeaveRecord> listAttendance(LocalDate start, LocalDate end);
+
+    /** 考勤管理员可维护的全部启用员工 */
+    List<Map<String, Object>> listAttendanceUsers();
+
+    /** 全局员工月度考勤汇总及逐日明细（自然日均计入应出勤） */
+    Map<String, Object> monthlyAttendanceDetail(String month);
+
+    /** 按天覆盖未出勤员工；空列表表示恢复为全勤 */
+    void setAbsentUsers(LocalDate leaveDate, List<Long> userIds);
 
     /** 指定周期内请假天数（月薪：上月21日至本月20日；周薪：ISO 周一至周日） */
     int countLeaveDays(Long companyId, Long userId, String periodKey);

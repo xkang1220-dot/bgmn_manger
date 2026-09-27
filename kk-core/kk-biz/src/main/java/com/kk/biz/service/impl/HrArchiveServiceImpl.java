@@ -65,6 +65,7 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
         if (getByUserId(archive.getUserId()) != null) {
             throw new BusinessException("该账号已有档案");
         }
+        archive.setAttendanceEnabled(0);
         save(archive);
         walletService.getOrCreate(archive.getUserId());
         syncPayMethods(archive.getId(), archive.getPayMethods());
@@ -76,13 +77,26 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
         if (archive.getId() == null) {
             throw new BusinessException("档案 ID 不能为空");
         }
-        if (getById(archive.getId()) == null) {
+        HrArchive existing = getById(archive.getId());
+        if (existing == null) {
             throw new BusinessException("档案不存在");
         }
+        // 普通档案编辑接口不得修改考勤开关，必须走考勤管理员专用接口。
+        archive.setAttendanceEnabled(existing.getAttendanceEnabled());
         updateById(archive);
         if (archive.getPayMethods() != null) {
             syncPayMethods(archive.getId(), archive.getPayMethods());
         }
+    }
+
+    @Override
+    public void setAttendanceEnabled(Long id, Integer enabled) {
+        if (id == null || getById(id) == null) {
+            throw new BusinessException("档案不存在");
+        }
+        lambdaUpdate().eq(HrArchive::getId, id)
+                .set(HrArchive::getAttendanceEnabled, Objects.equals(enabled, 1) ? 1 : 0)
+                .update();
     }
 
     @Override
