@@ -16,7 +16,6 @@ public class PublicTaskItem {
     private Integer priority;
     private LocalDate startDate;
     private LocalDate dueDate;
-    private Integer progress;
     private String projectName;
     private String assigneeName;
     private List<String> participantNames;

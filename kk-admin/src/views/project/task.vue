@@ -29,7 +29,7 @@ const query = reactive({
 
 const list = ref<any[]>([])
 const total = ref(0)
-const summary = ref<Record<string, number>>({})
+const summary = ref<any>({})
 const projects = ref<any[]>([])
 const taskDrawer = ref(false)
 const activeTaskId = ref<number | null>(null)
@@ -94,36 +94,49 @@ const statusFilterKey = computed({
 })
 
 const statCards = [
-  { key: 'todo', label: '待办', icon: 'Clock', tone: 'slate' },
-  { key: 'doing', label: '进行中', icon: 'Loading', tone: 'amber' },
-  { key: 'done', label: '已完成', icon: 'CircleCheck', tone: 'cyan' },
-  { key: 'overdue', label: '已逾期', icon: 'Warning', tone: 'rose' },
-  { key: 'total', label: '全部任务', icon: 'Tickets', tone: 'indigo' },
+  { key: 'riskProjects', label: '风险项目', hint: '需要负责人介入', icon: 'DataAnalysis', tone: 'rose' },
+  { key: 'overdue', label: '已逾期', hint: '必须立即处理', icon: 'Warning', tone: 'rose' },
+  { key: 'dueSoon', label: '7天内到期', hint: '提前确认交付', icon: 'Timer', tone: 'amber' },
+  { key: 'pending', label: '待确认完成', hint: '等待管理确认', icon: 'CircleCheck', tone: 'cyan' },
+  { key: 'done30', label: '近30天完成', hint: '近期交付结果', icon: 'TrendCharts', tone: 'indigo' },
 ]
 
 function isStatActive(key: string) {
   if (key === 'overdue') return !!query.overdue
-  if (key === 'todo') return query.status === 0 && !query.overdue
-  if (key === 'doing') return query.status === 1 && !query.overdue
-  if (key === 'done') return query.status === 2 && !query.overdue
-  if (key === 'total') return !query.overdue && query.status == null && !query.statuses?.length
+  if (key === 'pending') return query.status === 4 && !query.overdue
   return false
 }
 
 function onStatClick(key: string) {
-  if (key === 'total') {
-    query.status = undefined
-    query.statuses = undefined
-    query.overdue = undefined
-    query.page = 1
-    load()
-    return
-  }
   if (key === 'overdue') {
     filterOverdue()
     return
   }
-  filterByStatus(key === 'todo' ? 0 : key === 'doing' ? 1 : 2)
+  if (key === 'pending') filterByStatus(4)
+}
+
+const riskTypeMap: Record<string, { label: string; type: 'danger' | 'warning' | 'info' | 'success' }> = {
+  BLOCKED: { label: '已阻塞', type: 'danger' },
+  OVERDUE: { label: '已逾期', type: 'danger' },
+  DUE_SOON: { label: '即将到期', type: 'warning' },
+  STALE: { label: '长期未更新', type: 'warning' },
+  NO_DUE_DATE: { label: '未设截止时间', type: 'info' },
+  PENDING: { label: '待确认', type: 'success' },
+}
+
+const maxTrend = computed(() => Math.max(1, ...(summary.value.trend || []).flatMap((item: any) => [item.created || 0, item.completed || 0])))
+const maxOwnerLoad = computed(() => Math.max(1, ...(summary.value.ownerLoad || []).map((item: any) => item.open || 0)))
+
+const healthMap: Record<string, { label: string; type: 'danger' | 'warning' | 'success' }> = {
+  DANGER: { label: '危险', type: 'danger' },
+  WARNING: { label: '预警', type: 'warning' },
+  HEALTHY: { label: '健康', type: 'success' },
+}
+
+function selectProject(projectId: number) {
+  query.projectId = projectId
+  query.page = 1
+  load()
 }
 
 async function loadSummary() {
@@ -136,7 +149,7 @@ async function loadSummary() {
   if (query.projectId != null) params.projectId = query.projectId
   if (query.priority != null) params.priority = query.priority
   if (query.title.trim()) params.title = query.title.trim()
-  summary.value = await bizApi.managementTaskSummary(params)
+  summary.value = await bizApi.managementTaskDashboard(params)
 }
 
 async function load() {
@@ -226,13 +239,6 @@ async function review(row: any, approved: boolean) {
   await load()
 }
 
-function progressStatus(row: any) {
-  if (row.status === 2) return 'success'
-  if (row.overdue) return 'exception'
-  if (row.progress >= 80) return 'warning'
-  return undefined
-}
-
 onMounted(async () => {
   projects.value = await bizApi.taskManagementProjects()
   shareCompanies.value = userStore.hasPermission('project:task:share')
@@ -256,8 +262,9 @@ onMounted(async () => {
   <div class="page-stack">
     <div class="page-top">
       <div class="page-top__main">
+        <h2 class="page-title">交付管理驾驶舱</h2>
         <p class="page-desc">
-          {{ isTaskManager ? '查看系统全部任务，并处理普通用户提交的完成申请。' : '查看本人负责或参与项目中的任务；项目内可用「看板」更新状态。' }}
+          {{ isTaskManager ? '先处理风险和待确认事项，再下钻项目与具体任务。' : '聚焦本人负责或参与项目的交付风险与近期任务。' }}
         </p>
       </div>
       <div class="page-actions">
@@ -278,9 +285,107 @@ onMounted(async () => {
         <div class="stat-body">
           <div class="stat-label">{{ card.label }}</div>
           <div class="stat-value">{{ summary[card.key] ?? 0 }}</div>
+          <div class="stat-hint">{{ card.hint }}</div>
         </div>
         <el-icon class="stat-glyph" :size="44"><component :is="card.icon" /></el-icon>
       </button>
+    </div>
+
+    <div class="management-grid">
+      <section class="page-card action-center">
+        <div class="section-head">
+          <div>
+            <h3>风险行动中心</h3>
+            <p>按影响程度排序，优先处理可能影响交付的事项</p>
+          </div>
+          <div class="risk-badges">
+            <span>无截止 {{ summary.noDueDate ?? 0 }}</span>
+            <span>停滞 {{ summary.stale ?? 0 }}</span>
+          </div>
+        </div>
+        <div v-if="summary.riskTasks?.length" class="risk-list">
+          <button v-for="item in summary.riskTasks" :key="item.id" type="button" class="risk-row" @click="open(item)">
+            <el-tag :type="riskTypeMap[item.riskType]?.type || 'info'" size="small">
+              {{ riskTypeMap[item.riskType]?.label || '关注' }}
+            </el-tag>
+            <div class="risk-main">
+              <strong>{{ item.title }}</strong>
+              <span>{{ item.projectName }} · 负责人 {{ item.ownerName }}</span>
+            </div>
+            <div class="risk-meta">
+              <strong>{{ item.dueDate || '未设日期' }}</strong>
+              <span>{{ statusMap[item.status] || '未知状态' }}</span>
+            </div>
+          </button>
+        </div>
+        <el-empty v-else description="当前没有需要优先介入的风险任务" :image-size="64" />
+      </section>
+
+      <section class="page-card project-health">
+        <div class="section-head">
+          <div>
+            <h3>项目健康榜</h3>
+            <p>风险项目优先，点击项目查看任务</p>
+          </div>
+        </div>
+        <div v-if="summary.projectHealth?.length" class="health-list">
+          <button
+            v-for="item in summary.projectHealth"
+            :key="item.projectId"
+            type="button"
+            class="health-row"
+            @click="selectProject(item.projectId)"
+          >
+            <div class="health-project">
+              <div><strong>{{ item.projectName }}</strong><span>{{ item.ownerName }}</span></div>
+              <el-tag :type="healthMap[item.level]?.type || 'info'" size="small">
+                {{ healthMap[item.level]?.label || '未知' }}
+              </el-tag>
+            </div>
+            <div class="health-metrics">
+              <span><b>{{ item.open }}</b>未结</span>
+              <span class="danger"><b>{{ item.overdue }}</b>逾期</span>
+              <span><b>{{ item.dueSoon }}</b>临期</span>
+              <span><b>{{ item.pending }}</b>待确认</span>
+            </div>
+          </button>
+        </div>
+        <el-empty v-else description="暂无进行中的项目任务" :image-size="64" />
+      </section>
+    </div>
+
+    <div class="insight-grid">
+      <section class="page-card performance-panel">
+        <div class="section-head">
+          <div><h3>交付效率</h3><p>按实际开始和完成时间计算</p></div>
+        </div>
+        <div class="performance-metrics">
+          <div><span>按期完成率</span><strong>{{ summary.onTimeRate == null ? '—' : `${summary.onTimeRate}%` }}</strong></div>
+          <div><span>平均交付周期</span><strong>{{ summary.avgCycleDays == null ? '—' : `${summary.avgCycleDays}天` }}</strong></div>
+          <div><span>当前阻塞</span><strong :class="{ danger: summary.blocked > 0 }">{{ summary.blocked ?? 0 }}</strong></div>
+        </div>
+        <div class="trend-legend"><span class="created-dot" />新增任务 <span class="completed-dot" />完成任务</div>
+        <div class="trend-chart">
+          <div v-for="item in summary.trend || []" :key="item.label" class="trend-column">
+            <div class="trend-bars">
+              <i class="created" :style="{ height: `${Math.max(3, item.created / maxTrend * 72)}px` }" :title="`新增 ${item.created}`" />
+              <i class="completed" :style="{ height: `${Math.max(3, item.completed / maxTrend * 72)}px` }" :title="`完成 ${item.completed}`" />
+            </div>
+            <span>{{ item.label }}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="page-card owner-panel">
+        <div class="section-head"><div><h3>主责人负载</h3><p>未结任务及风险分布</p></div></div>
+        <div v-if="summary.ownerLoad?.length" class="owner-list">
+          <div v-for="item in summary.ownerLoad" :key="item.ownerId" class="owner-row">
+            <div class="owner-line"><strong>{{ item.ownerName }}</strong><span>{{ item.open }}项 · 逾期{{ item.overdue }} · 阻塞{{ item.blocked }}</span></div>
+            <div class="owner-bar"><i :style="{ width: `${item.open / maxOwnerLoad * 100}%` }" /></div>
+          </div>
+        </div>
+        <el-empty v-else description="暂无主责人负载数据" :image-size="56" />
+      </section>
     </div>
 
     <el-form class="filter-bar" @submit.prevent="onFilter">
@@ -323,68 +428,52 @@ onMounted(async () => {
     </el-form>
 
     <div class="page-card">
-      <el-table v-loading="listLoading" :data="list" row-key="id" stripe empty-text="暂无任务">
-        <el-table-column label="任务" min-width="220">
+      <div class="section-head task-section-head">
+        <div><h3>任务明细</h3><p>用于筛选、下钻和日常执行</p></div>
+      </div>
+      <el-table v-loading="listLoading" :data="list" row-key="id" stripe empty-text="暂无任务" class="task-table">
+        <el-table-column label="任务" min-width="320">
           <template #default="{ row }">
             <div class="task-title-cell">
-              <el-link type="primary" :underline="false" @click="open(row)">{{ row.title }}</el-link>
+              <div class="task-title-line">
+                <el-link type="primary" :underline="false" @click="open(row)">{{ row.title }}</el-link>
+                <el-tag v-if="row.blocked" type="danger" size="small" effect="light">阻塞</el-tag>
+                <el-tag v-else-if="row.overdue" type="danger" size="small" effect="light">逾期</el-tag>
+                <el-tag v-else-if="!row.dueDate && [0, 1].includes(row.status)" type="info" size="small" effect="plain">无日期</el-tag>
+                <el-tag :type="priorityType[row.priority] || 'info'" size="small" effect="plain">
+                  {{ priorityMap[row.priority] || '中' }}优先级
+                </el-tag>
+              </div>
               <div v-if="row.content" class="task-content-preview">{{ row.content }}</div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="projectName" label="项目" width="140" show-overflow-tooltip />
-        <el-table-column label="优先级" width="80" align="center">
+        <el-table-column prop="projectName" label="所属项目" min-width="150" show-overflow-tooltip />
+        <el-table-column label="负责人" min-width="190">
           <template #default="{ row }">
-            <el-tag :type="priorityType[row.priority] || 'info'" size="small">{{ priorityMap[row.priority] || '中' }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="参与人员" min-width="160" show-overflow-tooltip>
-          <template #default="{ row }">
-            {{ row.participantNames?.length ? row.participantNames.join('、') : '—' }}
-          </template>
-        </el-table-column>
-        <el-table-column label="进度" width="130">
-          <template #default="{ row }">
-            <div v-if="progressStatus(row) === 'warning'" class="task-progress">
-              <el-progress
-                class="task-progress__bar"
-                :percentage="row.progress ?? 0"
-                status="warning"
-                :stroke-width="8"
-                :show-text="false"
-              />
-              <span class="task-progress__status">
-                <el-tooltip v-if="!row.dueDate" content="当前任务暂未设置截至时间。" placement="top">
-                  <el-icon class="task-progress__warning-icon" aria-label="当前任务暂未设置截至时间。">
-                    <WarningFilled />
-                  </el-icon>
-                </el-tooltip>
-                <el-icon v-else class="task-progress__warning-icon"><WarningFilled /></el-icon>
+            <div class="task-owner-cell">
+              <strong>{{ row.assigneeName || '未指定' }}</strong>
+              <span v-if="row.participantNames?.length">
+                协作：{{ row.participantNames.filter((name: string) => name !== row.assigneeName).join('、') || '—' }}
               </span>
+              <span v-else>暂无协作人员</span>
             </div>
-            <el-progress
-              v-else
-              :percentage="row.progress ?? 0"
-              :status="progressStatus(row)"
-              :stroke-width="8"
-            />
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="90" align="center">
+        <el-table-column label="交付状态" min-width="120">
           <template #default="{ row }">
             <el-tag :type="statusType[row.status]" size="small">{{ statusMap[row.status] }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="计划周期" width="180">
+        <el-table-column label="计划时间" min-width="190">
           <template #default="{ row }">
             <div class="task-date-range">
-              <span>{{ row.startDate || '—' }}</span>
-              <span class="date-sep">~</span>
-              <span :class="{ overdue: row.overdue }">{{ row.dueDate || '—' }}</span>
+              <span><i>开始</i>{{ row.startDate || '未设置' }}</span>
+              <span :class="{ overdue: row.overdue }"><i>截止</i>{{ row.dueDate || '未设置' }}</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" :width="isTaskManager ? 220 : 100" fixed="right" align="center">
+        <el-table-column label="操作" :width="isTaskManager ? 200 : 88" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" @click="open(row)">详情</el-button>
             <template v-if="isTaskManager && row.status === 4">
@@ -419,6 +508,7 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.page-title { margin: 0 0 5px; font-size: 20px; color: var(--kk-text); }
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -486,7 +576,14 @@ onMounted(async () => {
   color: var(--kk-text);
 }
 
-.task-title-cell { line-height: 1.4; }
+.task-table :deep(.el-table__cell) { padding: 13px 0; }
+.task-table :deep(.el-table__header .el-table__cell) { padding: 11px 0; }
+.task-table :deep(.el-table__row) { height: 66px; }
+.task-title-cell { min-width: 0; line-height: 1.4; }
+.task-title-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.task-title-line .el-link { min-width: 0; max-width: 250px; font-weight: 600; }
+.task-title-line :deep(.el-link__inner) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-title-line .el-tag { flex-shrink: 0; }
 .task-content-preview {
   margin-top: 4px;
   font-size: 12px;
@@ -494,26 +591,93 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 280px;
+  max-width: 440px;
 }
-.task-progress { display: flex; align-items: center; }
-.task-progress__bar { flex: 1; }
-.task-progress__status {
-  min-width: 50px;
-  margin-left: 5px;
-  line-height: 1;
+.task-owner-cell { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.task-owner-cell strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--kk-text); }
+.task-owner-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--kk-text-muted); }
+.delivery-cell { max-width: 170px; }
+.delivery-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+.delivery-head > span { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--kk-text-secondary); }
+.stat-hint { margin-top: 3px; font-size: 12px; color: var(--kk-text-muted); }
+
+.management-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(360px, 1fr);
+  gap: 14px;
 }
-.task-progress__warning-icon {
-  display: block;
-  color: var(--el-color-warning);
-  cursor: help;
+.section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
 }
-.task-date-range { font-size: 13px; color: var(--kk-text-secondary); }
-.date-sep { margin: 0 4px; color: var(--kk-text-muted); }
+.section-head h3 { margin: 0; font-size: 16px; color: var(--kk-text); }
+.section-head p { margin: 4px 0 0; font-size: 12px; color: var(--kk-text-muted); }
+.risk-badges { display: flex; gap: 8px; font-size: 12px; color: var(--kk-text-secondary); }
+.risk-badges span { padding: 4px 8px; border-radius: 999px; background: var(--kk-bg-muted, #f5f7fa); }
+.risk-list, .health-list { display: flex; flex-direction: column; }
+.risk-row, .health-row {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--kk-border, #ebeef5);
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+}
+.risk-row:first-child, .health-row:first-child { border-top: 0; }
+.risk-row {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr) 100px;
+  gap: 10px;
+  align-items: center;
+  padding: 11px 2px;
+  text-align: left;
+}
+.risk-row:hover, .health-row:hover { background: var(--kk-bg-muted, #f5f7fa); }
+.risk-main, .risk-meta, .health-project div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.risk-main strong, .health-project strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.risk-main span, .risk-meta span, .health-project span { font-size: 12px; color: var(--kk-text-muted); }
+.risk-meta { text-align: right; }
+.risk-meta strong { font-size: 12px; color: var(--kk-text-secondary); }
+.health-row { padding: 11px 2px; text-align: left; }
+.health-project { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.health-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 9px; }
+.health-metrics span { font-size: 11px; color: var(--kk-text-muted); }
+.health-metrics b { margin-right: 3px; font-size: 14px; color: var(--kk-text); }
+.health-metrics .danger b { color: var(--kk-danger); }
+.task-section-head { padding: 2px 2px 12px; margin-bottom: 0; }
+.insight-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(340px, .75fr); gap: 14px; }
+.performance-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.performance-metrics div { padding: 10px 12px; border-radius: 8px; background: var(--kk-bg-muted, #f5f7fa); }
+.performance-metrics span { display: block; font-size: 12px; color: var(--kk-text-muted); }
+.performance-metrics strong { display: block; margin-top: 5px; font-size: 21px; color: var(--kk-text); }
+.performance-metrics strong.danger { color: var(--kk-danger); }
+.trend-legend { display: flex; align-items: center; gap: 6px; margin-top: 16px; font-size: 11px; color: var(--kk-text-muted); }
+.trend-legend span { width: 8px; height: 8px; border-radius: 2px; }
+.created-dot, .trend-bars .created { background: #94a3b8; }
+.completed-dot, .trend-bars .completed { background: var(--kk-primary); }
+.trend-chart { display: grid; grid-template-columns: repeat(6, 1fr); align-items: end; gap: 10px; height: 112px; margin-top: 6px; }
+.trend-column { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.trend-column > span { font-size: 11px; color: var(--kk-text-muted); }
+.trend-bars { height: 76px; display: flex; align-items: end; gap: 3px; }
+.trend-bars i { display: block; width: 10px; min-height: 3px; border-radius: 3px 3px 0 0; }
+.owner-list { display: flex; flex-direction: column; gap: 13px; }
+.owner-line { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
+.owner-line strong { font-size: 13px; }
+.owner-line span { color: var(--kk-text-muted); }
+.owner-bar { height: 7px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: var(--kk-bg-muted, #ebeef5); }
+.owner-bar i { display: block; height: 100%; border-radius: inherit; background: var(--kk-primary); }
+.task-date-range { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--kk-text-secondary); }
+.task-date-range span { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.task-date-range i { width: 28px; flex-shrink: 0; font-style: normal; color: var(--kk-text-muted); }
 .overdue { color: var(--kk-danger); font-weight: 500; }
 
 @media (max-width: 1100px) {
   .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .management-grid { grid-template-columns: 1fr; }
+  .insight-grid { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-transparency: reduce) {
   .stat-card {

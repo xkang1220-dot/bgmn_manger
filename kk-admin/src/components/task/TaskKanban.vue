@@ -50,16 +50,6 @@ function avatarTone(name?: string) {
   return AVATAR_TONES[hash % AVATAR_TONES.length]
 }
 
-function progressOf(task: any) {
-  if (Number(task.status) === 2) return 100
-  const n = Number(task.progress)
-  return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0
-}
-
-function showProgress(task: any) {
-  return Number(task.status) === 1 || Number(task.status) === 2 || progressOf(task) > 0
-}
-
 function others(task: any) {
   return (task.participantNames || []).filter((n: string) => !!n)
 }
@@ -155,8 +145,6 @@ async function onDrop(e: DragEvent, status: number) {
 
   const prev = task.status
   task.status = status
-  if (status === 2) task.progress = 100
-  else if (status === 0) task.progress = 0
   try {
     await bizApi.updateTaskStatus(id, status)
     ElMessage.success(status === 2 && !userStore.hasPermission('project:task:confirm') ? '已提交完成，等待任务管理员确认' : '状态已更新')
@@ -216,9 +204,6 @@ defineExpose({ load })
               <span v-if="task.overdue" class="overdue-flag">逾期</span>
             </div>
             <div class="kanban-card__title">{{ task.title }}</div>
-            <div v-if="showProgress(task)" class="kanban-card__progress" :class="{ done: Number(task.status) === 2 }">
-              <span :style="{ width: progressOf(task) + '%' }" />
-            </div>
             <div class="kanban-card__foot">
               <span class="who">
                 <span class="avatar" :class="'avatar--' + avatarTone(primaryPerson(task))">{{ initial(primaryPerson(task)) }}</span>
@@ -370,24 +355,6 @@ defineExpose({ load })
   letter-spacing: -0.02em;
   color: var(--kk-text);
   line-height: 1.4;
-}
-
-.kanban-card__progress {
-  height: 3px;
-  border-radius: 99px;
-  background: rgba(0, 0, 0, 0.06);
-  overflow: hidden;
-}
-
-.kanban-card__progress span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--kk-primary);
-}
-
-.kanban-card__progress.done span {
-  background: #059669;
 }
 
 .kanban-card__foot {

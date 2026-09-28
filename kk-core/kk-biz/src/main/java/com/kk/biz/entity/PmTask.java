@@ -9,6 +9,8 @@ import lombok.Data;
 import lombok.EqualsAndHashCode;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.math.BigDecimal;
 import java.util.List;
 
 @Data
@@ -40,13 +42,25 @@ public class PmTask extends BaseEntity {
 
     private LocalDate dueDate;
 
-    /** 完成进度 0-100 */
-    private Integer progress;
+    private LocalDateTime startedAt;
+
+    private LocalDateTime completedAt;
+
+    private LocalDateTime lastActivityAt;
+
+    private BigDecimal estimatedHours;
+
+    private Boolean blocked;
+
+    private String blockedReason;
+
+    /** NORMAL / WARNING / DANGER */
+    private String riskLevel;
 
     @TableField(exist = false)
     private String projectName;
 
-    /** 兼容旧字段：持有人已停用，VO 恒为 null */
+    /** 唯一主责人展示名 */
     @TableField(exist = false)
     private String assigneeName;
 

@@ -283,7 +283,6 @@ public class CompanyTaskShareService {
         item.setPriority(task.getPriority());
         item.setStartDate(task.getStartDate());
         item.setDueDate(task.getDueDate());
-        item.setProgress(task.getProgress());
         item.setProjectName(projectName);
         item.setOverdue(overdue);
         item.setRelatedUserIds(related);
