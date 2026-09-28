@@ -65,7 +65,6 @@ const form = reactive<any>({
   priority: 2,
   startDate: '',
   dueDate: '',
-  progress: 0,
   estimatedHours: undefined,
   blocked: false,
   blockedReason: '',
@@ -96,7 +95,6 @@ function emptyForm() {
     priority: 2,
     startDate: '',
     dueDate: '',
-    progress: 0,
     estimatedHours: undefined,
     blocked: false,
     blockedReason: '',
@@ -156,11 +154,6 @@ function disableDueDate(date: Date) {
   const start = new Date(form.startDate)
   start.setHours(0, 0, 0, 0)
   return date.getTime() < start.getTime()
-}
-
-function onStatusChange() {
-  if (form.status === 2) form.progress = 100
-  else if (form.status === 0) form.progress = 0
 }
 
 async function loadDetail(id: number) {
@@ -611,9 +604,6 @@ function canDeleteComment(c: any) {
           <el-descriptions-item label="参与人员">
             {{ detail.participantNames?.length ? detail.participantNames.join('、') : '无' }}
           </el-descriptions-item>
-          <el-descriptions-item label="进度">
-            <el-progress :percentage="detail.progress ?? 0" :stroke-width="8" style="width: 180px" />
-          </el-descriptions-item>
           <el-descriptions-item label="周期">
             {{ detail.startDate || '—' }} ~ {{ detail.dueDate || '—' }}
           </el-descriptions-item>
@@ -779,7 +769,7 @@ function canDeleteComment(c: any) {
             </el-select>
           </el-form-item>
           <el-form-item label="状态">
-            <el-select v-model="form.status" style="width: 100%" @change="onStatusChange">
+            <el-select v-model="form.status" style="width: 100%">
               <el-option :value="0" label="待办" />
               <el-option :value="1" label="进行中" />
               <el-option :value="2" :label="userStore.hasPermission('project:task:confirm') ? '已完成' : '提交完成'" />
@@ -790,12 +780,6 @@ function canDeleteComment(c: any) {
           </el-form-item>
           <el-form-item label="截止日期">
             <el-date-picker v-model="form.dueDate" value-format="YYYY-MM-DD" style="width: 100%" :disabled-date="disableDueDate" />
-          </el-form-item>
-          <el-form-item label="进度">
-            <div style="width: 100%; display: flex; align-items: center; gap: 12px">
-              <el-slider v-model="form.progress" :min="0" :max="100" :disabled="form.status === 2" style="flex: 1" />
-              <span style="width: 40px; text-align: right">{{ form.progress }}%</span>
-            </div>
           </el-form-item>
           <el-form-item label="预计工时">
             <el-input-number v-model="form.estimatedHours" :min="0" :precision="1" :step="1" style="width: 100%" />

@@ -63,7 +63,6 @@ public class PublicTaskQueryService {
         item.setPriority(task.getPriority());
         item.setStartDate(task.getStartDate());
         item.setDueDate(task.getDueDate());
-        item.setProgress(task.getProgress());
         item.setProjectName(task.getProjectName());
         item.setAssigneeName(null);
         item.setParticipantNames(task.getParticipantNames() == null ? List.of() : task.getParticipantNames());

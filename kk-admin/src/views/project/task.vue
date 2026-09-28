@@ -239,13 +239,6 @@ async function review(row: any, approved: boolean) {
   await load()
 }
 
-function progressStatus(row: any) {
-  if (row.status === 2) return 'success'
-  if (row.overdue) return 'exception'
-  if (row.progress >= 80) return 'warning'
-  return undefined
-}
-
 onMounted(async () => {
   projects.value = await bizApi.taskManagementProjects()
   shareCompanies.value = userStore.hasPermission('project:task:share')
@@ -321,7 +314,7 @@ onMounted(async () => {
             </div>
             <div class="risk-meta">
               <strong>{{ item.dueDate || '未设日期' }}</strong>
-              <span>进度 {{ item.progress ?? 0 }}%</span>
+              <span>{{ statusMap[item.status] || '未知状态' }}</span>
             </div>
           </button>
         </div>
@@ -467,20 +460,9 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="交付进度" min-width="180">
+        <el-table-column label="交付状态" min-width="120">
           <template #default="{ row }">
-            <div class="delivery-cell">
-              <div class="delivery-head">
-                <el-tag :type="statusType[row.status]" size="small">{{ statusMap[row.status] }}</el-tag>
-                <span>{{ row.progress ?? 0 }}%</span>
-              </div>
-              <el-progress
-                :percentage="row.progress ?? 0"
-                :status="progressStatus(row)"
-                :stroke-width="6"
-                :show-text="false"
-              />
-            </div>
+            <el-tag :type="statusType[row.status]" size="small">{{ statusMap[row.status] }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="计划时间" min-width="190">
@@ -687,18 +669,6 @@ onMounted(async () => {
 .owner-line span { color: var(--kk-text-muted); }
 .owner-bar { height: 7px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: var(--kk-bg-muted, #ebeef5); }
 .owner-bar i { display: block; height: 100%; border-radius: inherit; background: var(--kk-primary); }
-.task-progress { display: flex; align-items: center; }
-.task-progress__bar { flex: 1; }
-.task-progress__status {
-  min-width: 50px;
-  margin-left: 5px;
-  line-height: 1;
-}
-.task-progress__warning-icon {
-  display: block;
-  color: var(--el-color-warning);
-  cursor: help;
-}
 .task-date-range { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--kk-text-secondary); }
 .task-date-range span { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
 .task-date-range i { width: 28px; flex-shrink: 0; font-style: normal; color: var(--kk-text-muted); }

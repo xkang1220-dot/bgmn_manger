@@ -37,7 +37,6 @@ export interface PublicCompanyTaskItem {
   priority?: number
   startDate?: string
   dueDate?: string
-  progress?: number
   projectName?: string
   participantNames?: string[]
   overdue?: boolean

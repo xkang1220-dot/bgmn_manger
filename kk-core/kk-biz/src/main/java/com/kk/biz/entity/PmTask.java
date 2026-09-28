@@ -42,9 +42,6 @@ public class PmTask extends BaseEntity {
 
     private LocalDate dueDate;
 
-    /** 完成进度 0-100 */
-    private Integer progress;
-
     private LocalDateTime startedAt;
 
     private LocalDateTime completedAt;

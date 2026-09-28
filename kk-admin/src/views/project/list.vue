@@ -806,11 +806,6 @@ onMounted(async () => {
                     {{ row.participantNames?.length ? row.participantNames.join('、') : '—' }}
                   </template>
                 </el-table-column>
-                <el-table-column label="进度" width="120">
-                  <template #default="{ row }">
-                    <el-progress :percentage="row.progress ?? 0" :stroke-width="6" />
-                  </template>
-                </el-table-column>
                 <el-table-column label="状态" width="90" align="center">
                   <template #default="{ row }">
                     <el-tag :type="taskStatusType[row.status]" size="small" effect="light">{{ taskStatusMap[row.status] }}</el-tag>

@@ -201,7 +201,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                                                 boolean managementScope) {
         LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<PmTask>()
                 .select(PmTask::getId, PmTask::getProjectId, PmTask::getAssigneeId, PmTask::getTitle,
-                        PmTask::getStatus, PmTask::getPriority, PmTask::getProgress, PmTask::getStartDate,
+                        PmTask::getStatus, PmTask::getPriority, PmTask::getStartDate,
                         PmTask::getDueDate, PmTask::getStartedAt, PmTask::getCompletedAt,
                         PmTask::getLastActivityAt, PmTask::getBlocked, PmTask::getRiskLevel,
                         PmTask::getCreateTime, PmTask::getUpdateTime)
@@ -321,7 +321,6 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 SysUser taskOwner = ownerMap.get(row.getAssigneeId());
                 risk.put("ownerName", taskOwner == null ? "未指定" : userName(taskOwner));
                 risk.put("dueDate", row.getDueDate());
-                risk.put("progress", row.getProgress());
                 risk.put("priority", row.getPriority());
                 risk.put("status", status);
                 risk.put("riskType", Boolean.TRUE.equals(row.getBlocked()) ? "BLOCKED" : rowOverdue ? "OVERDUE" : rowDueSoon ? "DUE_SOON"
@@ -549,7 +548,6 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             task.setPriority(2);
         }
         validateDateRange(task);
-        normalizeProgress(task);
         applyLifecycle(task, null);
         save(task);
         syncParticipants(task.getId(), task.getParticipantIds());
@@ -606,7 +604,6 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             task.setStatus(4);
         }
         validateDateRange(task);
-        normalizeProgress(task);
         applyLifecycle(task, existing);
         Integer oldStatus = existing.getStatus();
         updateById(task);
@@ -676,13 +673,6 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         update.setId(id);
         update.setStatus(targetStatus);
         applyLifecycle(update, existing);
-        if (targetStatus == 2 || targetStatus == 4) {
-            update.setProgress(100);
-        } else if (targetStatus == 0) {
-            update.setProgress(0);
-        } else if (existing.getProgress() == null || existing.getProgress() == 0 || existing.getProgress() == 100) {
-            update.setProgress(targetStatus == 1 ? 10 : existing.getProgress());
-        }
         updateById(update);
         if (targetStatus != 2 && Integer.valueOf(2).equals(oldStatus)) {
             lambdaUpdate().eq(PmTask::getId, id).setSql("completed_at = NULL").update();
@@ -713,7 +703,6 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         PmTask update = new PmTask();
         update.setId(id);
         update.setStatus(approved ? 2 : 1);
-        update.setProgress(approved ? 100 : 90);
         applyLifecycle(update, existing);
         updateById(update);
         recordFlow(id, approved ? "COMPLETE_APPROVE" : "COMPLETE_REJECT", null, null,
@@ -1457,17 +1446,6 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 && task.getDueDate().isBefore(task.getStartDate())) {
             throw new BusinessException("截止日期不能早于开始日期");
         }
-    }
-
-    private void normalizeProgress(PmTask task) {
-        if (Integer.valueOf(2).equals(task.getStatus()) || Integer.valueOf(4).equals(task.getStatus())) {
-            task.setProgress(100);
-            return;
-        }
-        if (task.getProgress() == null) {
-            task.setProgress(0);
-        }
-        task.setProgress(Math.max(0, Math.min(100, task.getProgress())));
     }
 
     private void applyLifecycle(PmTask update, PmTask existing) {

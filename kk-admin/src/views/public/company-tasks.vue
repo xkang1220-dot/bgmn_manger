@@ -125,7 +125,6 @@ function period(task: PublicCompanyTaskItem) {
             <span>{{ period(task) }}</span>
             <span>{{ task.participantNames?.length ? task.participantNames.join('、') : '无参与人' }}</span>
           </div>
-          <el-progress :percentage="task.progress ?? 0" :stroke-width="8" :status="task.status === 2 ? 'success' : task.overdue ? 'exception' : undefined" />
           <div v-if="isOpen(section.person.userId, task.id)" class="detail">
             <p class="content">{{ task.content?.trim() || '暂无说明' }}</p>
             <h3>最近评论</h3>

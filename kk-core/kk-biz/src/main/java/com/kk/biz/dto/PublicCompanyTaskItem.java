@@ -17,7 +17,6 @@ public class PublicCompanyTaskItem {
     private Integer priority;
     private LocalDate startDate;
     private LocalDate dueDate;
-    private Integer progress;
     private String projectName;
     private List<String> participantNames = new ArrayList<>();
     private Boolean overdue;
