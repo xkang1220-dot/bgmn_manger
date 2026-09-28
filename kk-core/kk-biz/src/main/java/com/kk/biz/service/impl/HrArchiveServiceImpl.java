@@ -66,6 +66,7 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
             throw new BusinessException("该账号已有档案");
         }
         archive.setAttendanceEnabled(0);
+        archive.setAttendanceCycleDay(null);
         save(archive);
         walletService.getOrCreate(archive.getUserId());
         syncPayMethods(archive.getId(), archive.getPayMethods());
@@ -83,6 +84,7 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
         }
         // 普通档案编辑接口不得修改考勤开关，必须走考勤管理员专用接口。
         archive.setAttendanceEnabled(existing.getAttendanceEnabled());
+        archive.setAttendanceCycleDay(existing.getAttendanceCycleDay());
         updateById(archive);
         if (archive.getPayMethods() != null) {
             syncPayMethods(archive.getId(), archive.getPayMethods());
@@ -90,12 +92,17 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
     }
 
     @Override
-    public void setAttendanceEnabled(Long id, Integer enabled) {
+    public void setAttendanceEnabled(Long id, Integer enabled, Integer cycleDay) {
         if (id == null || getById(id) == null) {
             throw new BusinessException("档案不存在");
         }
+        boolean attendanceEnabled = Objects.equals(enabled, 1);
+        if (attendanceEnabled && (cycleDay == null || cycleDay < 1 || cycleDay > 31)) {
+            throw new BusinessException("启用考勤时，请选择有效的考勤周期");
+        }
         lambdaUpdate().eq(HrArchive::getId, id)
-                .set(HrArchive::getAttendanceEnabled, Objects.equals(enabled, 1) ? 1 : 0)
+                .set(HrArchive::getAttendanceEnabled, attendanceEnabled ? 1 : 0)
+                .set(HrArchive::getAttendanceCycleDay, attendanceEnabled ? cycleDay : null)
                 .update();
     }
 

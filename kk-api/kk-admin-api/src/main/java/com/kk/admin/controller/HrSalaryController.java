@@ -23,7 +23,7 @@ public class HrSalaryController {
     @GetMapping("/items")
     @SaCheckPermission("hr:salary:config")
     public Result<List<HrSalaryItem>> items(
-            @RequestParam Long companyId,
+            @RequestParam(required = false) Long companyId,
             @RequestParam(required = false) Long userId) {
         return Result.ok(salaryService.listItems(companyId, userId));
     }

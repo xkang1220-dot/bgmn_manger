@@ -272,10 +272,7 @@ onMounted(async () => {
           <el-select v-model="companyId" placeholder="公司" style="width: 200px">
             <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
-          <el-radio-group v-model="cycleType" size="small" @change="onCycleTabChange">
-            <el-radio-button value="MONTHLY">月薪批次</el-radio-button>
-            <el-radio-button value="WEEKLY">周薪批次</el-radio-button>
-          </el-radio-group>
+          <el-tag effect="plain">月薪批次</el-tag>
           <el-input
             v-model="yearMonth"
             :placeholder="periodPlaceholder"
@@ -295,7 +292,7 @@ onMounted(async () => {
       </div>
 
       <p class="tip">
-        默认不自动发预告。发薪前用「算薪并发确认」：按考勤手填扣款与备注，发给员工确认后再「手动发薪」。
+        发薪前用「算薪并发确认」：系统已按员工工资配置和考勤自动计算应发金额，可补充人工扣款与备注，员工确认后再「手动发薪」。
       </p>
 
       <el-table
@@ -361,8 +358,7 @@ onMounted(async () => {
       destroy-on-close
     >
       <p class="tip">
-        {{ isWeekly ? '周薪考勤按该周周一至周日。' : '月薪考勤按上月 21 日至本月 20 日。' }}
-        非全勤请填写扣款金额与备注；未勾选则发送全部人员。实发 = 应发 − 扣款。
+        月薪考勤按每名员工单独配置的发薪日计算（上月发薪日至本月发薪日），值班日按平常上班计算。未勾选则发送全部人员；如需额外扣款，请填写金额与备注。
       </p>
       <el-table
         v-loading="prepareLoading"

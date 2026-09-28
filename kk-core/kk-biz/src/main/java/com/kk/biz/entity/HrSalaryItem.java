@@ -26,6 +26,33 @@ public class HrSalaryItem extends BaseEntity {
 
     private BigDecimal amount;
 
+    /** 员工独立发薪日，同时作为考勤核算周期边界（1-28） */
+    private Integer payDay;
+
+    /** MONTHLY 固定月薪 / DAILY 按天计薪 */
+    private String payMode;
+
+    /** 是否按考勤核算 */
+    private Integer attendanceEnabled;
+
+    /** 固定月薪：平常上班（含值班）占比 */
+    private BigDecimal normalRatio;
+
+    /** 固定月薪：周末及节假日占比 */
+    private BigDecimal restRatio;
+
+    /** 固定月薪：平常上班（含值班）日工资系数 */
+    private BigDecimal normalCoefficient;
+
+    /** 固定月薪：周末及节假日日工资系数 */
+    private BigDecimal restCoefficient;
+
+    /** 按天计薪：平常上班（含值班）日薪 */
+    private BigDecimal normalDayRate;
+
+    /** 按天计薪：周末及节假日日薪 */
+    private BigDecimal restDayRate;
+
     /** MONTHLY 月薪 / WEEKLY 周薪 */
     private String cycleType;
 

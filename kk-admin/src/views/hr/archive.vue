@@ -31,6 +31,9 @@ const form = reactive<any>({
   emergencyContact: '',
   emergencyPhone: '',
   remark: '',
+  attendanceEnabled: 0,
+  attendanceCycleDay: undefined,
+  attendanceCycleDate: '',
   payMethods: [] as any[],
 })
 
@@ -94,8 +97,21 @@ function emptyForm() {
     emergencyContact: '',
     emergencyPhone: '',
     remark: '',
+    attendanceEnabled: 0,
+    attendanceCycleDay: undefined,
+    attendanceCycleDate: '',
     payMethods: [] as any[],
   }
+}
+
+function cycleDate(day?: number) {
+  return day && day >= 1 && day <= 31 ? `2000-01-${String(day).padStart(2, '0')}` : ''
+}
+
+function cycleDay(date?: string) {
+  if (!date) return undefined
+  const day = Number(date.slice(-2))
+  return day >= 1 && day <= 31 ? day : undefined
 }
 
 function initial(row: any) {
@@ -134,6 +150,7 @@ async function open(row?: any) {
     const full = await bizApi.archiveDetail(row.id)
     Object.assign(form, {
       ...full,
+      attendanceCycleDate: cycleDate(Number(full.attendanceCycleDay)),
       payMethods: (full.payMethods || []).map((m: any) => ({ ...m })),
     })
   } else {
@@ -156,6 +173,11 @@ async function save() {
     ElMessage.warning('请填写姓名')
     return
   }
+  const selectedCycleDay = cycleDay(form.attendanceCycleDate)
+  if (canManageAttendance.value && isEdit.value && Number(form.attendanceEnabled) === 1 && !selectedCycleDay) {
+    ElMessage.warning('请选择考勤周期')
+    return
+  }
   for (const m of form.payMethods || []) {
     if (!m.accountNo?.trim()) {
       ElMessage.warning('请填写收款账号')
@@ -176,6 +198,9 @@ async function save() {
         isDefault: Number(m.isDefault) === 1 ? 1 : 0,
       })),
     }, isEdit.value)
+    if (canManageAttendance.value && isEdit.value) {
+      await bizApi.setArchiveAttendanceEnabled(Number(form.id), Number(form.attendanceEnabled), selectedCycleDay)
+    }
     ElMessage.success('保存成功')
     dialog.value = false
     await load()
@@ -194,13 +219,25 @@ async function remove(id: number) {
 async function toggleAttendance(row: any) {
   const id = Number(row.id)
   const enabled = Number(row.attendanceEnabled) === 1 ? 1 : 0
+  if (enabled === 1 && !row.attendanceCycleDay) {
+    row.attendanceEnabled = 0
+    await open(row)
+    form.attendanceEnabled = 1
+    return
+  }
   attendanceSavingIds.value.push(id)
   try {
-    await bizApi.setArchiveAttendanceEnabled(id, enabled)
+    await bizApi.setArchiveAttendanceEnabled(id, enabled, row.attendanceCycleDay)
     ElMessage.success(enabled ? '已启用该员工考勤' : '已停用该员工考勤')
-    if (detail.value?.id === id) detail.value.attendanceEnabled = enabled
+    if (detail.value?.id === id) {
+      detail.value.attendanceEnabled = enabled
+      if (!enabled) detail.value.attendanceCycleDay = undefined
+    }
     const listRow = list.value.find((item) => Number(item.id) === id)
-    if (listRow) listRow.attendanceEnabled = enabled
+    if (listRow) {
+      listRow.attendanceEnabled = enabled
+      if (!enabled) listRow.attendanceCycleDay = undefined
+    }
   } catch (e) {
     row.attendanceEnabled = enabled === 1 ? 0 : 1
     throw e
@@ -346,9 +383,23 @@ onMounted(async () => {
             :active-value="1"
             :inactive-value="0"
             :loading="attendanceSavingIds.includes(Number(form.id))"
-            @change="toggleAttendance(form)"
           />
           <span class="attendance-tip">开启后，该员工才会出现在考勤一览和请假设置中</span>
+        </el-form-item>
+        <el-form-item
+          v-if="canManageAttendance && isEdit && Number(form.attendanceEnabled) === 1"
+          label="考勤周期"
+          required
+        >
+          <el-date-picker
+            v-model="form.attendanceCycleDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            format="每月 DD 日"
+            placeholder="请选择每月周期日"
+            style="width: 100%"
+          />
+          <span class="attendance-tip attendance-tip--block">选择日期中的日号作为每月考勤周期，例如选择 20 日表示每月 20 日</span>
         </el-form-item>
         <el-form-item label="收款方式">
           <div class="pay-box">
@@ -400,6 +451,9 @@ onMounted(async () => {
               :loading="attendanceSavingIds.includes(Number(detail.id))"
               @change="toggleAttendance(detail)"
             />
+          </el-descriptions-item>
+          <el-descriptions-item v-if="canManageAttendance && Number(detail.attendanceEnabled) === 1" label="考勤周期">
+            每月 {{ detail.attendanceCycleDay }} 日
           </el-descriptions-item>
           <el-descriptions-item label="收款方式">
             <div v-if="detail.payMethods?.length" class="pay-detail">
@@ -540,6 +594,7 @@ onMounted(async () => {
 .attendance-field { display: flex; align-items: center; justify-content: space-between; }
 .attendance-field span { color: var(--kk-text-muted); }
 .attendance-tip { margin-left: 10px; color: var(--kk-text-muted); font-size: 12px; }
+.attendance-tip--block { display: block; width: 100%; margin: 6px 0 0; }
 .drawer-actions {
   display: flex;
   justify-content: flex-end;

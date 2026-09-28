@@ -122,8 +122,8 @@ export const bizApi = {
   deleteArchive(id: number) {
     return request<void>({ url: `/hr/archive/${id}`, method: 'delete' })
   },
-  setArchiveAttendanceEnabled(id: number, enabled: number) {
-    return request<void>({ url: `/hr/archive/${id}/attendance-enabled`, method: 'put', data: { enabled } })
+  setArchiveAttendanceEnabled(id: number, enabled: number, cycleDay?: number) {
+    return request<void>({ url: `/hr/archive/${id}/attendance-enabled`, method: 'put', data: { enabled, cycleDay } })
   },
   faCategoryPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/fa/category/page', method: 'get', params })
@@ -284,7 +284,7 @@ export const bizApi = {
   deleteFile(id: number) {
     return request<void>({ url: `/file/${id}`, method: 'delete' })
   },
-  salaryItems(params: { companyId: number; userId?: number }) {
+  salaryItems(params: { companyId?: number; userId?: number } = {}) {
     return request<any[]>({ url: '/hr/salary/items', method: 'get', params })
   },
   saveSalaryItem(data: any, isEdit: boolean) {
@@ -337,6 +337,15 @@ export const bizApi = {
   },
   attendanceMonthlyDetail(month: string) {
     return request<any>({ url: '/hr/leave/attendance-monthly-detail', method: 'get', params: { month } })
+  },
+  holidayCalendar(params: { start: string; end: string }) {
+    return request<any[]>({ url: '/hr/leave/holiday-calendar', method: 'get', params })
+  },
+  attendanceDuty(params: { start?: string; end?: string }) {
+    return request<any[]>({ url: '/hr/leave/attendance-duty', method: 'get', params })
+  },
+  setAttendanceDutyDay(data: { date: string; userIds: number[] }) {
+    return request<void>({ url: '/hr/leave/attendance-duty-day', method: 'put', data })
   },
   setAttendanceDay(data: { date: string; userIds: number[] }) {
     return request<void>({ url: '/hr/leave/attendance-day', method: 'put', data })

@@ -9,6 +9,7 @@ import com.kk.biz.entity.WfApproval;
 import com.kk.biz.mapper.HrLeaveRecordMapper;
 import com.kk.biz.mapper.HrArchiveMapper;
 import com.kk.biz.mapper.WfApprovalMapper;
+import com.kk.biz.service.HrHolidayCalendarService;
 import com.kk.biz.service.HrLeaveService;
 import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.workflow.ApprovalTypes;
@@ -49,6 +50,7 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
     private final DataScopeService dataScopeService;
     private final SysUserService userService;
     private final HrArchiveMapper archiveMapper;
+    private final HrHolidayCalendarService holidayCalendarService;
     private final SysDeptService deptService;
     private final WfApprovalMapper approvalMapper;
     @Lazy
@@ -132,10 +134,22 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
 
     @Override
     public List<Map<String, Object>> listAttendanceUsers() {
-        Set<Long> attendanceUserIds = attendanceUserIds();
+        List<com.kk.biz.entity.HrArchive> attendanceArchives = archiveMapper.selectList(
+                new LambdaQueryWrapper<com.kk.biz.entity.HrArchive>()
+                        .select(com.kk.biz.entity.HrArchive::getUserId,
+                                com.kk.biz.entity.HrArchive::getAttendanceCycleDay)
+                        .eq(com.kk.biz.entity.HrArchive::getAttendanceEnabled, 1));
+        Set<Long> attendanceUserIds = attendanceArchives.stream()
+                .map(com.kk.biz.entity.HrArchive::getUserId)
+                .filter(Objects::nonNull).collect(Collectors.toSet());
         if (attendanceUserIds.isEmpty()) {
             return List.of();
         }
+        Map<Long, Integer> cycleDayByUser = attendanceArchives.stream()
+                .filter(archive -> archive.getUserId() != null)
+                .collect(Collectors.toMap(com.kk.biz.entity.HrArchive::getUserId,
+                        archive -> normalizedCycleDay(archive.getAttendanceCycleDay()),
+                        (left, right) -> left));
         return userService.list(new LambdaQueryWrapper<com.kk.system.entity.SysUser>()
                         .in(com.kk.system.entity.SysUser::getId, attendanceUserIds)
                         .eq(com.kk.system.entity.SysUser::getStatus, 1)
@@ -146,6 +160,7 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
                     row.put("id", u.getId());
                     row.put("name", StringUtils.hasText(u.getNickname()) ? u.getNickname() : u.getUsername());
                     row.put("username", u.getUsername());
+                    row.put("attendanceCycleDay", cycleDayByUser.getOrDefault(u.getId(), 1));
                     return row;
                 }).toList();
     }
@@ -158,13 +173,28 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
         } catch (Exception e) {
             throw new BusinessException("月份格式应为 yyyy-MM");
         }
-        LocalDate start = yearMonth.atDay(1);
-        LocalDate end = yearMonth.atEndOfMonth();
-        Set<Long> attendanceUserIds = attendanceUserIds();
+        LocalDate monthStart = yearMonth.atDay(1);
+        LocalDate monthEnd = yearMonth.atEndOfMonth();
+        List<com.kk.biz.entity.HrArchive> attendanceArchives = archiveMapper.selectList(
+                new LambdaQueryWrapper<com.kk.biz.entity.HrArchive>()
+                        .select(com.kk.biz.entity.HrArchive::getUserId,
+                                com.kk.biz.entity.HrArchive::getAttendanceCycleDay)
+                        .eq(com.kk.biz.entity.HrArchive::getAttendanceEnabled, 1));
+        Map<Long, Integer> cycleDayByUser = attendanceArchives.stream()
+                .filter(archive -> archive.getUserId() != null)
+                .collect(Collectors.toMap(com.kk.biz.entity.HrArchive::getUserId,
+                        archive -> normalizedCycleDay(archive.getAttendanceCycleDay()),
+                        (left, right) -> left));
+        LocalDate queryStart = cycleDayByUser.isEmpty() ? monthStart : yearMonth.minusMonths(1).atDay(1);
+        Map<LocalDate, Map<String, Object>> calendar = holidayCalendarService.calendarByDate(queryStart, monthEnd);
+        // 考勤采用自然日口径：整月每天默认出勤，周末、节假日及尚未到来的日期也计入应出勤。
+        int expectedDays = yearMonth.lengthOfMonth();
+        Set<Long> attendanceUserIds = cycleDayByUser.keySet();
         if (attendanceUserIds.isEmpty()) {
             Map<String, Object> empty = new LinkedHashMap<>();
             empty.put("month", yearMonth.toString());
-            empty.put("workdayCount", yearMonth.lengthOfMonth());
+            empty.put("workdayCount", expectedDays);
+            empty.put("calendar", new ArrayList<>(calendar.values()));
             empty.put("employees", List.of());
             return empty;
         }
@@ -175,8 +205,8 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
                         .orderByAsc(com.kk.system.entity.SysUser::getNickname)
                         .orderByAsc(com.kk.system.entity.SysUser::getUsername));
         List<HrLeaveRecord> absences = list(new LambdaQueryWrapper<HrLeaveRecord>()
-                .ge(HrLeaveRecord::getLeaveDate, start)
-                .le(HrLeaveRecord::getLeaveDate, end)
+                .ge(HrLeaveRecord::getLeaveDate, queryStart)
+                .le(HrLeaveRecord::getLeaveDate, monthEnd)
                 .orderByAsc(HrLeaveRecord::getLeaveDate));
         Map<Long, Map<LocalDate, HrLeaveRecord>> absenceByUser = absences.stream()
                 .filter(row -> row.getUserId() != null && row.getLeaveDate() != null)
@@ -189,24 +219,30 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
             userService.listByIds(operatorIds).forEach(user -> operatorNames.put(user.getId(),
                     StringUtils.hasText(user.getNickname()) ? user.getNickname() : user.getUsername()));
         }
-        int workdayCount = yearMonth.lengthOfMonth();
         List<Map<String, Object>> employees = new ArrayList<>();
         for (com.kk.system.entity.SysUser user : enabledUsers) {
+            int cycleDay = cycleDayByUser.getOrDefault(user.getId(), 1);
+            // 周期日是上一个周期的截止日，下一周期应从次日开始，避免首尾都包含而多算一天。
+            LocalDate start = atCycleDay(yearMonth.minusMonths(1), cycleDay).plusDays(1);
+            LocalDate end = atCycleDay(yearMonth, cycleDay);
+            int employeeExpectedDays = (int) (end.toEpochDay() - start.toEpochDay() + 1);
             Map<LocalDate, HrLeaveRecord> userAbsences = absenceByUser.getOrDefault(user.getId(), Map.of());
             List<Map<String, Object>> days = new ArrayList<>();
             List<String> absentDates = new ArrayList<>();
             int absentWorkdays = 0;
             for (LocalDate date = start; !date.isAfter(end); date = date.plusDays(1)) {
                 HrLeaveRecord absence = userAbsences.get(date);
-                boolean workday = true;
+                Map<String, Object> calendarDay = calendar.get(date);
                 if (absence != null) {
                     absentDates.add(date.toString());
-                    if (workday) absentWorkdays++;
+                    absentWorkdays++;
                 }
                 Map<String, Object> day = new LinkedHashMap<>();
                 day.put("date", date.toString());
                 day.put("weekday", "星期" + "一二三四五六日".charAt(date.getDayOfWeek().getValue() - 1));
-                day.put("workday", workday);
+                day.put("workday", true);
+                day.put("holidayName", calendarDay == null ? "" : calendarDay.get("name"));
+                day.put("dayType", calendarDay == null ? "WORKDAY" : calendarDay.get("type"));
                 day.put("status", absence == null ? "PRESENT" : "ABSENT");
                 day.put("reason", absence == null ? null : absence.getReason());
                 day.put("operatorName", absence == null ? null : operatorNames.get(absence.getCreateBy()));
@@ -217,20 +253,32 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
             employee.put("userId", user.getId());
             employee.put("employeeName", StringUtils.hasText(user.getNickname()) ? user.getNickname() : user.getUsername());
             employee.put("username", user.getUsername());
-            employee.put("expectedDays", workdayCount);
-            employee.put("presentDays", Math.max(0, workdayCount - absentWorkdays));
+            employee.put("attendanceCycleDay", cycleDay);
+            employee.put("periodStart", start.toString());
+            employee.put("periodEnd", end.toString());
+            employee.put("expectedDays", employeeExpectedDays);
+            employee.put("presentDays", Math.max(0, employeeExpectedDays - absentWorkdays));
             employee.put("absentDays", absentWorkdays);
-            employee.put("attendanceRate", workdayCount == 0 ? 100D
-                    : Math.round((workdayCount - absentWorkdays) * 10000D / workdayCount) / 100D);
+            employee.put("attendanceRate", employeeExpectedDays == 0 ? 100D
+                    : Math.round((employeeExpectedDays - absentWorkdays) * 10000D / employeeExpectedDays) / 100D);
             employee.put("absentDates", absentDates);
             employee.put("days", days);
             employees.add(employee);
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("month", yearMonth.toString());
-        result.put("workdayCount", workdayCount);
+        result.put("workdayCount", expectedDays);
+        result.put("calendar", new ArrayList<>(calendar.values()));
         result.put("employees", employees);
         return result;
+    }
+
+    private static int normalizedCycleDay(Integer cycleDay) {
+        return cycleDay == null || cycleDay < 1 || cycleDay > 31 ? 1 : cycleDay;
+    }
+
+    private static LocalDate atCycleDay(YearMonth month, int cycleDay) {
+        return month.atDay(Math.min(cycleDay, month.lengthOfMonth()));
     }
 
     @Override

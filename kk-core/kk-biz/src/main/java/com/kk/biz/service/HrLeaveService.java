@@ -20,7 +20,7 @@ public interface HrLeaveService {
     /** 考勤管理员可维护的全部启用员工 */
     List<Map<String, Object>> listAttendanceUsers();
 
-    /** 全局员工月度考勤汇总及逐日明细（自然日均计入应出勤） */
+    /** 全局员工月度考勤汇总及逐日明细（按中国法定工作日口径） */
     Map<String, Object> monthlyAttendanceDetail(String month);
 
     /** 按天覆盖未出勤员工；空列表表示恢复为全勤 */

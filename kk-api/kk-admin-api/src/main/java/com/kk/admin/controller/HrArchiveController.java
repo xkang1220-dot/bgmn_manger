@@ -42,6 +42,7 @@ public class HrArchiveController {
     public Result<HrArchive> mine() {
         HrArchive archive = archiveService.getMine(StpUtil.getLoginIdAsLong());
         archive.setAttendanceEnabled(null);
+        archive.setAttendanceCycleDay(null);
         return Result.ok(archive);
     }
 
@@ -77,7 +78,7 @@ public class HrArchiveController {
     @PutMapping("/{id}/attendance-enabled")
     @SaCheckPermission("hr:attendance:edit")
     public Result<Void> setAttendanceEnabled(@PathVariable Long id, @RequestBody AttendanceEnabledBody body) {
-        archiveService.setAttendanceEnabled(id, body.enabled());
+        archiveService.setAttendanceEnabled(id, body.enabled(), body.cycleDay());
         return Result.ok();
     }
 
@@ -91,8 +92,9 @@ public class HrArchiveController {
     private void maskAttendanceIfNeeded(List<HrArchive> archives) {
         if (!StpUtil.hasPermission("hr:attendance:edit")) {
             archives.forEach(archive -> archive.setAttendanceEnabled(null));
+            archives.forEach(archive -> archive.setAttendanceCycleDay(null));
         }
     }
 
-    public record AttendanceEnabledBody(Integer enabled) {}
+    public record AttendanceEnabledBody(Integer enabled, Integer cycleDay) {}
 }

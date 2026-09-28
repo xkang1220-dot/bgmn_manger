@@ -6,7 +6,6 @@ import { bizApi } from '@/api/biz'
 import { useUserStore } from '@/stores/user'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
 import CompanyTaskShareDialog from '@/components/task/CompanyTaskShareDialog.vue'
-import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 import { companyTaskShareApi, type CompanyTaskShareOption } from '@/api/companyTaskShare'
 
 const route = useRoute()
@@ -36,6 +35,46 @@ const activeTaskId = ref<number | null>(null)
 const listLoading = ref(false)
 const shareOpen = ref(false)
 const shareCompanies = ref<CompanyTaskShareOption[]>([])
+
+type ProjectTreeNode = {
+  id: number | string
+  label: string
+  scale?: string
+  children?: ProjectTreeNode[]
+}
+
+const projectTree = computed<ProjectTreeNode[]>(() => {
+  const visible = projects.value.filter((project) => ![2, 3].includes(Number(project.status)))
+  const childrenByParent = new Map<number, any[]>()
+  visible.forEach((project) => {
+    if (!project.parentId) return
+    const parentId = Number(project.parentId)
+    childrenByParent.set(parentId, [...(childrenByParent.get(parentId) || []), project])
+  })
+
+  const topProjects = visible
+    .filter((project) => !project.parentId)
+    .map((project) => {
+      const children = (childrenByParent.get(Number(project.id)) || []).map((child) => ({
+        id: Number(child.id),
+        label: child.name,
+        scale: child.scale,
+      }))
+      return {
+        id: Number(project.id),
+        label: project.name,
+        scale: project.scale,
+        ...(children.length ? { children } : {}),
+      }
+    })
+
+  return [{ id: 'all', label: '全部项目', children: topProjects }]
+})
+
+const selectedProjectName = computed(() => {
+  if (query.projectId == null) return '全部项目'
+  return projects.value.find((project) => Number(project.id) === Number(query.projectId))?.name || '当前项目'
+})
 
 const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭', 4: '待确认完成' }
 const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
@@ -133,10 +172,14 @@ const healthMap: Record<string, { label: string; type: 'danger' | 'warning' | 's
   HEALTHY: { label: '健康', type: 'success' },
 }
 
-function selectProject(projectId: number) {
+function selectProject(projectId?: number) {
   query.projectId = projectId
   query.page = 1
   load()
+}
+
+function onProjectNodeClick(node: ProjectTreeNode) {
+  selectProject(node.id === 'all' ? undefined : Number(node.id))
 }
 
 async function loadSummary() {
@@ -388,6 +431,36 @@ onMounted(async () => {
       </section>
     </div>
 
+    <div class="task-workspace">
+      <aside class="page-card project-tree-panel">
+        <div class="project-tree-head">
+          <div>
+            <h3>项目导航</h3>
+            <p>选择项目查看对应任务</p>
+          </div>
+          <span>{{ projects.filter((project) => !project.parentId && ![2, 3].includes(Number(project.status))).length }}</span>
+        </div>
+        <el-tree
+          :data="projectTree"
+          node-key="id"
+          :current-node-key="query.projectId ?? 'all'"
+          default-expand-all
+          :expand-on-click-node="false"
+          highlight-current
+          class="project-tree"
+          @node-click="onProjectNodeClick"
+        >
+          <template #default="{ data }">
+            <div class="project-tree-node">
+              <el-icon><FolderOpened v-if="data.children?.length" /><Document v-else /></el-icon>
+              <span :title="data.label">{{ data.label }}</span>
+              <i v-if="data.scale && data.id !== 'all'">{{ data.scale === 'MAJOR' ? '重大' : data.scale === 'KEY' ? '重点' : '常规' }}</i>
+            </div>
+          </template>
+        </el-tree>
+      </aside>
+
+      <div class="task-workspace-main">
     <el-form class="filter-bar" @submit.prevent="onFilter">
       <el-form-item label="标题">
         <el-input
@@ -396,19 +469,6 @@ onMounted(async () => {
           placeholder="任务标题"
           class="filter-keyword--wide"
           @keyup.enter="onFilter"
-        />
-      </el-form-item>
-      <el-form-item label="项目">
-        <ProjectCascadeSelect
-          v-model="query.projectId"
-          :projects="projects"
-          mode="filter"
-          exclude-completed
-          top-placeholder="全部"
-          child-placeholder="全部小项目"
-          class="filter-select--wide"
-          top-width="200px"
-          child-width="180px"
         />
       </el-form-item>
       <el-form-item label="状态">
@@ -429,7 +489,7 @@ onMounted(async () => {
 
     <div class="page-card">
       <div class="section-head task-section-head">
-        <div><h3>任务明细</h3><p>用于筛选、下钻和日常执行</p></div>
+        <div><h3>{{ selectedProjectName }} · 任务明细</h3><p>用于筛选、下钻和日常执行</p></div>
       </div>
       <el-table v-loading="listLoading" :data="list" row-key="id" stripe empty-text="暂无任务" class="task-table">
         <el-table-column label="任务" min-width="320">
@@ -493,6 +553,8 @@ onMounted(async () => {
           @current-change="load"
           @size-change="load"
         />
+      </div>
+    </div>
       </div>
     </div>
 
@@ -601,10 +663,87 @@ onMounted(async () => {
 .delivery-head > span { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--kk-text-secondary); }
 .stat-hint { margin-top: 3px; font-size: 12px; color: var(--kk-text-muted); }
 
-.management-grid {
+.task-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(360px, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
   gap: 14px;
+  align-items: stretch;
+}
+.task-workspace-main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.task-workspace-main > .filter-bar { margin-bottom: 0; }
+.project-tree-panel {
+  min-width: 0;
+  padding: 18px 14px;
+  overflow: hidden;
+}
+.project-tree-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 6px 14px;
+  border-bottom: 1px solid var(--kk-border, #ebeef5);
+}
+.project-tree-head h3 { margin: 0; font-size: 16px; color: var(--kk-text); }
+.project-tree-head p { margin: 4px 0 0; font-size: 12px; color: var(--kk-text-muted); }
+.project-tree-head > span {
+  min-width: 24px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--kk-text-secondary);
+  background: var(--kk-bg-muted, #f5f7fa);
+}
+.project-tree {
+  margin-top: 10px;
+  background: transparent;
+  color: var(--kk-text-secondary);
+}
+.project-tree :deep(.el-tree-node__content) {
+  height: 40px;
+  margin: 2px 0;
+  border-radius: 8px;
+  padding-right: 7px;
+}
+.project-tree :deep(.el-tree-node__content:hover) { background: var(--kk-bg-muted, #f5f7fa); }
+.project-tree :deep(.el-tree-node.is-current > .el-tree-node__content) {
+  color: var(--kk-text);
+  background: color-mix(in srgb, var(--kk-primary) 10%, transparent);
+}
+.project-tree-node {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  font-size: 13px;
+}
+.project-tree-node .el-icon { flex: 0 0 auto; color: var(--kk-text-muted); }
+.project-tree-node > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-tree-node > i {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-style: normal;
+  color: var(--kk-text-muted);
+}
+
+.management-grid,
+.insight-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(360px, 2fr);
+  gap: 14px;
+  align-items: stretch;
+}
+.management-grid > .page-card,
+.insight-grid > .page-card {
+  min-width: 0;
+  height: 100%;
 }
 .section-head {
   display: flex;
@@ -648,7 +787,6 @@ onMounted(async () => {
 .health-metrics b { margin-right: 3px; font-size: 14px; color: var(--kk-text); }
 .health-metrics .danger b { color: var(--kk-danger); }
 .task-section-head { padding: 2px 2px 12px; margin-bottom: 0; }
-.insight-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(340px, .75fr); gap: 14px; }
 .performance-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .performance-metrics div { padding: 10px 12px; border-radius: 8px; background: var(--kk-bg-muted, #f5f7fa); }
 .performance-metrics span { display: block; font-size: 12px; color: var(--kk-text-muted); }
@@ -676,8 +814,21 @@ onMounted(async () => {
 
 @media (max-width: 1100px) {
   .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .management-grid { grid-template-columns: 1fr; }
-  .insight-grid { grid-template-columns: 1fr; }
+  .management-grid,
+  .insight-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 900px) {
+  .task-workspace { grid-template-columns: minmax(0, 1fr); }
+  .project-tree-panel { max-height: 300px; }
+  .project-tree { max-height: 225px; overflow-y: auto; }
+}
+@media (max-width: 640px) {
+  .stat-grid { grid-template-columns: minmax(0, 1fr); }
+  .section-head { gap: 10px; }
+  .risk-badges { flex-direction: column; align-items: flex-end; gap: 4px; }
+  .risk-row { grid-template-columns: 72px minmax(0, 1fr); }
+  .risk-meta { grid-column: 2; flex-direction: row; justify-content: space-between; text-align: left; }
+  .performance-metrics { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-transparency: reduce) {
   .stat-card {
