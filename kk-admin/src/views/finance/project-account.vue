@@ -892,18 +892,17 @@ onMounted(async () => {
       <div class="page-card filter-card">
         <el-form :inline="true" class="filter-form" @submit.prevent>
           <el-form-item label="公司">
-            <el-select v-model="filter.companyId" clearable filterable placeholder="全部公司" style="width: 200px">
+            <el-select v-model="filter.companyId" clearable filterable placeholder="全部公司" style="width: 200px" @change="loadList">
               <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
             </el-select>
           </el-form-item>
           <el-form-item label="重要度">
-            <el-select v-model="filter.scale" clearable placeholder="重点+重大" style="width: 140px">
+            <el-select v-model="filter.scale" clearable placeholder="重点+重大" style="width: 140px" @change="loadList">
               <el-option label="重点" value="KEY" />
               <el-option label="重大" value="MAJOR" />
             </el-select>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="loadList">查询</el-button>
             <el-button @click="resetFilter">重置</el-button>
           </el-form-item>
         </el-form>

@@ -244,6 +244,10 @@ public class HrLeaveServiceImpl extends ServiceImpl<HrLeaveRecordMapper, HrLeave
                 day.put("holidayName", calendarDay == null ? "" : calendarDay.get("name"));
                 day.put("dayType", calendarDay == null ? "WORKDAY" : calendarDay.get("type"));
                 day.put("status", absence == null ? "PRESENT" : "ABSENT");
+                // 审批单生成的记录属于请假；考勤管理员直接登记的记录属于未出勤。
+                // 保留 status 的既有二值口径，避免影响薪资和出勤率统计。
+                day.put("attendanceKind", absence == null ? "PRESENT"
+                        : absence.getApprovalId() == null ? "ABSENT" : "LEAVE");
                 day.put("reason", absence == null ? null : absence.getReason());
                 day.put("operatorName", absence == null ? null : operatorNames.get(absence.getCreateBy()));
                 day.put("registeredAt", absence == null ? null : absence.getCreateTime());

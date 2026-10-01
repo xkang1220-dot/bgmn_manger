@@ -180,6 +180,27 @@ async function load() {
   }
 }
 
+function refreshOrders() {
+  query.page = 1
+  void load()
+}
+
+function resetOrderFilters() {
+  const companyChanged = query.companyId !== undefined
+  Object.assign(query, {
+    page: 1,
+    companyId: undefined,
+    projectId: undefined,
+    title: '',
+    type: '',
+    status: '',
+    urgency: '',
+    developerId: undefined,
+    cycleId: undefined,
+  })
+  if (!companyChanged) void load()
+}
+
 watch(
   () => query.companyId,
   async () => {
@@ -436,7 +457,7 @@ onMounted(async () => {
           <el-select v-model="query.companyId" clearable placeholder="公司" style="width: 160px">
             <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
-          <el-select v-model="query.projectId" clearable filterable placeholder="项目" style="width: 180px">
+          <el-select v-model="query.projectId" clearable filterable placeholder="项目" style="width: 180px" @change="refreshOrders">
             <el-option
               v-for="p in filterProjects"
               :key="p.id"
@@ -444,23 +465,23 @@ onMounted(async () => {
               :value="p.id"
             />
           </el-select>
-          <el-input v-model="query.title" clearable placeholder="标题" style="width: 180px" @keyup.enter="load" />
-          <el-select v-model="query.type" clearable placeholder="类型" style="width: 120px">
+          <el-input v-model="query.title" clearable placeholder="标题" style="width: 180px" @keyup.enter="refreshOrders" @change="refreshOrders" />
+          <el-select v-model="query.type" clearable placeholder="类型" style="width: 120px" @change="refreshOrders">
             <el-option v-for="o in TICKET_TYPE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
-          <el-select v-model="query.status" clearable placeholder="状态" style="width: 120px">
+          <el-select v-model="query.status" clearable placeholder="状态" style="width: 120px" @change="refreshOrders">
             <el-option v-for="o in TICKET_STATUS_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
-          <el-select v-model="query.urgency" clearable placeholder="紧急程度" style="width: 120px">
+          <el-select v-model="query.urgency" clearable placeholder="紧急程度" style="width: 120px" @change="refreshOrders">
             <el-option v-for="o in TICKET_URGENCY_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
-          <el-select v-model="query.developerId" clearable placeholder="开发人员" style="width: 140px">
+          <el-select v-model="query.developerId" clearable placeholder="开发人员" style="width: 140px" @change="refreshOrders">
             <el-option v-for="d in developers" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
-          <el-select v-model="query.cycleId" clearable placeholder="周期" style="width: 160px">
+          <el-select v-model="query.cycleId" clearable placeholder="周期" style="width: 160px" @change="refreshOrders">
             <el-option v-for="c in cycles" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
-          <el-button type="primary" @click="query.page = 1; load()">查询</el-button>
+          <el-button @click="resetOrderFilters">重置</el-button>
         </div>
 
         <el-table v-loading="loading" :data="list" row-key="id" @selection-change="onSelection">

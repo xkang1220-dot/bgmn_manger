@@ -6,6 +6,7 @@ import { useUserStore } from '@/stores/user'
 
 const props = defineProps<{
   projectId: number
+  canCreateTask?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -15,7 +16,6 @@ const emit = defineEmits<{
 }>()
 
 const userStore = useUserStore()
-const canCreateTask = computed(() => userStore.hasPermission('project:task:add'))
 const canEditTask = computed(() => userStore.hasPermission('project:task:edit'))
 
 function canDragTask(task: any) {
@@ -171,7 +171,7 @@ defineExpose({ load })
   <div v-loading="loading" class="kanban">
     <div class="kanban-toolbar">
       <span class="kanban-hint">拖拽卡片切换状态，松开后需确认才会生效</span>
-      <el-button v-if="canCreateTask" type="primary" size="small" @click="emit('createTask')">新建任务</el-button>
+      <el-button v-if="props.canCreateTask !== false" type="primary" size="small" @click="emit('createTask')">新建任务</el-button>
     </div>
     <div class="kanban-board">
       <div

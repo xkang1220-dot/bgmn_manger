@@ -237,7 +237,7 @@ onMounted(load)
         </el-radio-group>
       </el-form-item>
       <el-form-item label="类型">
-        <el-select v-model="query.type" clearable placeholder="全部" class="filter-select--wide">
+        <el-select v-model="query.type" clearable placeholder="全部" class="filter-select--wide" @change="onFilter">
           <el-option label="创建项目" value="PROJECT_CREATE" />
           <el-option label="删除项目" value="PROJECT_DELETE" />
           <el-option label="变更项目规模" value="PROJECT_SCALE_CHANGE" />
@@ -264,7 +264,7 @@ onMounted(load)
         </el-select>
       </el-form-item>
       <el-form-item label="状态">
-        <el-select v-model="query.status" clearable placeholder="全部" class="filter-select">
+        <el-select v-model="query.status" clearable placeholder="全部" class="filter-select" @change="onFilter">
           <el-option label="待审批" value="PENDING" />
           <el-option label="已通过" value="APPROVED" />
           <el-option label="已拒绝" value="REJECTED" />
@@ -282,6 +282,7 @@ onMounted(load)
           start-placeholder="开始日期"
           end-placeholder="结束日期"
           style="width: 240px"
+          @change="onFilter"
         />
       </el-form-item>
       <el-form-item label="金额">
@@ -292,6 +293,7 @@ onMounted(load)
             :precision="2"
             placeholder="最小"
             class="amount-input"
+            @change="onFilter"
           />
           <span class="amount-sep">至</span>
           <el-input-number
@@ -300,6 +302,7 @@ onMounted(load)
             :precision="2"
             placeholder="最大"
             class="amount-input"
+            @change="onFilter"
           />
         </div>
       </el-form-item>
@@ -310,10 +313,10 @@ onMounted(load)
           placeholder="单号 / 标题"
           class="filter-keyword"
           @keyup.enter="onFilter"
+          @change="onFilter"
         />
       </el-form-item>
       <el-form-item class="filter-actions">
-        <el-button type="primary" native-type="submit">查询</el-button>
         <el-button @click="resetFilter">重置</el-button>
       </el-form-item>
     </el-form>

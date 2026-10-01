@@ -19,6 +19,10 @@ const ticketSubmitOpen = ref(false)
 
 const canSubmitTicket = computed(() => userStore.hasPermission('ticket:submit'))
 
+function normalizeMenuName(menu: MenuInfo): MenuInfo {
+  return menu.path === '/ticket/dashboard' ? { ...menu, name: '工单看板' } : menu
+}
+
 /** 临时入口：方便联调劳务协议；正式菜单由管理员在后台配置后可删掉这段 */
 const TEMP_LABOR_AGREEMENT_MENU: MenuInfo = {
   id: -90001,
@@ -43,10 +47,14 @@ const visibleMenus = computed(() => {
       if (m.type === 1) return kids.length > 0
       return true
     })
-    .map((m) => ({
-      ...m,
-      children: (m.children || []).filter((c: MenuInfo) => c.type !== 3 && c.visible !== 0),
-    }))
+    .map((m) =>
+      normalizeMenuName({
+        ...m,
+        children: (m.children || [])
+          .filter((c: MenuInfo) => c.type !== 3 && c.visible !== 0)
+          .map(normalizeMenuName),
+      }),
+    )
 
   const already =
     menus.some((m) => m.path === TEMP_LABOR_AGREEMENT_MENU.path) ||

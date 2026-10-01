@@ -163,10 +163,10 @@ onMounted(load)
           placeholder="搜索文件名"
           class="filter-keyword--wide"
           @keyup.enter="onFilter"
+          @change="onFilter"
         />
       </el-form-item>
       <el-form-item class="filter-actions">
-        <el-button type="primary" native-type="submit">查询</el-button>
         <el-button @click="resetFilter">重置</el-button>
       </el-form-item>
     </el-form>

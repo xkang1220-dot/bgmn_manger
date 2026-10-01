@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { Link, Plus } from '@element-plus/icons-vue'
 import type { UploadFile, UploadProps } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { useUserStore } from '@/stores/user'
 import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
+import RichTextEditor from '@/components/common/RichTextEditor.vue'
 
 const props = defineProps<{
   modelValue: boolean
   taskId?: number | null
+  /** 从列表操作栏打开时要直接执行的动作 */
+  initialAction?: 'view' | 'edit' | 'transfer' | 'close'
   /** 新建时默认项目 */
   defaultProjectId?: number | null
 }>()
@@ -29,9 +32,21 @@ const visible = computed({
 const loading = ref(false)
 const saving = ref(false)
 const closing = ref(false)
+const reviewing = ref(false)
 const editing = ref(false)
 const isNew = ref(false)
 const projects = ref<any[]>([])
+const creatableProjects = computed(() => {
+  if (!isNew.value) return projects.value
+  const selfId = Number(userStore.user?.id)
+  const taskManager = userStore.hasPermission('project:task:add')
+  return projects.value.filter((project) => {
+    const scale = String(project.scale || 'NORMAL').toUpperCase()
+    if (scale === 'MAJOR' && !project.parentId) return false
+    if (scale === 'NORMAL') return true
+    return taskManager || Number(project.ownerId) === selfId
+  })
+})
 const candidateUsers = ref<any[]>([])
 const candidateProjectId = ref<number | undefined>(undefined)
 const detail = ref<any>(null)
@@ -39,6 +54,8 @@ const comments = ref<any[]>([])
 const flows = ref<any[]>([])
 const commentText = ref('')
 const commenting = ref(false)
+const commentUploading = ref(false)
+const commentAttachments = ref<any[]>([])
 const uploading = ref(false)
 const imageFileList = ref<UploadFile[]>([])
 const previewVisible = ref(false)
@@ -54,6 +71,7 @@ const transferForm = reactive({
 const transferImages = ref<any[]>([])
 const transferUploading = ref(false)
 const detailPane = ref('comments')
+const pendingAction = ref<'view' | 'edit' | 'transfer' | 'close'>('view')
 
 const form = reactive<any>({
   id: undefined,
@@ -65,9 +83,6 @@ const form = reactive<any>({
   priority: 2,
   startDate: '',
   dueDate: '',
-  estimatedHours: undefined,
-  blocked: false,
-  blockedReason: '',
   riskLevel: 'NORMAL',
   content: '',
   imageFileIds: [] as number[],
@@ -95,9 +110,6 @@ function emptyForm() {
     priority: 2,
     startDate: '',
     dueDate: '',
-    estimatedHours: undefined,
-    blocked: false,
-    blockedReason: '',
     riskLevel: 'NORMAL',
     content: '',
     imageFileIds: [] as number[],
@@ -185,6 +197,12 @@ async function loadDetail(id: number) {
     syncingDetail.value = false
     loading.value = false
   }
+
+  const action = pendingAction.value
+  pendingAction.value = 'view'
+  if (action === 'edit') editing.value = true
+  else if (action === 'transfer') await openTransfer()
+  else if (action === 'close') await closeTask()
 }
 
 async function openCreate() {
@@ -194,6 +212,7 @@ async function openCreate() {
   comments.value = []
   flows.value = []
   commentText.value = ''
+  commentAttachments.value = []
   editing.value = true
   isNew.value = true
   await ensureOptions()
@@ -319,9 +338,10 @@ watch(
 )
 
 watch(
-  () => [props.modelValue, props.taskId] as const,
-  async ([open, id]) => {
+  () => [props.modelValue, props.taskId, props.initialAction] as const,
+  async ([open, id, action]) => {
     if (!open) return
+    pendingAction.value = action || 'view'
     if (id) await loadDetail(Number(id))
     else await openCreate()
   },
@@ -354,11 +374,7 @@ async function save() {
     return
   }
   if (!form.assigneeId) {
-    ElMessage.warning('请选择任务主责人')
-    return
-  }
-  if (form.blocked && !String(form.blockedReason || '').trim()) {
-    ElMessage.warning('请填写阻塞原因')
+    ElMessage.warning('请选择任务负责人')
     return
   }
   const eligibleIds = new Set(
@@ -426,6 +442,36 @@ async function closeTask() {
   }
 }
 
+async function reviewCompletion(approved: boolean) {
+  if (!detail.value?.id || reviewing.value) return
+  let remark = ''
+  try {
+    if (approved) {
+      await ElMessageBox.confirm(`确认任务「${detail.value.title}」已经完成？`, '确认完成', {
+        confirmButtonText: '确认完成', cancelButtonText: '取消', type: 'success',
+      })
+    } else {
+      const result = await ElMessageBox.prompt(`请输入驳回「${detail.value.title}」完成申请的原因`, '驳回完成申请', {
+        confirmButtonText: '确认驳回', cancelButtonText: '取消', inputType: 'textarea',
+        inputValidator: (value) => !!String(value || '').trim() || '请填写驳回原因',
+      })
+      remark = result.value.trim()
+    }
+  } catch {
+    return
+  }
+
+  reviewing.value = true
+  try {
+    await bizApi.reviewTaskCompletion(Number(detail.value.id), approved, remark)
+    ElMessage.success(approved ? '任务已确认完成' : '完成申请已驳回')
+    await loadDetail(Number(detail.value.id))
+    emit('saved')
+  } finally {
+    reviewing.value = false
+  }
+}
+
 async function openTransfer() {
   await loadProjectCandidates(form.projectId || detail.value?.projectId)
   transferForm.assigneeId = undefined
@@ -433,6 +479,15 @@ async function openTransfer() {
   transferForm.imageFileIds = []
   transferImages.value = []
   transferDialog.value = true
+}
+
+function cancelTransfer() {
+  transferDialog.value = false
+  visible.value = false
+}
+
+function onTransferDialogClose() {
+  visible.value = false
 }
 
 const transferCandidates = computed(() => {
@@ -470,9 +525,8 @@ async function submitTransfer() {
     })
     ElMessage.success('已移交')
     transferDialog.value = false
+    visible.value = false
     emit('saved')
-    await loadDetail(form.id)
-    detailPane.value = 'flows'
   } finally {
     transferring.value = false
   }
@@ -551,31 +605,54 @@ async function handleAttachRemove(uploadFile: UploadFile) {
 
 async function submitComment() {
   if (!form.id) return
-  if (!commentText.value.trim()) {
-    ElMessage.warning('请输入评论内容')
+  const plainText = commentText.value.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim()
+  if (!plainText && !commentAttachments.value.length) {
+    ElMessage.warning('请输入评论内容或上传附件')
     return
   }
   commenting.value = true
   try {
-    const c = await bizApi.addTaskComment(form.id, commentText.value.trim())
+    const c = await bizApi.addTaskComment(
+      form.id,
+      commentText.value.trim(),
+      commentAttachments.value.map((file) => Number(file.id)),
+    )
     comments.value.push(c)
     commentText.value = ''
+    commentAttachments.value = []
     ElMessage.success('已发表')
   } finally {
     commenting.value = false
   }
 }
 
-async function removeComment(c: any) {
-  await ElMessageBox.confirm('删除这条评论？')
-  await bizApi.deleteTaskComment(c.id)
-  comments.value = comments.value.filter((x) => x.id !== c.id)
-  ElMessage.success('已删除')
+async function uploadCommentAttachment(options: any) {
+  if (commentAttachments.value.length >= 9) {
+    ElMessage.warning('每条评论最多上传 9 个附件')
+    options.onError?.(new Error('附件数量超限'))
+    return
+  }
+  commentUploading.value = true
+  try {
+    const file = await bizApi.uploadTaskCommentAttachment(options.file)
+    commentAttachments.value.push(file)
+    options.onSuccess?.(file)
+  } catch (e: any) {
+    options.onError?.(e)
+  } finally {
+    commentUploading.value = false
+  }
 }
 
-function canDeleteComment(c: any) {
-  return c.createBy && userStore.user?.id && Number(c.createBy) === Number(userStore.user.id)
+async function removePendingCommentAttachment(file: any) {
+  await bizApi.deleteTaskCommentAttachment(file.id)
+  commentAttachments.value = commentAttachments.value.filter((item) => item.id !== file.id)
 }
+
+function commentAttachmentUrl(file: any, preview = false) {
+  return `/api/file/${preview ? 'preview' : 'download'}/${file.id}`
+}
+
 </script>
 
 <template>
@@ -600,7 +677,7 @@ function canDeleteComment(c: any) {
 
         <el-descriptions :column="1" border class="detail-desc">
           <el-descriptions-item label="项目">{{ detail.projectName || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="主责人">{{ detail.assigneeName || '未指定' }}</el-descriptions-item>
+          <el-descriptions-item label="负责人">{{ detail.assigneeName || '未指定' }}</el-descriptions-item>
           <el-descriptions-item label="参与人员">
             {{ detail.participantNames?.length ? detail.participantNames.join('、') : '无' }}
           </el-descriptions-item>
@@ -609,13 +686,6 @@ function canDeleteComment(c: any) {
           </el-descriptions-item>
           <el-descriptions-item label="交付数据">
             实际开始 {{ fmtTime(detail.startedAt) }} · 实际完成 {{ fmtTime(detail.completedAt) }} · 最后推进 {{ fmtTime(detail.lastActivityAt) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="风险状态">
-            <el-tag v-if="detail.blocked" type="danger" size="small">已阻塞</el-tag>
-            <el-tag v-else :type="detail.riskLevel === 'DANGER' ? 'danger' : detail.riskLevel === 'WARNING' ? 'warning' : 'success'" size="small">
-              {{ detail.riskLevel === 'DANGER' ? '高风险' : detail.riskLevel === 'WARNING' ? '需关注' : '正常' }}
-            </el-tag>
-            <span v-if="detail.blockedReason" style="margin-left: 8px">{{ detail.blockedReason }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="描述">
             <div class="content-text">{{ detail.content || '暂无描述' }}</div>
@@ -645,22 +715,10 @@ function canDeleteComment(c: any) {
         </div>
 
         <div class="detail-actions">
-          <el-button
-            v-if="userStore.hasPermission('project:task:edit') && detail.canEdit && detail.status !== 3"
-            type="primary"
-            @click="editing = true"
-          >编辑</el-button>
-          <el-button
-            v-if="userStore.hasPermission('project:task:add') && detail.canTransfer && detail.status !== 3"
-            @click="openTransfer"
-          >移交</el-button>
-          <el-button
-            v-if="userStore.hasPermission('project:task:edit') && detail.canEdit && detail.status !== 3"
-            type="danger"
-            plain
-            :loading="closing"
-            @click="closeTask"
-          >关闭</el-button>
+          <template v-if="userStore.hasPermission('project:task:confirm') && detail.status === 4">
+            <el-button type="success" :loading="reviewing" @click="reviewCompletion(true)">确认完成</el-button>
+            <el-button type="danger" plain :disabled="reviewing" @click="reviewCompletion(false)">驳回</el-button>
+          </template>
         </div>
 
         <div class="section comments">
@@ -671,61 +729,68 @@ function canDeleteComment(c: any) {
                   <div class="comment-head">
                     <b>{{ c.authorName || '用户' }}</b>
                     <span>{{ fmtTime(c.createTime) }}</span>
-                    <el-button v-if="canDeleteComment(c)" link type="danger" size="small" @click="removeComment(c)">删除</el-button>
                   </div>
-                  <div class="comment-body">{{ c.content }}</div>
+                  <div class="comment-body" v-html="c.content" />
+                  <div v-if="c.attachments?.length" class="comment-attachments">
+                    <a
+                      v-for="file in c.attachments"
+                      :key="file.id"
+                      :href="commentAttachmentUrl(file)"
+                      class="comment-attachment"
+                      target="_blank"
+                    >
+                      <el-icon><Link /></el-icon>
+                      <span>{{ file.originalName || `附件 ${file.id}` }}</span>
+                    </a>
+                  </div>
                 </div>
                 <div v-if="!comments.length" class="comment-empty">还没有评论，来说两句</div>
               </div>
               <div class="comment-form">
-                <el-input
-                  v-model="commentText"
-                  type="textarea"
-                  :rows="3"
-                  maxlength="2000"
-                  show-word-limit
-                  placeholder="写下你的评论…"
-                />
-                <el-button type="primary" :loading="commenting" style="margin-top: 8px" @click="submitComment">发表评论</el-button>
+                <RichTextEditor v-model="commentText" :min-height="100" placeholder="写下你的评论…" />
+                <div v-if="commentAttachments.length" class="pending-attachments">
+                  <div v-for="file in commentAttachments" :key="file.id" class="pending-attachment">
+                    <a :href="commentAttachmentUrl(file, true)" target="_blank">{{ file.originalName }}</a>
+                    <el-button link type="danger" size="small" @click="removePendingCommentAttachment(file)">移除</el-button>
+                  </div>
+                </div>
+                <div class="comment-actions">
+                  <el-upload :show-file-list="false" :http-request="uploadCommentAttachment" :disabled="commentUploading">
+                    <el-button :loading="commentUploading" plain>上传附件</el-button>
+                  </el-upload>
+                  <span class="attachment-tip">最多 9 个附件</span>
+                  <el-button type="primary" :loading="commenting" @click="submitComment">发表评论</el-button>
+                </div>
               </div>
             </el-tab-pane>
 
             <el-tab-pane :label="`流转${flows.length ? ` (${flows.length})` : ''}`" name="flows">
-              <el-timeline v-if="flows.length" class="flow-timeline">
-                <el-timeline-item
-                  v-for="f in flows"
-                  :key="f.id"
-                  :timestamp="fmtTime(f.createTime)"
-                  placement="top"
-                >
-                  <div class="flow-item">
-                    <div class="flow-title">
-                      <el-tag size="small" effect="plain">{{ f.actionLabel || f.action }}</el-tag>
-                      <span>{{ f.operatorName || '系统' }}</span>
-                    </div>
+              <ol v-if="flows.length" class="flow-timeline" aria-label="任务流转记录">
+                <li v-for="f in flows" :key="f.id" class="flow-entry">
+                  <span class="flow-dot" aria-hidden="true" />
+                  <article class="flow-card">
+                    <header class="flow-meta">
+                      <div class="flow-actor">
+                        <span class="flow-avatar" aria-hidden="true">{{ (f.operatorName || '系').slice(0, 1) }}</span>
+                        <span class="flow-operator">{{ f.operatorName || '系统' }}</span>
+                        <el-tag class="flow-action" size="small" effect="light">{{ f.actionLabel || f.action }}</el-tag>
+                      </div>
+                      <time class="flow-time" :datetime="f.createTime">{{ fmtTime(f.createTime) }}</time>
+                    </header>
                     <div class="flow-summary">{{ f.summary }}</div>
-                    <div v-if="f.remark" class="flow-remark">说明：{{ f.remark }}</div>
+                    <div v-if="f.remark" class="flow-remark">
+                      <span class="flow-remark-label">说明</span>
+                      <span>{{ f.remark }}</span>
+                    </div>
                     <div v-if="f.images?.length" class="flow-images">
                       <template v-for="img in f.images" :key="img.id">
-                        <video
-                          v-if="isVideoFile(img)"
-                          class="flow-img media-video"
-                          :src="imageUrl(img)"
-                          controls
-                          preload="metadata"
-                        />
-                        <el-image
-                          v-else
-                          :src="imageUrl(img)"
-                          :preview-src-list="f.images.filter((x: any) => !isVideoFile(x)).map(imageUrl)"
-                          fit="cover"
-                          class="flow-img"
-                        />
+                        <video v-if="isVideoFile(img)" class="flow-img media-video" :src="imageUrl(img)" controls preload="metadata" />
+                        <el-image v-else :src="imageUrl(img)" :preview-src-list="f.images.filter((x: any) => !isVideoFile(x)).map(imageUrl)" fit="cover" class="flow-img" />
                       </template>
                     </div>
-                  </div>
-                </el-timeline-item>
-              </el-timeline>
+                  </article>
+                </li>
+              </ol>
               <div v-else class="comment-empty">暂无流转记录</div>
             </el-tab-pane>
           </el-tabs>
@@ -741,7 +806,7 @@ function canDeleteComment(c: any) {
           <el-form-item label="项目" required>
             <ProjectCascadeSelect
               v-model="form.projectId"
-              :projects="projects"
+              :projects="creatableProjects"
               mode="task"
               top-placeholder="进行中的项目"
               child-placeholder="请选择小项目"
@@ -756,7 +821,7 @@ function canDeleteComment(c: any) {
               <el-option v-for="u in candidateUsers" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
             </el-select>
           </el-form-item>
-          <el-form-item label="主责人" required>
+          <el-form-item label="负责人" required>
             <el-select v-model="form.assigneeId" filterable placeholder="唯一交付责任人" style="width: 100%">
               <el-option v-for="u in candidateUsers.filter(isEligibleCandidate)" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
             </el-select>
@@ -780,22 +845,6 @@ function canDeleteComment(c: any) {
           </el-form-item>
           <el-form-item label="截止日期">
             <el-date-picker v-model="form.dueDate" value-format="YYYY-MM-DD" style="width: 100%" :disabled-date="disableDueDate" />
-          </el-form-item>
-          <el-form-item label="预计工时">
-            <el-input-number v-model="form.estimatedHours" :min="0" :precision="1" :step="1" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="风险等级">
-            <el-select v-model="form.riskLevel" style="width: 100%">
-              <el-option value="NORMAL" label="正常" />
-              <el-option value="WARNING" label="需关注" />
-              <el-option value="DANGER" label="高风险" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="阻塞状态">
-            <el-switch v-model="form.blocked" active-text="已阻塞" inactive-text="未阻塞" />
-          </el-form-item>
-          <el-form-item v-if="form.blocked" label="阻塞原因" required>
-            <el-input v-model="form.blockedReason" type="textarea" :rows="2" maxlength="500" show-word-limit />
           </el-form-item>
           <el-form-item label="描述">
             <el-input v-model="form.content" type="textarea" :rows="4" maxlength="1000" show-word-limit />
@@ -849,7 +898,7 @@ function canDeleteComment(c: any) {
       <img v-else :src="previewUrl" alt="preview" style="display: block; max-width: 100%; margin: 0 auto" />
     </el-dialog>
 
-    <el-dialog v-model="transferDialog" title="移交任务" width="420px" append-to-body>
+    <el-dialog v-model="transferDialog" title="移交任务" width="420px" append-to-body @close="onTransferDialogClose">
       <el-form label-width="84px">
         <el-form-item label="移交给" required>
           <el-select v-model="transferForm.assigneeId" filterable placeholder="移交给项目负责人或参与人" style="width: 100%">
@@ -890,7 +939,7 @@ function canDeleteComment(c: any) {
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="transferDialog = false">取消</el-button>
+        <el-button @click="cancelTransfer">取消</el-button>
         <el-button type="primary" :loading="transferring" @click="submitTransfer">确认移交</el-button>
       </template>
     </el-dialog>
@@ -1063,7 +1112,19 @@ function canDeleteComment(c: any) {
   line-height: 1.55;
   color: #0f172a;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
+
+.comment-body :deep(p) { margin: 0 0 6px; }
+.comment-body :deep(ul), .comment-body :deep(ol) { margin: 4px 0; padding-left: 22px; }
+.comment-body :deep(a) { color: #409eff; }
+
+.comment-attachments, .pending-attachments { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.comment-attachment, .pending-attachment { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.comment-attachment { width: fit-content; max-width: 100%; color: #409eff; text-decoration: none; }
+.comment-attachment span, .pending-attachment a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pending-attachment { justify-content: space-between; padding: 5px 8px; border-radius: 6px; background: #f8fafc; font-size: 13px; }
+.pending-attachment a { color: #475569; }
 
 .comment-empty {
   font-size: 13px;
@@ -1075,35 +1136,140 @@ function canDeleteComment(c: any) {
   margin-top: 4px;
 }
 
+.comment-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.comment-actions > .el-button:last-child { margin-left: auto; }
+.attachment-tip { font-size: 12px; color: #94a3b8; }
+
 .flow-timeline {
-  padding-left: 4px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0;
+  padding: 4px 4px 4px 28px;
+  list-style: none;
   max-height: 420px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
-.flow-item {
-  padding-bottom: 4px;
+.flow-timeline::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 9px;
+  width: 2px;
+  border-radius: 999px;
+  background: #dbeafe;
 }
 
-.flow-title {
+.flow-entry {
+  position: relative;
+  min-width: 0;
+}
+
+.flow-dot {
+  position: absolute;
+  z-index: 1;
+  top: 19px;
+  left: -25px;
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #3b82f6;
+  box-shadow: 0 0 0 3px #dbeafe;
+}
+
+.flow-entry:not(:first-child) .flow-dot {
+  background: #94a3b8;
+  box-shadow: 0 0 0 3px #f1f5f9;
+}
+
+.flow-card {
+  padding: 14px 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.flow-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.flow-actor {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  min-width: 0;
+}
+
+.flow-avatar {
+  display: inline-flex;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.flow-operator {
+  overflow: hidden;
   color: #334155;
-  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-action {
+  flex: 0 0 auto;
+}
+
+.flow-time {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .flow-summary {
-  font-size: 13px;
   color: #0f172a;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .flow-remark {
-  margin-top: 4px;
-  font-size: 12px;
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: #475569;
+  background: #f8fafc;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.flow-remark-label {
+  flex: 0 0 auto;
   color: #64748b;
+  font-weight: 600;
 }
 
 .flow-images {
@@ -1115,9 +1281,38 @@ function canDeleteComment(c: any) {
 }
 
 .flow-img {
-  width: 56px;
-  height: 56px;
-  border-radius: 6px;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border-radius: 8px;
   border: 1px solid #e2e8f0;
+}
+
+@media (max-width: 560px) {
+  .flow-timeline {
+    padding-left: 24px;
+  }
+
+  .flow-dot {
+    left: -21px;
+  }
+
+  .flow-timeline::before {
+    left: 7px;
+  }
+
+  .flow-card {
+    padding: 12px;
+  }
+
+  .flow-meta {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .flow-time {
+    padding-left: 36px;
+  }
 }
 </style>

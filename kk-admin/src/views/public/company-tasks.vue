@@ -135,7 +135,7 @@ function period(task: PublicCompanyTaskItem) {
                   <span>{{ comment.authorName || '—' }}</span>
                   <span>{{ comment.createTime || '' }}</span>
                 </div>
-                <p>{{ comment.content }}</p>
+                <div class="comment-content" v-html="comment.content" />
               </li>
             </ul>
           </div>
@@ -370,7 +370,8 @@ function period(task: PublicCompanyTaskItem) {
   font-size: 12px;
 }
 
-.comments p {
+.comments p,
+.comment-content {
   margin: 0;
   white-space: pre-wrap;
   line-height: 1.55;

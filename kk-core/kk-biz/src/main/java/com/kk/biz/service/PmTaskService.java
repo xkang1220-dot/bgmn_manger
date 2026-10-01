@@ -16,9 +16,12 @@ public interface PmTaskService extends IService<PmTask> {
     Page<PmTask> pageTasks(long page, long pageSize, Long projectId, Integer status, String statuses,
                            Integer priority, Long participantId, String title, Boolean overdue);
 
-    /** 任务管理页：普通用户仅查询本人负责或参与的项目，任务管理员/超管不限制。 */
+    /** 任务管理页：普通用户仅查询本人主责或直接参与的任务，任务管理员/超管不限制。 */
     Page<PmTask> pageManagementTasks(long page, long pageSize, Long projectId, Integer status, String statuses,
-                                     Integer priority, Long participantId, String title, Boolean overdue);
+                                     Integer priority, Long participantId, String title, Boolean overdue,
+                                     String dashboardCategory, Long dashboardOwnerId,
+                                     String dashboardFrom, String dashboardTo,
+                                     String periodFrom, String periodTo);
 
     PmTask getDetail(Long id);
 
@@ -31,7 +34,8 @@ public interface PmTaskService extends IService<PmTask> {
     /** 任务管理页统计，范围规则与 {@link #pageManagementTasks} 一致。 */
     Map<String, Object> managementSummary(Long projectId, Integer priority, Long participantId, String title);
 
-    Map<String, Object> managementDashboard(Long projectId, Integer priority, Long participantId, String title);
+    Map<String, Object> managementDashboard(Long projectId, Integer priority, Long participantId, String title,
+                                            String periodFrom, String periodTo);
 
     /** 看板用：按项目拉取任务（不分页，排除已关闭） */
     List<PmTask> listBoardTasks(Long projectId);
@@ -65,11 +69,13 @@ public interface PmTaskService extends IService<PmTask> {
 
     void deleteTaskImage(Long fileId);
 
+    SysFile uploadCommentAttachment(MultipartFile file);
+
+    void deleteCommentAttachment(Long fileId);
+
     List<PmTaskComment> listComments(Long taskId);
 
-    PmTaskComment addComment(Long taskId, String content);
-
-    void deleteComment(Long commentId);
+    PmTaskComment addComment(Long taskId, String content, List<Long> fileIds);
 
     List<PmTaskFlow> listFlows(Long taskId);
 }

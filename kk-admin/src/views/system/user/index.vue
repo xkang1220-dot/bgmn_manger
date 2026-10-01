@@ -387,13 +387,12 @@ onMounted(async () => {
 
     <el-form class="filter-bar" @submit.prevent="onFilter">
       <el-form-item label="账号">
-        <el-input v-model="query.username" clearable placeholder="搜索账号" class="filter-keyword" @keyup.enter="onFilter" />
+        <el-input v-model="query.username" clearable placeholder="搜索账号" class="filter-keyword" @keyup.enter="onFilter" @change="onFilter" />
       </el-form-item>
       <el-form-item label="昵称">
-        <el-input v-model="query.nickname" clearable placeholder="搜索昵称" class="filter-keyword" @keyup.enter="onFilter" />
+        <el-input v-model="query.nickname" clearable placeholder="搜索昵称" class="filter-keyword" @keyup.enter="onFilter" @change="onFilter" />
       </el-form-item>
       <el-form-item class="filter-actions">
-        <el-button type="primary" native-type="submit">查询</el-button>
         <el-button @click="resetFilter">重置</el-button>
       </el-form-item>
     </el-form>

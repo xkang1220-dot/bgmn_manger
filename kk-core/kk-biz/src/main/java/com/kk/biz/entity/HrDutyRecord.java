@@ -8,23 +8,20 @@ import com.kk.common.entity.BaseEntity;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
-import java.util.List;
+import java.time.LocalDate;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
-@TableName("pm_task_comment")
-public class PmTaskComment extends BaseEntity {
+@TableName("hr_duty_record")
+public class HrDutyRecord extends BaseEntity {
 
     @TableId(type = IdType.AUTO)
     private Long id;
 
-    private Long taskId;
+    private Long userId;
 
-    private String content;
-
-    @TableField(exist = false)
-    private String authorName;
+    private LocalDate dutyDate;
 
     @TableField(exist = false)
-    private List<SysFile> attachments;
+    private String userName;
 }

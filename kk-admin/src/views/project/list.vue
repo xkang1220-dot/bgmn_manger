@@ -7,11 +7,13 @@ import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
 import { approvalFlowTip } from '@/utils/approvalTip'
+import { useUserStore } from '@/stores/user'
 import TaskKanban from '@/components/task/TaskKanban.vue'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
 
 const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
 
 const query = reactive({
   page: 1,
@@ -93,6 +95,13 @@ const isMajorShell = computed(
   () => !!detail.value && detail.value.scale === 'MAJOR' && !detail.value.parentId,
 )
 const isChildProject = computed(() => !!detail.value?.parentId)
+const canCreateTask = computed(() => {
+  if (!detail.value || isMajorShell.value) return false
+  const scale = String(detail.value.scale || 'NORMAL').toUpperCase()
+  if (scale === 'NORMAL') return true
+  return userStore.hasPermission('project:task:add')
+    || Number(detail.value.ownerId) === Number(userStore.user?.id)
+})
 const saving = ref(false)
 const filteredEmpty = computed(
   () =>
@@ -522,7 +531,7 @@ onMounted(async () => {
             clearable
             class="filter-keyword--wide"
             @keyup.enter="onSearch"
-            @clear="onSearch"
+            @change="onSearch"
           />
         </el-form-item>
         <el-form-item label="跟进公司">
@@ -538,7 +547,6 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-form-item class="filter-actions">
-          <el-button type="primary" native-type="submit">查询</el-button>
           <el-button @click="resetFilter">重置</el-button>
         </el-form-item>
       </el-form>
@@ -758,6 +766,7 @@ onMounted(async () => {
               v-if="activeProjectId && detailTab === 'board'"
               ref="kanbanRef"
               :project-id="activeProjectId"
+              :can-create-task="canCreateTask"
               @open-task="openTaskDetail"
               @create-task="createTask"
               @changed="onTaskSaved"
@@ -785,7 +794,7 @@ onMounted(async () => {
                 </button>
               </div>
               <div class="panel-toolbar__right">
-                <el-button v-permission="'project:task:add'" size="small" type="primary" @click="createTask">新建任务</el-button>
+                <el-button v-if="canCreateTask" size="small" type="primary" @click="createTask">新建任务</el-button>
                 <el-button size="small" @click="goTaskManage">全部任务</el-button>
               </div>
             </div>

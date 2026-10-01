@@ -1247,7 +1247,7 @@ onMounted(async () => {
         </el-select>
       </el-form-item>
       <el-form-item label="类型">
-        <el-select v-model="query.bizType" clearable placeholder="全部" class="filter-select">
+        <el-select v-model="query.bizType" clearable placeholder="全部" class="filter-select" @change="onFilter">
           <el-option label="入账" value="INCOME" />
           <el-option label="出账" value="EXPENSE" />
           <el-option label="手续费" value="FEE" />
@@ -1260,7 +1260,7 @@ onMounted(async () => {
         </el-select>
       </el-form-item>
       <el-form-item label="收款渠道">
-        <el-select v-model="query.channelId" clearable placeholder="全部" class="filter-select--wide">
+        <el-select v-model="query.channelId" clearable placeholder="全部" class="filter-select--wide" @change="onFilter">
           <el-option v-for="c in filteredChannels" :key="c.id" :label="c.name" :value="c.id" />
         </el-select>
       </el-form-item>
@@ -1275,6 +1275,7 @@ onMounted(async () => {
           start-placeholder="开始日期"
           end-placeholder="结束日期"
           style="width: 220px"
+          @change="onFilter"
         />
       </el-form-item>
       <el-form-item label="金额">
@@ -1285,6 +1286,7 @@ onMounted(async () => {
             :precision="2"
             placeholder="最小"
             class="amount-input"
+            @change="onFilter"
           />
           <span class="amount-sep">至</span>
           <el-input-number
@@ -1293,6 +1295,7 @@ onMounted(async () => {
             :precision="2"
             placeholder="最大"
             class="amount-input"
+            @change="onFilter"
           />
         </div>
       </el-form-item>
@@ -1303,10 +1306,10 @@ onMounted(async () => {
           placeholder="编号 / 摘要"
           class="filter-keyword"
           @keyup.enter="onFilter"
+          @change="onFilter"
         />
       </el-form-item>
       <el-form-item class="filter-actions">
-        <el-button type="primary" native-type="submit" :loading="listLoading">查询</el-button>
         <el-button @click="resetFilter">重置</el-button>
       </el-form-item>
     </el-form>

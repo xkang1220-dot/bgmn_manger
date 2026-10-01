@@ -81,6 +81,7 @@ let withdrawTaxSeq = 0
 const todoApprovals = ref<any[]>([])
 const mineApprovals = ref<any[]>([])
 const myTasks = ref<any[]>([])
+const prioritySummary = ref<any>({})
 const calendarTasks = ref<any[]>([])
 const myLeaves = ref<any[]>([])
 const myProjects = ref<any[]>([])
@@ -262,6 +263,18 @@ const taskEmptyText = computed(() =>
   showTaskScopeToggle.value && taskScope.value === 'all' ? '暂无任务' : '暂无相关任务',
 )
 
+const taskStatusMap: Record<number, string> = {
+  0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭', 4: '待确认完成',
+}
+
+const riskTypeMap: Record<string, { label: string; type: 'danger' | 'warning' | 'info' | 'success' }> = {
+  OVERDUE: { label: '已逾期', type: 'danger' },
+  DUE_SOON: { label: '即将到期', type: 'warning' },
+  STALE: { label: '长期未更新', type: 'warning' },
+  NO_DUE_DATE: { label: '未设截止时间', type: 'info' },
+  PENDING: { label: '待确认', type: 'success' },
+}
+
 const canSeeWallet = computed(() => userStore.hasPermission('finance:wallet:list'))
 
 function projectRole(p: any) {
@@ -273,12 +286,20 @@ function projectRole(p: any) {
 
 function openTask(t: any) {
   if (!userStore.hasPermission('project:task:list')) return
-  router.push({ path: '/project/task', query: { projectId: String(t.projectId || '') } })
+  router.push({
+    path: '/project/task',
+    query: { projectId: String(t.projectId || ''), taskId: String(t.id || '') },
+  })
 }
 
 function searchLedger() {
   ledgerQuery.page = 1
   void loadLedger()
+}
+
+function onLedgerCompanyChange() {
+  ledgerQuery.projectId = undefined
+  searchLedger()
 }
 
 function resetLedger() {
@@ -803,6 +824,14 @@ async function loadTasks() {
   }
 }
 
+async function loadPriorityTasks() {
+  try {
+    prioritySummary.value = await bizApi.managementTaskSummary()
+  } catch {
+    prioritySummary.value = {}
+  }
+}
+
 function onTaskScopeChange() {
   void loadTasks()
 }
@@ -840,7 +869,7 @@ async function loadProjects() {
 onMounted(async () => {
   loading.value = true
   try {
-    const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadProjects(), loadLeaves()]
+    const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadPriorityTasks(), loadProjects(), loadLeaves()]
     if (canSeeWallet.value) {
       jobs.push(
         (async () => {
@@ -992,6 +1021,7 @@ watch(
             start-placeholder="开始日期"
             end-placeholder="结束日期"
             style="width: 260px"
+            @change="searchLedger"
           />
         </el-form-item>
         <el-form-item label="公司">
@@ -1001,7 +1031,7 @@ watch(
             filterable
             placeholder="全部"
             style="width: 160px"
-            @change="ledgerQuery.projectId = undefined"
+            @change="onLedgerCompanyChange"
           >
             <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
@@ -1016,10 +1046,11 @@ watch(
             child-placeholder="全部小项目"
             top-width="160px"
             child-width="160px"
+            @change="searchLedger"
           />
         </el-form-item>
         <el-form-item label="类型">
-          <el-select v-model="ledgerQuery.bizType" clearable placeholder="全部" style="width: 120px">
+          <el-select v-model="ledgerQuery.bizType" clearable placeholder="全部" style="width: 120px" @change="searchLedger">
             <el-option label="工资" value="SALARY" />
             <el-option label="报销" value="REIMBURSE" />
             <el-option label="项目余额" value="PAYOUT" />
@@ -1036,6 +1067,7 @@ watch(
               :precision="2"
               placeholder="最小"
               class="amount-input"
+              @change="searchLedger"
             />
             <span class="amount-sep">至</span>
             <el-input-number
@@ -1044,6 +1076,7 @@ watch(
               :precision="2"
               placeholder="最大"
               class="amount-input"
+              @change="searchLedger"
             />
           </div>
         </el-form-item>
@@ -1054,10 +1087,10 @@ watch(
             placeholder="编号 / 摘要"
             class="filter-keyword"
             @keyup.enter="searchLedger"
+            @change="searchLedger"
           />
         </el-form-item>
         <el-form-item class="filter-actions">
-          <el-button type="primary" native-type="submit" :loading="ledgerLoading">查询</el-button>
           <el-button @click="resetLedger">重置</el-button>
         </el-form-item>
       </el-form>
@@ -1166,6 +1199,41 @@ watch(
           <div v-if="!dayTasks.length && !(canViewLeave && dayLeaves.length)" class="empty">这一天没有到期任务</div>
         </div>
       </div>
+    </section>
+
+    <section class="page-card priority-card">
+      <div class="sec-head priority-head">
+        <div>
+          <h3>我的优先事项</h3>
+          <p class="sec-tip">按紧急程度排序，聚焦需要我立即行动的任务</p>
+        </div>
+        <div class="priority-badges" aria-label="优先事项统计">
+          <span>无截止 {{ prioritySummary.noDueDate ?? 0 }}</span>
+          <span>停滞 {{ prioritySummary.stale ?? 0 }}</span>
+        </div>
+      </div>
+      <div v-if="prioritySummary.riskTasks?.length" class="priority-list">
+        <button
+          v-for="item in prioritySummary.riskTasks"
+          :key="item.id"
+          type="button"
+          class="priority-row"
+          @click="openTask(item)"
+        >
+          <el-tag :type="riskTypeMap[item.riskType]?.type || 'info'" size="small">
+            {{ riskTypeMap[item.riskType]?.label || '关注' }}
+          </el-tag>
+          <div class="priority-main">
+            <strong>{{ item.title }}</strong>
+            <span>{{ item.projectName || '—' }}</span>
+          </div>
+          <div class="priority-meta">
+            <strong>{{ item.dueDate || '未设日期' }}</strong>
+            <span>{{ taskStatusMap[item.status] || '未知状态' }}</span>
+          </div>
+        </button>
+      </div>
+      <el-empty v-else description="当前没有需要优先处理的任务" :image-size="64" />
     </section>
 
     <div class="three-col">
@@ -1989,6 +2057,36 @@ watch(
 
 .row em.overdue { color: var(--kk-danger); }
 
+.priority-head { align-items: center; }
+.priority-badges { display: flex; gap: 8px; color: var(--kk-text-secondary); font-size: 12px; }
+.priority-badges span { padding: 4px 8px; border-radius: 999px; background: var(--kk-bg-muted, #f5f7fa); }
+.priority-list { display: flex; flex-direction: column; }
+.priority-row {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr) 100px;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 11px 2px;
+  border: 0;
+  border-top: 1px solid var(--kk-border, #ebeef5);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.priority-row:first-child { border-top: 0; }
+.priority-row:hover,
+.priority-row:focus-visible { background: var(--kk-bg-muted, #f5f7fa); }
+.priority-row:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
+.priority-main,
+.priority-meta { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.priority-main strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.priority-main span,
+.priority-meta span { font-size: 12px; color: var(--kk-text-muted); }
+.priority-meta { text-align: right; }
+.priority-meta strong { font-size: 12px; color: var(--kk-text-secondary); }
+
 .three-col {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2032,6 +2130,13 @@ watch(
 
   .three-col { grid-template-columns: 1fr; }
   .cal-wrap { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 640px) {
+  .priority-head { align-items: flex-start; }
+  .priority-badges { flex-direction: column; align-items: flex-end; gap: 4px; }
+  .priority-row { grid-template-columns: 72px minmax(0, 1fr); }
+  .priority-meta { grid-column: 2; flex-direction: row; justify-content: space-between; text-align: left; }
 }
 
 @media (prefers-reduced-transparency: reduce) {

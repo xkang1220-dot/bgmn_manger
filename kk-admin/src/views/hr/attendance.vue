@@ -30,6 +30,7 @@ const selectedEmployee = ref<any>(null)
 const selectedEmployeeId = ref<number | null>(null)
 const employeeDetailMonth = ref(new Date())
 const employeeDetailLoading = ref(false)
+const isMobileViewport = ref(false)
 const todayKey = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
 
 const selectedDayRecords = computed(() => recordsByDay.value[selectedDate.value] || [])
@@ -149,6 +150,14 @@ function onCalendarDayContextMenu(event: MouseEvent, day: string) {
   if (isAttendancePeriodDay(day)) onDayContextMenu(event, day)
 }
 
+function onCalendarDayClick(event: MouseEvent, day: string) {
+  if (isMobileViewport.value && isAttendancePeriodDay(day)) onDayContextMenu(event, day)
+}
+
+function syncViewport() {
+  isMobileViewport.value = window.innerWidth <= 640
+}
+
 async function load() {
   loading.value = true
   try {
@@ -192,8 +201,10 @@ function openLeaveSetting() {
 function openDutySetting() {
   contextMenuVisible.value = false
   selectedDate.value = contextMenuDate.value
+  const selectableUserIds = new Set(users.value.map(user => Number(user.id)))
   selectedDutyUserIds.value = (dutyRecordsByDay.value[selectedDate.value] || [])
     .map(row => Number(row.userId))
+    .filter(userId => selectableUserIds.has(userId))
   dutyDialogVisible.value = true
 }
 
@@ -307,14 +318,17 @@ watch(() => `${calendarDate.value.getFullYear()}-${calendarDate.value.getMonth()
 watch(attendanceCycleDay, load)
 
 onMounted(async () => {
+  syncViewport()
   document.addEventListener('click', closeContextMenu)
   window.addEventListener('blur', closeContextMenu)
+  window.addEventListener('resize', syncViewport)
   await load()
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', closeContextMenu)
   window.removeEventListener('blur', closeContextMenu)
+  window.removeEventListener('resize', syncViewport)
 })
 </script>
 
@@ -379,7 +393,8 @@ onUnmounted(() => {
           <div class="legend"><i />存在未出勤员工</div>
         </div>
       </div>
-      <p class="tip">周期从上月周期日的次日开始，到本月周期日结束。所有员工默认全勤；右键点击日期可设置未出勤员工。</p>
+      <p class="tip">周期从上月周期日的次日开始，到本月周期日结束。所有员工默认全勤；{{ isMobileViewport ? '点按' : '右键点击' }}日期可查看明细或设置考勤。</p>
+      <div class="calendar-scroll">
       <div v-loading="loading" class="attendance-calendar">
         <div v-for="weekday in ['日', '一', '二', '三', '四', '五', '六']" :key="weekday" class="attendance-calendar-weekday">{{ weekday }}</div>
         <template v-for="day in attendanceCalendarDays" :key="day">
@@ -392,6 +407,7 @@ onUnmounted(() => {
               'is-holiday': holidayByDay[day]?.type === 'HOLIDAY',
               'is-adjusted-workday': holidayByDay[day]?.type === 'ADJUSTED_WORKDAY',
             }"
+            @click.stop="onCalendarDayClick($event, day)"
             @contextmenu.prevent.stop="onCalendarDayContextMenu($event, day)"
           >
             <div class="day-heading">
@@ -413,6 +429,7 @@ onUnmounted(() => {
             </div>
           </div>
         </template>
+      </div>
       </div>
     </div>
 
@@ -470,7 +487,7 @@ onUnmounted(() => {
       </div>
     </Teleport>
 
-    <el-dialog v-model="dialogVisible" :title="`${selectedDate} · 请假设置`" width="520px">
+    <el-dialog v-model="dialogVisible" :title="`${selectedDate} · 请假设置`" width="min(520px, calc(100vw - 24px))">
       <p class="dialog-tip">勾选当天未出勤的员工；未勾选员工均视为全勤。</p>
       <el-checkbox-group v-model="selectedUserIds" class="employee-list">
         <el-checkbox v-for="user in users" :key="user.id" :value="Number(user.id)">
@@ -484,7 +501,7 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="dutyDialogVisible" :title="`${selectedDate} · 值班设置`" width="520px">
+    <el-dialog v-model="dutyDialogVisible" :title="`${selectedDate} · 值班设置`" width="min(520px, calc(100vw - 24px))">
       <p class="dialog-tip">可多选当天值班员工；清空选择表示当天无人值班。</p>
       <el-checkbox-group v-model="selectedDutyUserIds" class="employee-list">
         <el-checkbox v-for="user in users" :key="user.id" :value="Number(user.id)">
@@ -498,7 +515,7 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="detailVisible" :title="`${selectedDate} · 考勤明细`" width="600px">
+    <el-dialog v-model="detailVisible" :title="`${selectedDate} · 考勤明细`" width="min(600px, calc(100vw - 24px))">
       <div class="detail-summary">
         <div><span>应出勤</span><strong>{{ users.length }}</strong></div>
         <div><span>实际出勤</span><strong>{{ Math.max(0, users.length - selectedDayRecords.length) }}</strong></div>
@@ -557,13 +574,16 @@ onUnmounted(() => {
         <div><span>出勤率</span><strong>{{ Number(selectedEmployee.attendanceRate).toFixed(1) }}%</strong></div>
       </div>
       <div v-if="selectedEmployee" class="employee-calendar-legend">
-        <span class="calendar-default-tip">考勤周期：每月 {{ selectedEmployee.attendanceCycleDay }} 日；无标记日期均为正常出勤</span>
+        <span class="calendar-default-tip">考勤周期：每月 {{ selectedEmployee.attendanceCycleDay }} 日</span>
+        <span><i class="legend-dot present" />正常出勤</span>
         <span><i class="legend-dot absent" />未出勤</span>
+        <span><i class="legend-dot leave" />请假</span>
         <span><i class="legend-dot holiday" />节假日</span>
         <span><i class="legend-dot adjusted" />调班</span>
         <span><i class="legend-dot duty" />值班</span>
       </div>
-      <div v-if="selectedEmployee" class="employee-calendar">
+      <div v-if="selectedEmployee" class="employee-calendar-scroll">
+      <div class="employee-calendar">
         <div v-for="weekday in ['日', '一', '二', '三', '四', '五', '六']" :key="weekday" class="employee-calendar-weekday">
           {{ weekday }}
         </div>
@@ -573,7 +593,8 @@ onUnmounted(() => {
           class="employee-calendar-cell"
           :class="{
             'is-empty': !day,
-            'is-absent': day?.status === 'ABSENT',
+            'is-absent': day?.attendanceKind === 'ABSENT' || (day?.status === 'ABSENT' && !day?.attendanceKind),
+            'is-leave': day?.attendanceKind === 'LEAVE',
             'is-holiday': day?.dayType === 'HOLIDAY',
             'is-adjusted': day?.dayType === 'ADJUSTED_WORKDAY',
             'is-weekend': day?.dayType === 'WEEKEND',
@@ -591,16 +612,22 @@ onUnmounted(() => {
               </span>
             </div>
             <span
-              v-if="day.holidayName"
               class="employee-calendar-holiday"
-              :class="{ weekend: day.dayType === 'WEEKEND' }"
-            >{{ day.dayType === 'ADJUSTED_WORKDAY' ? `${day.holidayName}调班` : day.holidayName }}</span>
-            <div class="employee-day-status" :class="{ absent: day.status === 'ABSENT' }">
+              :class="{ weekend: day.dayType === 'WEEKEND', 'is-placeholder': !day.holidayName }"
+            >{{ day.holidayName ? (day.dayType === 'ADJUSTED_WORKDAY' ? `${day.holidayName}调班` : day.holidayName) : '\u00a0' }}</span>
+            <div
+              class="employee-day-status"
+              :class="{
+                absent: day.attendanceKind === 'ABSENT' || (day.status === 'ABSENT' && !day.attendanceKind),
+                leave: day.attendanceKind === 'LEAVE',
+              }"
+            >
               <i />
-              <span>{{ day.status === 'ABSENT' ? '未出勤' : '正常出勤' }}</span>
+              <span>{{ day.attendanceKind === 'LEAVE' ? '请假' : day.status === 'ABSENT' ? '未出勤' : '正常出勤' }}</span>
             </div>
           </template>
         </div>
+      </div>
       </div>
       <el-empty v-else-if="!employeeDetailLoading" description="该员工在所选月份暂无考勤数据" :image-size="72" />
       </div>
@@ -629,6 +656,7 @@ onUnmounted(() => {
 .period-label { margin: 5px 0 0; color: #94a3b8; font-size: 12px; }
 .attendance-period-controls { display: flex; align-items: center; gap: 10px; color: #64748b; font-size: 13px; }
 .attendance-calendar { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); overflow: hidden; border: 1px solid #e5e7eb; border-radius: 10px; background: #e5e7eb; gap: 1px; }
+.calendar-scroll, .employee-calendar-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; }
 .attendance-calendar-weekday { padding: 11px 4px; background: #f8fafc; color: #64748b; font-size: 12px; font-weight: 600; text-align: center; }
 .tip, .dialog-tip { color: #64748b; font-size: 13px; line-height: 1.6; }
 .legend { display: flex; align-items: center; gap: 7px; color: #64748b; font-size: 13px; }
@@ -683,21 +711,25 @@ onUnmounted(() => {
 .employee-calendar-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 14px; margin: 0 0 12px; color: #64748b; font-size: 12px; }
 .employee-calendar-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .employee-calendar-legend .calendar-default-tip { margin-right: auto; color: #94a3b8; }
-.legend-dot { width: 8px; height: 8px; border-radius: 50%; }
-.legend-dot.absent { background: #f59e0b; }
+.legend-dot { width: 9px; height: 9px; border-radius: 3px; }
+.legend-dot.present { border-radius: 50%; background: #58a65c; }
+.legend-dot.absent { background: #e18416; }
+.legend-dot.leave { background: #7468bd; }
 .legend-dot.holiday { background: #fca5a5; }
 .legend-dot.adjusted { background: #fdba74; }
 .legend-dot.duty { background: #93c5fd; }
 .employee-calendar { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); overflow: hidden; border: 1px solid #e5e7eb; border-radius: 12px; background: #eef0f3; gap: 1px; }
 .employee-calendar-weekday { padding: 10px 4px; background: #f8fafc; color: #64748b; font-size: 12px; font-weight: 600; text-align: center; }
-.employee-calendar-cell { min-height: 104px; padding: 10px; background: #fff; box-sizing: border-box; }
+.employee-calendar-cell { position: relative; min-height: 104px; padding: 10px; background: #fff; box-sizing: border-box; }
 .employee-calendar-cell.is-empty { background: #f8fafc; }
 .employee-calendar-cell.is-holiday { background: #fff; }
 .employee-calendar-cell.is-weekend { background: #fcfcfd; }
 .employee-calendar-cell.is-adjusted { box-shadow: inset 0 2px 0 #fed7aa; }
-.employee-calendar-cell.is-absent { background: #fffbeb; box-shadow: inset 0 2px 0 #f59e0b; }
+.employee-calendar-cell.is-absent { background: #fff8ed; box-shadow: inset 4px 0 0 #e18416; }
+.employee-calendar-cell.is-leave { background: #f7f5ff; box-shadow: inset 4px 0 0 #7468bd; }
 .employee-calendar-cell.is-today { box-shadow: inset 0 0 0 1px #93c5fd; }
-.employee-calendar-cell.is-today.is-absent { box-shadow: inset 0 2px 0 #f59e0b, inset 0 0 0 1px #93c5fd; }
+.employee-calendar-cell.is-today.is-absent { box-shadow: inset 4px 0 0 #e18416, inset 0 0 0 1px #93c5fd; }
+.employee-calendar-cell.is-today.is-leave { box-shadow: inset 4px 0 0 #7468bd, inset 0 0 0 1px #93c5fd; }
 .employee-calendar-date { display: flex; align-items: center; justify-content: space-between; min-height: 22px; color: #334155; }
 .employee-calendar-date strong { font-size: 15px; }
 .employee-special-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 6px; font-size: 11px; font-weight: 600; }
@@ -705,26 +737,54 @@ onUnmounted(() => {
 .employee-special-badge.adjusted { background: #fff7ed; color: #ea580c; }
 .employee-special-badge.duty { background: #eff6ff; color: #2563eb; }
 .employee-today-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; border-radius: 6px; background: #eff6ff; color: #2563eb; font-size: 11px; font-weight: 600; }
-.employee-calendar-holiday { display: block; overflow: hidden; margin-top: 6px; color: #dc2626; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.employee-calendar-holiday { display: block; overflow: hidden; min-height: 16px; margin-top: 6px; color: #dc2626; font-size: 11px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
 .employee-calendar-holiday.weekend { color: #a1a1aa; }
-.employee-day-status { display: flex; align-items: center; gap: 5px; margin-top: 8px; color: #64748b; font-size: 11px; }
-.employee-day-status i { width: 6px; height: 6px; border-radius: 50%; background: #86c97a; }
-.employee-day-status.absent { color: #b45309; font-weight: 600; }
-.employee-day-status.absent i { background: #f59e0b; }
+.employee-calendar-holiday.is-placeholder { visibility: hidden; }
+.employee-day-status { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; padding: 3px 8px; border: 1px solid #dcebdc; border-radius: 999px; background: #f3f8f2; color: #3f7043; font-size: 11px; line-height: 18px; }
+.employee-day-status i { width: 7px; height: 7px; border-radius: 50%; background: #58a65c; }
+.employee-day-status.absent { border-color: #efc078; background: #ffedd3; color: #934f08; font-weight: 700; }
+.employee-day-status.absent i { width: 8px; height: 8px; border-radius: 2px; background: #e18416; }
+.employee-day-status.leave { border-color: #bbb4e2; background: #ebe8fb; color: #554a9a; font-weight: 700; }
+.employee-day-status.leave i { width: 8px; height: 8px; border-radius: 2px; background: #7468bd; }
 @media (max-width: 640px) {
-  .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .page-stack { gap: 12px; }
+  .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .summary-card { padding: 14px 12px; }
+  .summary-card strong { margin: 6px 0 4px; font-size: 24px; }
+  .summary-card span, .summary-card small { overflow-wrap: anywhere; font-size: 12px; }
+  .summary-card:last-child { grid-column: 1 / -1; }
+  .section-heading { gap: 10px; }
+  .absence-users { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 12px; }
+  .absence-user { min-width: 0; }
   .detail-summary { grid-template-columns: repeat(2, 1fr); }
   .employee-list { grid-template-columns: 1fr; }
-  :deep(.el-calendar-day) { height: 88px; }
-  .calendar-day { padding: 5px; }
-  .day-metrics { gap: 2px 6px; margin-top: 4px; }
-  .absence-count { font-size: 10px; }
+  .calendar-scroll, .employee-calendar-scroll { margin-right: -12px; padding-right: 12px; }
+  .attendance-calendar, .employee-calendar { min-width: 700px; }
+  .calendar-day { min-height: 96px; padding: 7px; }
+  .day-metrics { gap: 3px 7px; margin-top: 6px; }
+  .absence-count { font-size: 11px; }
   .monthly-heading, .monthly-filters { align-items: flex-start; flex-direction: column; }
   .toolbar, .attendance-period-controls { align-items: flex-start; flex-direction: column; }
+  .toolbar, .attendance-period-controls, .monthly-filters { width: 100%; }
+  .attendance-period-controls > span { margin-bottom: -4px; }
+  .attendance-period-controls :deep(.el-select), .attendance-period-controls :deep(.el-date-editor), .monthly-filters :deep(.el-input) { width: 100% !important; }
+  .calendar-month-actions { display: flex; width: 100%; }
+  .calendar-month-actions :deep(.el-button) { flex: 1; }
+  .legend { margin-top: 2px; }
+  .tip { margin: 12px 0; }
+  .monthly-table { width: 100%; }
   .employee-month-summary { grid-template-columns: repeat(2, 1fr); }
   .employee-calendar-toolbar { align-items: stretch; flex-direction: column; }
-  .employee-calendar-cell { min-height: 82px; padding: 5px; }
-  .employee-calendar-holiday { display: none; }
+  .employee-calendar-toolbar :deep(.el-button-group) { display: flex; }
+  .employee-calendar-toolbar :deep(.el-button) { flex: 1; }
+  .employee-calendar-toolbar :deep(.el-date-editor) { width: 100% !important; }
+  .employee-calendar-legend { justify-content: flex-start; gap: 8px 12px; }
+  .employee-calendar-legend .calendar-default-tip { flex-basis: 100%; }
+  .employee-calendar-cell { min-height: 96px; padding: 7px; }
+  :deep(.el-dialog) { margin-top: 3vh; }
+  :deep(.el-dialog__header), :deep(.el-dialog__body), :deep(.el-dialog__footer) { padding-left: 16px; padding-right: 16px; }
+  :deep(.el-dialog__footer) { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+  :deep(.el-dialog__footer .el-button) { margin-left: 0; }
 }
 @media (min-width: 641px) and (max-width: 1100px) { .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 </style>
@@ -754,5 +814,20 @@ onUnmounted(() => {
 .attendance-context-menu button:hover {
   background: #f1f5f9;
   color: #2563eb;
+}
+@media (max-width: 640px) {
+  .attendance-context-menu {
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    left: 12px !important;
+    top: auto !important;
+    padding: 8px;
+    border-radius: 14px;
+  }
+  .attendance-context-menu button {
+    min-height: 46px;
+    padding: 11px 14px;
+    text-align: center;
+  }
 }
 </style>

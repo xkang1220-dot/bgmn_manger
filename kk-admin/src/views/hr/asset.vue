@@ -142,6 +142,17 @@ function search() {
   return load()
 }
 
+function resetFilter() {
+  Object.assign(query, {
+    page: 1,
+    companyId: undefined,
+    status: '',
+    itemType: '',
+    keyword: '',
+  })
+  void load()
+}
+
 async function openDetail(row: any) {
   detail.value = await bizApi.faAssetDetail(row.id)
   detailDrawer.value = true
@@ -401,10 +412,10 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-form-item label="关键词">
-          <el-input v-model="query.keyword" clearable placeholder="编码/名称" style="width: 160px" @clear="search()" />
+          <el-input v-model="query.keyword" clearable placeholder="编码/名称" style="width: 160px" @change="search()" @keyup.enter="search()" />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" native-type="submit">查询</el-button>
+          <el-button @click="resetFilter">重置</el-button>
           <el-button v-permission="'fa:asset:add'" type="primary" plain @click="open()">入库</el-button>
         </el-form-item>
       </el-form>

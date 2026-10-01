@@ -35,6 +35,17 @@ async function load() {
   total.value = res.total || 0
 }
 
+function filter() {
+  query.page = 1
+  void load()
+}
+
+function resetFilter() {
+  query.companyId = undefined
+  query.name = ''
+  filter()
+}
+
 function open(row?: any) {
   isEdit.value = !!row
   Object.assign(form, row || {
@@ -98,17 +109,17 @@ onMounted(async () => {
 <template>
   <div class="page-stack">
     <div class="page-card">
-      <el-form class="filter-bar" @submit.prevent="query.page = 1; load()">
+      <el-form class="filter-bar" @submit.prevent="filter">
         <el-form-item label="公司">
-          <el-select v-model="query.companyId" clearable placeholder="全部" style="width: 180px">
+          <el-select v-model="query.companyId" clearable placeholder="全部" style="width: 180px" @change="filter">
             <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="名称">
-          <el-input v-model="query.name" clearable placeholder="类别名" style="width: 160px" />
+          <el-input v-model="query.name" clearable placeholder="类别名" style="width: 160px" @change="filter" @keyup.enter="filter" />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" native-type="submit">查询</el-button>
+          <el-button @click="resetFilter">重置</el-button>
           <el-button v-permission="'fa:category:add'" type="primary" plain @click="open()">新建类别</el-button>
         </el-form-item>
       </el-form>

@@ -1,6 +1,7 @@
 package com.kk.admin.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.annotation.SaCheckRole;
 import cn.dev33.satoken.annotation.SaMode;
 import cn.dev33.satoken.stp.StpUtil;
 import com.kk.biz.entity.PmTask;
@@ -42,9 +43,11 @@ public class TaskController {
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long pageSize,
             Long projectId, Integer status, String statuses,
-            Integer priority, Long participantId, String title, Boolean overdue) {
+            Integer priority, Long participantId, String title, Boolean overdue, String dashboardCategory,
+            Long dashboardOwnerId, String dashboardFrom, String dashboardTo, String periodFrom, String periodTo) {
         return Result.ok(PageResult.of(taskService.pageManagementTasks(
-                page, pageSize, projectId, status, statuses, priority, participantId, title, overdue)));
+                page, pageSize, projectId, status, statuses, priority, participantId, title, overdue,
+                dashboardCategory, dashboardOwnerId, dashboardFrom, dashboardTo, periodFrom, periodTo)));
     }
 
     @GetMapping("/board")
@@ -68,10 +71,10 @@ public class TaskController {
     }
 
     @GetMapping("/management/dashboard")
-    @SaCheckPermission("project:task:list")
+    @SaCheckRole("task_manager")
     public Result<Map<String, Object>> managementDashboard(
-            Long projectId, Integer priority, Long participantId, String title) {
-        return Result.ok(taskService.managementDashboard(projectId, priority, participantId, title));
+            Long projectId, Integer priority, Long participantId, String title, String periodFrom, String periodTo) {
+        return Result.ok(taskService.managementDashboard(projectId, priority, participantId, title, periodFrom, periodTo));
     }
 
     /** 当前登录用户相关任务：参与或自己创建 */
@@ -87,7 +90,7 @@ public class TaskController {
     }
 
     @PostMapping
-    @SaCheckPermission("project:task:add")
+    @SaCheckPermission("project:task:list")
     public Result<Void> create(@RequestBody PmTask task) {
         taskService.createTask(task);
         return Result.ok();
@@ -122,13 +125,13 @@ public class TaskController {
     }
 
     @PostMapping("/image")
-    @SaCheckPermission(value = {"project:task:add", "project:task:edit"}, mode = SaMode.OR)
+    @SaCheckPermission(value = {"project:task:list", "project:task:add", "project:task:edit"}, mode = SaMode.OR)
     public Result<SysFile> uploadImage(@RequestParam("file") MultipartFile file) {
         return Result.ok(taskService.uploadImage(file));
     }
 
     @DeleteMapping("/image/{fileId}")
-    @SaCheckPermission(value = {"project:task:add", "project:task:edit"}, mode = SaMode.OR)
+    @SaCheckPermission(value = {"project:task:list", "project:task:add", "project:task:edit"}, mode = SaMode.OR)
     public Result<Void> deleteImage(@PathVariable Long fileId) {
         taskService.deleteTaskImage(fileId);
         return Result.ok();
@@ -140,17 +143,23 @@ public class TaskController {
         return Result.ok(taskService.listComments(id));
     }
 
-    @PostMapping("/{id}/comments")
-    @SaCheckPermission(value = {"project:task:add", "project:task:edit"}, mode = SaMode.OR)
-    public Result<PmTaskComment> addComment(@PathVariable Long id, @RequestBody CommentRequest request) {
-        return Result.ok(taskService.addComment(id, request.getContent()));
+    @PostMapping("/comment/attachment")
+    @SaCheckPermission(value = {"project:task:list", "project:task:add", "project:task:edit"}, mode = SaMode.OR)
+    public Result<SysFile> uploadCommentAttachment(@RequestParam("file") MultipartFile file) {
+        return Result.ok(taskService.uploadCommentAttachment(file));
     }
 
-    @DeleteMapping("/comment/{commentId}")
-    @SaCheckPermission(value = {"project:task:add", "project:task:edit"}, mode = SaMode.OR)
-    public Result<Void> deleteComment(@PathVariable Long commentId) {
-        taskService.deleteComment(commentId);
+    @DeleteMapping("/comment/attachment/{fileId}")
+    @SaCheckPermission(value = {"project:task:list", "project:task:add", "project:task:edit"}, mode = SaMode.OR)
+    public Result<Void> deleteCommentAttachment(@PathVariable Long fileId) {
+        taskService.deleteCommentAttachment(fileId);
         return Result.ok();
+    }
+
+    @PostMapping("/{id}/comments")
+    @SaCheckPermission(value = {"project:task:list", "project:task:add", "project:task:edit"}, mode = SaMode.OR)
+    public Result<PmTaskComment> addComment(@PathVariable Long id, @RequestBody CommentRequest request) {
+        return Result.ok(taskService.addComment(id, request.getContent(), request.getFileIds()));
     }
 
     @GetMapping("/{id}/flows")
@@ -177,6 +186,7 @@ public class TaskController {
     @Data
     public static class CommentRequest {
         private String content;
+        private List<Long> fileIds;
     }
 
     @Data

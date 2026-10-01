@@ -96,7 +96,7 @@ onMounted(async () => {
   <div class="page-card" v-loading="loading">
     <div class="page-head">
       <div>
-        <h2 class="title">任务看板</h2>
+        <h2 class="title">工单看板</h2>
         <p class="sub">工单 KPI、分布与预警（按公司）</p>
       </div>
       <div class="filters">

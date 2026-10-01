@@ -216,6 +216,8 @@ export const bizApi = {
     priority?: number
     participantId?: number
     title?: string
+    periodFrom?: string
+    periodTo?: string
   }) {
     return request<any>({ url: '/task/management/dashboard', method: 'get', params: params || {} })
   },
@@ -237,11 +239,19 @@ export const bizApi = {
   taskComments(taskId: number) {
     return request<any[]>({ url: `/task/${taskId}/comments`, method: 'get' })
   },
-  addTaskComment(taskId: number, content: string) {
-    return request<any>({ url: `/task/${taskId}/comments`, method: 'post', data: { content } })
+  addTaskComment(taskId: number, content: string, fileIds: number[] = []) {
+    return request<any>({ url: `/task/${taskId}/comments`, method: 'post', data: { content, fileIds } })
   },
-  deleteTaskComment(commentId: number) {
-    return request<void>({ url: `/task/comment/${commentId}`, method: 'delete' })
+  uploadTaskCommentAttachment(file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return request<any>({
+      url: '/task/comment/attachment', method: 'post', data: form,
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 10 * 60 * 1000,
+    })
+  },
+  deleteTaskCommentAttachment(fileId: number) {
+    return request<void>({ url: `/task/comment/attachment/${fileId}`, method: 'delete' })
   },
   taskFlows(taskId: number) {
     return request<any[]>({ url: `/task/${taskId}/flows`, method: 'get' })

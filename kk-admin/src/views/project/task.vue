@@ -10,7 +10,8 @@ import { companyTaskShareApi, type CompanyTaskShareOption } from '@/api/companyT
 
 const route = useRoute()
 const userStore = useUserStore()
-const isTaskManager = computed(() => userStore.hasPermission('project:task:confirm'))
+// 任务管理始终是个人工作台；管理视角已拆分到独立的“任务驾驶舱”。
+const isTaskManager = false
 
 /** “待办与进行中”快捷筛选包含待确认完成 */
 const OPEN_STATUSES = [0, 1, 4]
@@ -32,6 +33,8 @@ const summary = ref<any>({})
 const projects = ref<any[]>([])
 const taskDrawer = ref(false)
 const activeTaskId = ref<number | null>(null)
+type TaskDrawerAction = 'view' | 'edit' | 'transfer' | 'close'
+const taskDrawerAction = ref<TaskDrawerAction>('view')
 const listLoading = ref(false)
 const shareOpen = ref(false)
 const shareCompanies = ref<CompanyTaskShareOption[]>([])
@@ -132,17 +135,27 @@ const statusFilterKey = computed({
   },
 })
 
-const statCards = [
+const managerStatCards = [
   { key: 'riskProjects', label: '风险项目', hint: '需要负责人介入', icon: 'DataAnalysis', tone: 'rose' },
   { key: 'overdue', label: '已逾期', hint: '必须立即处理', icon: 'Warning', tone: 'rose' },
   { key: 'dueSoon', label: '7天内到期', hint: '提前确认交付', icon: 'Timer', tone: 'amber' },
   { key: 'pending', label: '待确认完成', hint: '等待管理确认', icon: 'CircleCheck', tone: 'cyan' },
-  { key: 'done30', label: '近30天完成', hint: '近期交付结果', icon: 'TrendCharts', tone: 'indigo' },
 ]
+
+const employeeStatCards = [
+  { key: 'todo', label: '我的待办', hint: '尚未开始处理', icon: 'List', tone: 'slate' },
+  { key: 'doing', label: '进行中', hint: '当前正在推进', icon: 'Loading', tone: 'cyan' },
+  { key: 'overdue', label: '已逾期', hint: '需要优先处理', icon: 'Warning', tone: 'rose' },
+  { key: 'pending', label: '待确认完成', hint: '已提交，等待确认', icon: 'CircleCheck', tone: 'amber' },
+]
+
+const statCards = computed(() => employeeStatCards)
 
 function isStatActive(key: string) {
   if (key === 'overdue') return !!query.overdue
   if (key === 'pending') return query.status === 4 && !query.overdue
+  if (key === 'todo') return query.status === 0 && !query.overdue
+  if (key === 'doing') return query.status === 1 && !query.overdue
   return false
 }
 
@@ -151,16 +164,9 @@ function onStatClick(key: string) {
     filterOverdue()
     return
   }
+  if (key === 'todo') return filterByStatus(0)
+  if (key === 'doing') return filterByStatus(1)
   if (key === 'pending') filterByStatus(4)
-}
-
-const riskTypeMap: Record<string, { label: string; type: 'danger' | 'warning' | 'info' | 'success' }> = {
-  BLOCKED: { label: '已阻塞', type: 'danger' },
-  OVERDUE: { label: '已逾期', type: 'danger' },
-  DUE_SOON: { label: '即将到期', type: 'warning' },
-  STALE: { label: '长期未更新', type: 'warning' },
-  NO_DUE_DATE: { label: '未设截止时间', type: 'info' },
-  PENDING: { label: '待确认', type: 'success' },
 }
 
 const maxTrend = computed(() => Math.max(1, ...(summary.value.trend || []).flatMap((item: any) => [item.created || 0, item.completed || 0])))
@@ -192,7 +198,7 @@ async function loadSummary() {
   if (query.projectId != null) params.projectId = query.projectId
   if (query.priority != null) params.priority = query.priority
   if (query.title.trim()) params.title = query.title.trim()
-  summary.value = await bizApi.managementTaskDashboard(params)
+  summary.value = await bizApi.managementTaskSummary(params)
 }
 
 async function load() {
@@ -255,8 +261,9 @@ function filterOverdue() {
   load()
 }
 
-function open(row?: any) {
+function open(row?: any, action: TaskDrawerAction = 'view') {
   activeTaskId.value = row?.id ?? null
+  taskDrawerAction.value = action
   taskDrawer.value = true
 }
 
@@ -283,7 +290,7 @@ async function review(row: any, approved: boolean) {
 }
 
 onMounted(async () => {
-  projects.value = await bizApi.taskManagementProjects()
+  projects.value = []
   shareCompanies.value = userStore.hasPermission('project:task:share')
     ? await companyTaskShareApi.options().catch(() => [])
     : []
@@ -305,18 +312,18 @@ onMounted(async () => {
   <div class="page-stack">
     <div class="page-top">
       <div class="page-top__main">
-        <h2 class="page-title">交付管理驾驶舱</h2>
+        <h2 class="page-title">{{ isTaskManager ? '交付管理驾驶舱' : '我的任务工作台' }}</h2>
         <p class="page-desc">
-          {{ isTaskManager ? '先处理风险和待确认事项，再下钻项目与具体任务。' : '聚焦本人负责或参与项目的交付风险与近期任务。' }}
+          {{ isTaskManager ? '先处理风险和待确认事项，再下钻项目与具体任务。' : '只展示我负责或参与的任务，优先处理逾期和临期事项。' }}
         </p>
       </div>
       <div class="page-actions">
         <el-button v-if="shareCompanies.length" v-permission="'project:task:share'" @click="shareOpen = true">今日工作外链</el-button>
-        <el-button v-permission="'project:task:add'" type="primary" @click="open()">新建任务</el-button>
+        <el-button type="primary" @click="open()">新建任务</el-button>
       </div>
     </div>
 
-    <div class="stat-grid">
+    <div class="stat-grid" :class="{ 'stat-grid--personal': !isTaskManager }">
       <button
         v-for="card in statCards"
         :key="card.key"
@@ -334,70 +341,7 @@ onMounted(async () => {
       </button>
     </div>
 
-    <div class="management-grid">
-      <section class="page-card action-center">
-        <div class="section-head">
-          <div>
-            <h3>风险行动中心</h3>
-            <p>按影响程度排序，优先处理可能影响交付的事项</p>
-          </div>
-          <div class="risk-badges">
-            <span>无截止 {{ summary.noDueDate ?? 0 }}</span>
-            <span>停滞 {{ summary.stale ?? 0 }}</span>
-          </div>
-        </div>
-        <div v-if="summary.riskTasks?.length" class="risk-list">
-          <button v-for="item in summary.riskTasks" :key="item.id" type="button" class="risk-row" @click="open(item)">
-            <el-tag :type="riskTypeMap[item.riskType]?.type || 'info'" size="small">
-              {{ riskTypeMap[item.riskType]?.label || '关注' }}
-            </el-tag>
-            <div class="risk-main">
-              <strong>{{ item.title }}</strong>
-              <span>{{ item.projectName }} · 负责人 {{ item.ownerName }}</span>
-            </div>
-            <div class="risk-meta">
-              <strong>{{ item.dueDate || '未设日期' }}</strong>
-              <span>{{ statusMap[item.status] || '未知状态' }}</span>
-            </div>
-          </button>
-        </div>
-        <el-empty v-else description="当前没有需要优先介入的风险任务" :image-size="64" />
-      </section>
-
-      <section class="page-card project-health">
-        <div class="section-head">
-          <div>
-            <h3>项目健康榜</h3>
-            <p>风险项目优先，点击项目查看任务</p>
-          </div>
-        </div>
-        <div v-if="summary.projectHealth?.length" class="health-list">
-          <button
-            v-for="item in summary.projectHealth"
-            :key="item.projectId"
-            type="button"
-            class="health-row"
-            @click="selectProject(item.projectId)"
-          >
-            <div class="health-project">
-              <div><strong>{{ item.projectName }}</strong><span>{{ item.ownerName }}</span></div>
-              <el-tag :type="healthMap[item.level]?.type || 'info'" size="small">
-                {{ healthMap[item.level]?.label || '未知' }}
-              </el-tag>
-            </div>
-            <div class="health-metrics">
-              <span><b>{{ item.open }}</b>未结</span>
-              <span class="danger"><b>{{ item.overdue }}</b>逾期</span>
-              <span><b>{{ item.dueSoon }}</b>临期</span>
-              <span><b>{{ item.pending }}</b>待确认</span>
-            </div>
-          </button>
-        </div>
-        <el-empty v-else description="暂无进行中的项目任务" :image-size="64" />
-      </section>
-    </div>
-
-    <div class="insight-grid">
+    <div v-if="isTaskManager" class="insight-grid">
       <section class="page-card performance-panel">
         <div class="section-head">
           <div><h3>交付效率</h3><p>按实际开始和完成时间计算</p></div>
@@ -405,7 +349,6 @@ onMounted(async () => {
         <div class="performance-metrics">
           <div><span>按期完成率</span><strong>{{ summary.onTimeRate == null ? '—' : `${summary.onTimeRate}%` }}</strong></div>
           <div><span>平均交付周期</span><strong>{{ summary.avgCycleDays == null ? '—' : `${summary.avgCycleDays}天` }}</strong></div>
-          <div><span>当前阻塞</span><strong :class="{ danger: summary.blocked > 0 }">{{ summary.blocked ?? 0 }}</strong></div>
         </div>
         <div class="trend-legend"><span class="created-dot" />新增任务 <span class="completed-dot" />完成任务</div>
         <div class="trend-chart">
@@ -420,19 +363,19 @@ onMounted(async () => {
       </section>
 
       <section class="page-card owner-panel">
-        <div class="section-head"><div><h3>主责人负载</h3><p>未结任务及风险分布</p></div></div>
+        <div class="section-head"><div><h3>任务负载</h3><p>按任务负责人和参与人统计，单个任务不重复计算</p></div></div>
         <div v-if="summary.ownerLoad?.length" class="owner-list">
           <div v-for="item in summary.ownerLoad" :key="item.ownerId" class="owner-row">
-            <div class="owner-line"><strong>{{ item.ownerName }}</strong><span>{{ item.open }}项 · 逾期{{ item.overdue }} · 阻塞{{ item.blocked }}</span></div>
+            <div class="owner-line"><strong>{{ item.ownerName }}</strong><span>{{ item.open }}项 · 逾期{{ item.overdue }}</span></div>
             <div class="owner-bar"><i :style="{ width: `${item.open / maxOwnerLoad * 100}%` }" /></div>
           </div>
         </div>
-        <el-empty v-else description="暂无主责人负载数据" :image-size="56" />
+        <el-empty v-else description="暂无任务负载数据" :image-size="56" />
       </section>
     </div>
 
-    <div class="task-workspace">
-      <aside class="page-card project-tree-panel">
+    <div class="task-workspace" :class="{ 'task-workspace--personal': !isTaskManager }">
+      <aside v-if="isTaskManager" class="page-card project-tree-panel">
         <div class="project-tree-head">
           <div>
             <h3>项目导航</h3>
@@ -469,27 +412,27 @@ onMounted(async () => {
           placeholder="任务标题"
           class="filter-keyword--wide"
           @keyup.enter="onFilter"
+          @change="onFilter"
         />
       </el-form-item>
       <el-form-item label="状态">
-        <el-select v-model="statusFilterKey" clearable placeholder="全部" class="filter-select--wide">
+        <el-select v-model="statusFilterKey" clearable placeholder="全部" class="filter-select--wide" @change="onFilter">
           <el-option v-for="item in statusFilterOptions" :key="item.value" :label="item.label" :value="item.value" />
         </el-select>
       </el-form-item>
       <el-form-item label="优先级">
-        <el-select v-model="query.priority" clearable placeholder="全部" class="filter-select">
+        <el-select v-model="query.priority" clearable placeholder="全部" class="filter-select" @change="onFilter">
           <el-option v-for="(label, value) in priorityMap" :key="value" :label="label" :value="Number(value)" />
         </el-select>
       </el-form-item>
       <el-form-item class="filter-actions">
-        <el-button type="primary" native-type="submit" :loading="listLoading">查询</el-button>
         <el-button @click="resetQuery">重置</el-button>
       </el-form-item>
     </el-form>
 
     <div class="page-card">
       <div class="section-head task-section-head">
-        <div><h3>{{ selectedProjectName }} · 任务明细</h3><p>用于筛选、下钻和日常执行</p></div>
+        <div><h3>{{ isTaskManager ? `${selectedProjectName} · 任务明细` : '我的任务明细' }}</h3><p>{{ isTaskManager ? '用于筛选、下钻和日常执行' : '仅包含我负责或直接参与的任务' }}</p></div>
       </div>
       <el-table v-loading="listLoading" :data="list" row-key="id" stripe empty-text="暂无任务" class="task-table">
         <el-table-column label="任务" min-width="320">
@@ -497,8 +440,7 @@ onMounted(async () => {
             <div class="task-title-cell">
               <div class="task-title-line">
                 <el-link type="primary" :underline="false" @click="open(row)">{{ row.title }}</el-link>
-                <el-tag v-if="row.blocked" type="danger" size="small" effect="light">阻塞</el-tag>
-                <el-tag v-else-if="row.overdue" type="danger" size="small" effect="light">逾期</el-tag>
+                <el-tag v-if="row.overdue" type="danger" size="small" effect="light">逾期</el-tag>
                 <el-tag v-else-if="!row.dueDate && [0, 1].includes(row.status)" type="info" size="small" effect="plain">无日期</el-tag>
                 <el-tag :type="priorityType[row.priority] || 'info'" size="small" effect="plain">
                   {{ priorityMap[row.priority] || '中' }}优先级
@@ -533,13 +475,18 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" :width="isTaskManager ? 200 : 88" fixed="right" align="center">
+        <el-table-column label="操作" width="220" fixed="right" align="center">
           <template #default="{ row }">
-            <el-button link type="primary" @click="open(row)">详情</el-button>
-            <template v-if="isTaskManager && row.status === 4">
-              <el-button link type="success" @click="review(row, true)">确认完成</el-button>
-              <el-button link type="danger" @click="review(row, false)">驳回</el-button>
-            </template>
+            <div class="task-row-actions">
+              <el-button link type="primary" @click="open(row)">详情</el-button>
+              <el-button v-if="userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3" link type="primary" @click="open(row, 'edit')">编辑</el-button>
+              <el-button v-if="userStore.hasPermission('project:task:add') && row.canTransfer && row.status !== 3" link type="primary" @click="open(row, 'transfer')">移交</el-button>
+              <el-button v-if="userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3" link type="danger" @click="open(row, 'close')">关闭</el-button>
+              <template v-if="isTaskManager && row.status === 4">
+                <el-button link type="success" @click="review(row, true)">确认完成</el-button>
+                <el-button link type="danger" @click="review(row, false)">驳回</el-button>
+              </template>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -563,6 +510,7 @@ onMounted(async () => {
       v-model="taskDrawer"
       :task-id="activeTaskId"
       :default-project-id="query.projectId"
+      :initial-action="taskDrawerAction"
       @saved="load"
       @deleted="load"
     />
@@ -573,7 +521,7 @@ onMounted(async () => {
 .page-title { margin: 0 0 5px; font-size: 20px; color: var(--kk-text); }
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
 }
 .stat-card {
@@ -641,6 +589,8 @@ onMounted(async () => {
 .task-table :deep(.el-table__cell) { padding: 13px 0; }
 .task-table :deep(.el-table__header .el-table__cell) { padding: 11px 0; }
 .task-table :deep(.el-table__row) { height: 66px; }
+.task-row-actions { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px 10px; }
+.task-row-actions :deep(.el-button + .el-button) { margin-left: 0; }
 .task-title-cell { min-width: 0; line-height: 1.4; }
 .task-title-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .task-title-line .el-link { min-width: 0; max-width: 250px; font-weight: 600; }
@@ -669,6 +619,8 @@ onMounted(async () => {
   gap: 14px;
   align-items: stretch;
 }
+.stat-grid--personal { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.task-workspace--personal { grid-template-columns: minmax(0, 1fr); }
 .task-workspace-main {
   display: flex;
   flex-direction: column;
@@ -740,6 +692,7 @@ onMounted(async () => {
   gap: 14px;
   align-items: stretch;
 }
+.management-grid--personal { grid-template-columns: minmax(0, 1fr); }
 .management-grid > .page-card,
 .insight-grid > .page-card {
   min-width: 0;

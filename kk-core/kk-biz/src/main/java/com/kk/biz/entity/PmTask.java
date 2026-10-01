@@ -10,7 +10,6 @@ import lombok.EqualsAndHashCode;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.math.BigDecimal;
 import java.util.List;
 
 @Data
@@ -47,12 +46,6 @@ public class PmTask extends BaseEntity {
     private LocalDateTime completedAt;
 
     private LocalDateTime lastActivityAt;
-
-    private BigDecimal estimatedHours;
-
-    private Boolean blocked;
-
-    private String blockedReason;
 
     /** NORMAL / WARNING / DANGER */
     private String riskLevel;

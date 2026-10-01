@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
@@ -227,6 +227,12 @@ function onCycleTabChange() {
   yearMonth.value = defaultPeriod()
 }
 
+function resetRunFilters() {
+  companyId.value = companies.value[0]?.id
+  yearMonth.value = defaultPeriod()
+  void loadRuns()
+}
+
 const statusLabel: Record<string, string> = {
   PENDING_CONFIRM: '待确认',
   CONFIRMED: '已确认',
@@ -255,9 +261,6 @@ const triggerLabel: Record<string, string> = {
   MANUAL: '手动',
 }
 
-watch(companyId, () => loadRuns())
-watch(yearMonth, () => loadRuns())
-
 onMounted(async () => {
   await loadMeta()
   await loadRuns()
@@ -269,7 +272,7 @@ onMounted(async () => {
     <div class="page-card">
       <div class="toolbar">
         <div class="toolbar__left">
-          <el-select v-model="companyId" placeholder="公司" style="width: 200px">
+          <el-select v-model="companyId" placeholder="公司" style="width: 200px" @change="loadRuns">
             <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
           <el-tag effect="plain">月薪批次</el-tag>
@@ -279,8 +282,9 @@ onMounted(async () => {
             clearable
             style="width: 140px"
             @keyup.enter="loadRuns"
+            @change="loadRuns"
           />
-          <el-button type="primary" @click="loadRuns">查询</el-button>
+          <el-button @click="resetRunFilters">重置</el-button>
         </div>
         <div class="toolbar__right">
           <el-button v-permission="'hr:salary:run:manual'" @click="doPreview">手动预告</el-button>

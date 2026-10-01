@@ -34,9 +34,10 @@ const routes: RouteRecordRaw[] = [
       { path: 'workflow/flow', component: () => import('@/views/workflow/flow.vue'), meta: { title: '审批配置' } },
       { path: 'project/list', component: () => import('@/views/project/list.vue'), meta: { title: '项目管理' } },
       { path: 'project/task', component: () => import('@/views/project/task.vue'), meta: { title: '任务管理' } },
+      { path: 'project/task-cockpit', component: () => import('@/views/project/task-cockpit.vue'), meta: { title: '任务驾驶舱', role: 'task_manager' } },
       { path: 'ticket/manage', component: () => import('@/views/ticket/manage.vue'), meta: { title: '工单管理' } },
       { path: 'ticket/submissions', component: () => import('@/views/ticket/submissions.vue'), meta: { title: '我的工单' } },
-      { path: 'ticket/dashboard', component: () => import('@/views/ticket/dashboard.vue'), meta: { title: '任务看板' } },
+      { path: 'ticket/dashboard', component: () => import('@/views/ticket/dashboard.vue'), meta: { title: '工单看板' } },
       { path: 'hr/archive', component: () => import('@/views/hr/archive.vue'), meta: { title: '人员档案' } },
       { path: 'hr/labor-agreement', component: () => import('@/views/hr/labor-agreement/index.vue'), meta: { title: '劳务协议' } },
       { path: 'hr/depr-category', component: () => import('@/views/hr/depr-category.vue'), meta: { title: '折旧类别' } },
@@ -91,6 +92,8 @@ router.beforeEach(async (to) => {
   }
   const permission = to.meta.permission as string | undefined
   if (permission && !userStore.hasPermission(permission)) return '/account'
+  const role = to.meta.role as string | undefined
+  if (role && !userStore.roles.includes(role)) return '/account'
   return true
 })
 
