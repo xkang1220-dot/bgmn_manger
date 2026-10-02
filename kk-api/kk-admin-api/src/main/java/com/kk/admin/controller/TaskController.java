@@ -77,7 +77,7 @@ public class TaskController {
         return Result.ok(taskService.managementDashboard(projectId, priority, participantId, title, periodFrom, periodTo));
     }
 
-    /** 当前登录用户相关任务：参与或自己创建 */
+    /** 当前登录用户相关任务：我负责或我参与（与任务工作台个人列表口径一致） */
     @GetMapping("/related")
     public Result<List<PmTask>> related() {
         return Result.ok(taskService.listRelatedTasks(StpUtil.getLoginIdAsLong()));

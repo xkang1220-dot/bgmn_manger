@@ -603,6 +603,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (userId == null) {
             return List.of();
         }
+        // 与任务工作台 /task/management/page 个人口径一致：我负责或我参与。
+        // 不再单独按 createBy 收口，避免「仅创建过、已不在参与人中」的任务出现在个人中心却进不了任务管理。
         List<Long> memberTaskIds = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
                         .eq(PmTaskMember::getUserId, userId)
                         .select(PmTaskMember::getTaskId))
@@ -613,7 +615,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 .toList();
         List<PmTask> list = list(new LambdaQueryWrapper<PmTask>()
                 .and(w -> {
-                    w.eq(PmTask::getCreateBy, userId);
+                    w.eq(PmTask::getAssigneeId, userId);
                     if (!memberTaskIds.isEmpty()) {
                         w.or().in(PmTask::getId, memberTaskIds);
                     }

@@ -40,7 +40,7 @@ public interface PmTaskService extends IService<PmTask> {
     /** 看板用：按项目拉取任务（不分页，排除已关闭） */
     List<PmTask> listBoardTasks(Long projectId);
 
-    /** 与用户相关的任务：参与或自己创建 */
+    /** 与用户相关的任务：我负责或我参与（与任务工作台个人列表口径一致） */
     List<PmTask> listRelatedTasks(Long userId);
 
     void createTask(PmTask task);
