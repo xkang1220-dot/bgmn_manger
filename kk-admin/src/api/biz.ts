@@ -195,6 +195,12 @@ export const bizApi = {
   taskRelated() {
     return request<any[]>({ url: '/task/related', method: 'get' })
   },
+  taskRelatedPage(params: Record<string, unknown>) {
+    return request<PageResult<any>>({ url: '/task/related/page', method: 'get', params })
+  },
+  taskPriorityPage(params: Record<string, unknown>) {
+    return request<PageResult<any>>({ url: '/task/priority/page', method: 'get', params })
+  },
   taskSummary(params?: {
     projectId?: number
     priority?: number

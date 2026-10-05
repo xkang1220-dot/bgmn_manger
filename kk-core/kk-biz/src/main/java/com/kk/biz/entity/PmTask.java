@@ -76,6 +76,10 @@ public class PmTask extends BaseEntity {
     @TableField(exist = false)
     private Boolean overdue;
 
+    /** 个人中心优先事项：OVERDUE / DUE_SOON / STALE / NO_DUE_DATE / PENDING */
+    @TableField(exist = false)
+    private String riskType;
+
     /** 提交时携带的图片文件 ID */
     @TableField(exist = false)
     private List<Long> imageFileIds;

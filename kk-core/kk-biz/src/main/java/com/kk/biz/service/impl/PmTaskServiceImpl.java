@@ -603,28 +603,96 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (userId == null) {
             return List.of();
         }
-        // 与任务工作台 /task/management/page 个人口径一致：我负责或我参与。
-        // 不再单独按 createBy 收口，避免「仅创建过、已不在参与人中」的任务出现在个人中心却进不了任务管理。
-        List<Long> memberTaskIds = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
+        LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<>();
+        applyRelatedUserFilter(wrapper, userId);
+        wrapper.orderByAsc(PmTask::getPriority)
+                .orderByAsc(PmTask::getDueDate)
+                .orderByDesc(PmTask::getId);
+        List<PmTask> list = list(wrapper);
+        fillExtras(list);
+        return list;
+    }
+
+    @Override
+    public Page<PmTask> pageRelatedTasks(long page, long pageSize, Long projectId, Long userId) {
+        if (userId == null) {
+            return new Page<>(page, pageSize);
+        }
+        LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<>();
+        applyRelatedUserFilter(wrapper, userId);
+        applyProjectIdFilter(wrapper, projectId);
+        wrapper.orderByAsc(PmTask::getPriority)
+                .orderByAsc(PmTask::getDueDate)
+                .orderByDesc(PmTask::getId);
+        Page<PmTask> result = page(new Page<>(page, pageSize), wrapper);
+        fillExtras(result.getRecords());
+        return result;
+    }
+
+    @Override
+    public Page<PmTask> pagePriorityTasks(long page, long pageSize, Long projectId) {
+        LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<>();
+        applyProjectIdFilter(wrapper, projectId);
+        applyVisibleScope(wrapper);
+        applyManagementProjectScope(wrapper);
+        applyPriorityRiskFilter(wrapper);
+        wrapper.last("ORDER BY CASE "
+                + "WHEN due_date < CURRENT_DATE AND status IN (0, 1) THEN 50 "
+                + "WHEN due_date >= CURRENT_DATE AND due_date <= DATE_ADD(CURRENT_DATE, INTERVAL 7 DAY) AND status IN (0, 1) THEN 40 "
+                + "WHEN status = 1 AND last_activity_at < DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 30 "
+                + "WHEN due_date IS NULL AND status IN (0, 1) THEN 20 "
+                + "WHEN status = 4 THEN 10 ELSE 0 END DESC, due_date IS NULL, due_date ASC, id DESC");
+        Page<PmTask> result = page(new Page<>(page, pageSize), wrapper);
+        fillExtras(result.getRecords());
+        fillRiskType(result.getRecords());
+        return result;
+    }
+
+    /** 与任务工作台 /task/management/page 个人口径一致：我负责或我参与。 */
+    private void applyRelatedUserFilter(LambdaQueryWrapper<PmTask> wrapper, Long userId) {
+        Set<Long> memberTaskIds = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
                         .eq(PmTaskMember::getUserId, userId)
                         .select(PmTaskMember::getTaskId))
                 .stream()
                 .map(PmTaskMember::getTaskId)
-                .filter(id -> id != null)
-                .distinct()
-                .toList();
-        List<PmTask> list = list(new LambdaQueryWrapper<PmTask>()
-                .and(w -> {
-                    w.eq(PmTask::getAssigneeId, userId);
-                    if (!memberTaskIds.isEmpty()) {
-                        w.or().in(PmTask::getId, memberTaskIds);
-                    }
-                })
-                .orderByAsc(PmTask::getPriority)
-                .orderByAsc(PmTask::getDueDate)
-                .orderByDesc(PmTask::getId));
-        fillExtras(list);
-        return list;
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        wrapper.and(w -> {
+            w.eq(PmTask::getAssigneeId, userId);
+            if (!memberTaskIds.isEmpty()) {
+                w.or().in(PmTask::getId, memberTaskIds);
+            }
+        });
+    }
+
+    private void applyPriorityRiskFilter(LambdaQueryWrapper<PmTask> wrapper) {
+        wrapper.apply("("
+                + "(due_date < CURRENT_DATE AND status IN (0, 1))"
+                + " OR (due_date >= CURRENT_DATE AND due_date <= DATE_ADD(CURRENT_DATE, INTERVAL 7 DAY) AND status IN (0, 1))"
+                + " OR (due_date IS NULL AND status IN (0, 1))"
+                + " OR (status = 1 AND last_activity_at < DATE_SUB(NOW(), INTERVAL 7 DAY))"
+                + " OR status = 4"
+                + ")");
+    }
+
+    private void fillRiskType(List<PmTask> tasks) {
+        if (tasks == null || tasks.isEmpty()) {
+            return;
+        }
+        LocalDate today = LocalDate.now();
+        LocalDate dueSoonEnd = today.plusDays(7);
+        LocalDateTime staleBefore = LocalDateTime.now().minusDays(7);
+        for (PmTask row : tasks) {
+            Integer status = row.getStatus() == null ? 0 : row.getStatus();
+            boolean open = status == 0 || status == 1;
+            boolean rowOverdue = row.getDueDate() != null && row.getDueDate().isBefore(today) && open;
+            boolean rowDueSoon = row.getDueDate() != null && !row.getDueDate().isBefore(today)
+                    && !row.getDueDate().isAfter(dueSoonEnd) && open;
+            boolean rowNoDueDate = row.getDueDate() == null && open;
+            boolean rowStale = status == 1 && row.getLastActivityAt() != null && row.getLastActivityAt().isBefore(staleBefore);
+            row.setRiskType(rowOverdue ? "OVERDUE" : rowDueSoon ? "DUE_SOON"
+                    : rowStale ? "STALE" : rowNoDueDate ? "NO_DUE_DATE" : "PENDING");
+        }
     }
 
     @Override

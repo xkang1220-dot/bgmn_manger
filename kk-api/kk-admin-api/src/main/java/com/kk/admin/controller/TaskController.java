@@ -83,6 +83,24 @@ public class TaskController {
         return Result.ok(taskService.listRelatedTasks(StpUtil.getLoginIdAsLong()));
     }
 
+    @GetMapping("/related/page")
+    public Result<PageResult<PmTask>> relatedPage(
+            @RequestParam(defaultValue = "1") long page,
+            @RequestParam(defaultValue = "10") long pageSize,
+            Long projectId) {
+        return Result.ok(PageResult.of(
+                taskService.pageRelatedTasks(page, pageSize, projectId, StpUtil.getLoginIdAsLong())));
+    }
+
+    @GetMapping("/priority/page")
+    @SaCheckPermission("project:task:list")
+    public Result<PageResult<PmTask>> priorityPage(
+            @RequestParam(defaultValue = "1") long page,
+            @RequestParam(defaultValue = "10") long pageSize,
+            Long projectId) {
+        return Result.ok(PageResult.of(taskService.pagePriorityTasks(page, pageSize, projectId)));
+    }
+
     @GetMapping("/{id}")
     @SaCheckPermission("project:task:list")
     public Result<PmTask> detail(@PathVariable Long id) {

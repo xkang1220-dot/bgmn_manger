@@ -43,6 +43,12 @@ public interface PmTaskService extends IService<PmTask> {
     /** 与用户相关的任务：我负责或我参与（与任务工作台个人列表口径一致） */
     List<PmTask> listRelatedTasks(Long userId);
 
+    /** 与我相关任务分页，口径与 {@link #listRelatedTasks} 一致 */
+    Page<PmTask> pageRelatedTasks(long page, long pageSize, Long projectId, Long userId);
+
+    /** 个人中心优先事项分页：逾期 / 临期 / 长期未更新 / 未设截止日 / 待确认 */
+    Page<PmTask> pagePriorityTasks(long page, long pageSize, Long projectId);
+
     void createTask(PmTask task);
 
     void updateTask(PmTask task);

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { bizApi } from '@/api/biz'
@@ -79,10 +79,7 @@ const withdrawCalcNet = ref(0)
 let withdrawTaxSeq = 0
 
 const todoApprovals = ref<any[]>([])
-const prioritySummary = ref<any>({})
 const calendarTasks = ref<any[]>([])
-const allTasks = ref<any[]>([])
-const relatedTasks = ref<any[]>([])
 const myLeaves = ref<any[]>([])
 const myProjects = ref<any[]>([])
 const calendarDate = ref(new Date())
@@ -91,9 +88,24 @@ const taskScope = ref<'mine' | 'all'>('mine')
 /** 任务模块：左侧选中项目；右侧任务分栏 */
 const taskPanelProjectId = ref<number | null>(null)
 const taskPanelTab = ref<'all' | 'related' | 'priority'>('related')
+const TASK_PAGE_SIZE = 10
+const TASK_ROW_HEIGHT = 52
+const TASK_ROW_GAP = 4
+const TASK_ROW_STRIDE = TASK_ROW_HEIGHT + TASK_ROW_GAP
+const TASK_OVERSCAN = 6
+const panelTaskList = ref<any[]>([])
+const panelTaskTotal = ref(0)
+const panelTaskPage = ref(0)
+const panelTaskLoading = ref(false)
+const panelTaskLoadingMore = ref(false)
+const panelTabTotals = reactive({ all: 0, related: 0, priority: 0 })
+const taskPanelListRef = ref<HTMLElement | null>(null)
+const panelScrollTop = ref(0)
+const panelViewportH = ref(0)
 let taskLoadSeq = 0
 let leaveLoadSeq = 0
-let priorityLoadSeq = 0
+let panelLoadSeq = 0
+let panelListObserver: ResizeObserver | undefined
 
 /** 日历考勤标记：角色权限里勾选「查看考勤」 */
 const canViewLeave = computed(() => userStore.hasPermission('hr:leave:mine'))
@@ -380,29 +392,37 @@ function selectTaskProject(id: number | null) {
   taskPanelProjectId.value = id
 }
 
-function filterByPanelProject(list: any[]) {
-  if (taskPanelProjectId.value == null) return list
-  return list.filter((t) => Number(t.projectId) === Number(taskPanelProjectId.value))
-}
-
-const panelAllTasks = computed(() => filterByPanelProject(allTasks.value))
-const panelRelatedTasks = computed(() => filterByPanelProject(relatedTasks.value))
-const panelPriorityTasks = computed(() => {
-  const list = Array.isArray(prioritySummary.value?.riskTasks) ? prioritySummary.value.riskTasks : []
-  return filterByPanelProject(list)
-})
-
-const panelTaskList = computed(() => {
-  if (taskPanelTab.value === 'all') return panelAllTasks.value
-  if (taskPanelTab.value === 'related') return panelRelatedTasks.value
-  return panelPriorityTasks.value
-})
-
 const panelTaskEmpty = computed(() => {
   if (taskPanelTab.value === 'priority') return '当前没有需要优先处理的任务'
   if (taskPanelTab.value === 'all') return '暂无任务'
   return '暂无相关任务'
 })
+
+const panelHasMore = computed(() => panelTaskList.value.length < panelTaskTotal.value)
+const panelVirtualStart = computed(() => {
+  const start = Math.floor(panelScrollTop.value / TASK_ROW_STRIDE) - TASK_OVERSCAN
+  return Math.max(0, start)
+})
+const panelVirtualEnd = computed(() => {
+  const visible = Math.ceil((panelViewportH.value || 1) / TASK_ROW_STRIDE) + TASK_OVERSCAN * 2
+  return Math.min(panelTaskList.value.length, panelVirtualStart.value + Math.max(visible, 1))
+})
+const panelVirtualItems = computed(() =>
+  panelTaskList.value.slice(panelVirtualStart.value, panelVirtualEnd.value).map((item, offset) => ({
+    item,
+    idx: panelVirtualStart.value + offset,
+  })),
+)
+const panelVirtualHeight = computed(() => {
+  const n = panelTaskList.value.length
+  if (!n) return 0
+  return n * TASK_ROW_STRIDE - TASK_ROW_GAP
+})
+const panelVirtualOffset = computed(() => panelVirtualStart.value * TASK_ROW_STRIDE)
+
+function panelTabTotal(tab: 'all' | 'related' | 'priority') {
+  return tab === taskPanelTab.value ? panelTaskTotal.value : panelTabTotals[tab]
+}
 
 function searchLedger() {
   ledgerQuery.page = 1
@@ -914,45 +934,140 @@ async function loadTasks() {
   const seq = ++taskLoadSeq
   if (!uid) {
     calendarTasks.value = []
-    allTasks.value = []
-    relatedTasks.value = []
     return
   }
   try {
     const related = (await bizApi.taskRelated()) || []
-    let all = related
-    if (seeAllProjects.value) {
+    let list = related
+    if (seeAllProjects.value && taskScope.value === 'all') {
       try {
         const res = await bizApi.taskPage({ page: 1, pageSize: 200 })
-        all = res.list || []
+        list = res.list || []
       } catch {
-        all = related
+        list = related
       }
     }
     if (seq !== taskLoadSeq) return
-    relatedTasks.value = related
-    allTasks.value = all
-    // 日历仍按原 scope 切换
-    const useAll = seeAllProjects.value && taskScope.value === 'all'
-    calendarTasks.value = useAll ? all : related
+    calendarTasks.value = list
   } catch {
     if (seq !== taskLoadSeq) return
     calendarTasks.value = []
-    allTasks.value = []
-    relatedTasks.value = []
   }
 }
 
-async function loadPriorityTasks() {
-  const seq = ++priorityLoadSeq
-  try {
-    const data = await bizApi.managementTaskSummary()
-    if (seq !== priorityLoadSeq) return
-    prioritySummary.value = data || {}
-  } catch {
-    if (seq !== priorityLoadSeq) return
-    prioritySummary.value = {}
+function panelQueryParams(page: number) {
+  const params: Record<string, unknown> = { page, pageSize: TASK_PAGE_SIZE }
+  if (taskPanelProjectId.value != null) params.projectId = taskPanelProjectId.value
+  return params
+}
+
+async function fetchPanelPage(page: number) {
+  const params = panelQueryParams(page)
+  if (taskPanelTab.value === 'priority') {
+    return bizApi.taskPriorityPage(params)
   }
+  if (taskPanelTab.value === 'related' || !seeAllProjects.value) {
+    return bizApi.taskRelatedPage(params)
+  }
+  try {
+    return await bizApi.taskPage(params)
+  } catch {
+    return bizApi.taskRelatedPage(params)
+  }
+}
+
+function measurePanelViewport() {
+  const el = taskPanelListRef.value
+  if (!el) return
+  panelViewportH.value = el.clientHeight
+}
+
+async function fillPanelIfNeeded(seq: number) {
+  await nextTick()
+  measurePanelViewport()
+  const el = taskPanelListRef.value
+  if (!el || seq !== panelLoadSeq) return
+  if (panelHasMore.value && el.scrollHeight <= el.clientHeight + 8) {
+    await loadMorePanelTasks()
+  }
+}
+
+async function loadPanelTasks(reset = true) {
+  const uid = userStore.user?.id
+  if (!uid) {
+    panelTaskList.value = []
+    panelTaskTotal.value = 0
+    panelTaskPage.value = 0
+    return
+  }
+  if (!reset) {
+    if (!panelHasMore.value || panelTaskLoadingMore.value || panelTaskLoading.value) return
+    panelTaskLoadingMore.value = true
+  } else {
+    panelLoadSeq += 1
+    panelTaskList.value = []
+    panelTaskTotal.value = 0
+    panelTaskPage.value = 0
+    panelScrollTop.value = 0
+    panelTaskLoading.value = true
+    panelTaskLoadingMore.value = false
+    await nextTick()
+    if (taskPanelListRef.value) taskPanelListRef.value.scrollTop = 0
+  }
+  const seq = panelLoadSeq
+  const nextPage = reset ? 1 : panelTaskPage.value + 1
+  try {
+    const res = await fetchPanelPage(nextPage)
+    if (seq !== panelLoadSeq) return
+    const list = Array.isArray(res?.list) ? res.list : []
+    if (!list.length) {
+      panelTaskTotal.value = reset ? 0 : panelTaskList.value.length
+      panelTabTotals[taskPanelTab.value] = panelTaskTotal.value
+      if (reset) panelTaskList.value = []
+    } else {
+      panelTaskTotal.value = Number(res?.total || 0)
+      panelTabTotals[taskPanelTab.value] = panelTaskTotal.value
+      panelTaskPage.value = nextPage
+      panelTaskList.value = reset ? list : panelTaskList.value.concat(list)
+    }
+  } catch {
+    if (seq !== panelLoadSeq) return
+    if (reset) {
+      panelTaskList.value = []
+      panelTaskTotal.value = 0
+      panelTabTotals[taskPanelTab.value] = 0
+    }
+  } finally {
+    if (seq === panelLoadSeq) {
+      panelTaskLoading.value = false
+      panelTaskLoadingMore.value = false
+    }
+  }
+  if (seq === panelLoadSeq) await fillPanelIfNeeded(seq)
+}
+
+async function loadMorePanelTasks() {
+  if (panelTaskLoading.value || panelTaskLoadingMore.value || !panelHasMore.value) return
+  await loadPanelTasks(false)
+}
+
+function onTaskPanelScroll(e: Event) {
+  const el = e.target as HTMLElement
+  panelScrollTop.value = el.scrollTop
+  panelViewportH.value = el.clientHeight
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 48) {
+    void loadMorePanelTasks()
+  }
+}
+
+function bindPanelListObserver() {
+  panelListObserver?.disconnect()
+  const el = taskPanelListRef.value
+  if (!el || typeof ResizeObserver === 'undefined') return
+  panelListObserver = new ResizeObserver(() => {
+    measurePanelViewport()
+  })
+  panelListObserver.observe(el)
 }
 
 function onTaskScopeChange() {
@@ -998,7 +1113,7 @@ onMounted(async () => {
 
   loading.value = true
   try {
-    const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadPriorityTasks(), loadProjects(), loadLeaves()]
+    const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadPanelTasks(true), loadProjects(), loadLeaves()]
     if (canSeeWallet.value) {
       jobs.push(
         (async () => {
@@ -1020,6 +1135,18 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+  bindPanelListObserver()
+})
+
+watch(taskPanelTab, () => {
+  void loadPanelTasks(true)
+})
+
+watch(taskPanelProjectId, () => {
+  panelTabTotals.all = 0
+  panelTabTotals.related = 0
+  panelTabTotals.priority = 0
+  void loadPanelTasks(true)
 })
 
 watch(
@@ -1034,6 +1161,7 @@ watch(
 
 onUnmounted(() => {
   if (welcomeClockTimer) clearInterval(welcomeClockTimer)
+  panelListObserver?.disconnect()
 })
 </script>
 
@@ -1373,7 +1501,7 @@ onUnmounted(() => {
                 @click="taskPanelTab = 'all'"
               >
                 <span>所有任务</span>
-                <i v-if="panelAllTasks.length" class="task-tab-badge">{{ panelAllTasks.length > 99 ? '99+' : panelAllTasks.length }}</i>
+                <i v-if="panelTabTotal('all')" class="task-tab-badge">{{ panelTabTotal('all') > 99 ? '99+' : panelTabTotal('all') }}</i>
               </button>
               <button
                 type="button"
@@ -1384,7 +1512,7 @@ onUnmounted(() => {
                 @click="taskPanelTab = 'related'"
               >
                 <span>与我相关</span>
-                <i v-if="panelRelatedTasks.length" class="task-tab-badge">{{ panelRelatedTasks.length > 99 ? '99+' : panelRelatedTasks.length }}</i>
+                <i v-if="panelTabTotal('related')" class="task-tab-badge">{{ panelTabTotal('related') > 99 ? '99+' : panelTabTotal('related') }}</i>
               </button>
               <button
                 type="button"
@@ -1395,51 +1523,65 @@ onUnmounted(() => {
                 @click="taskPanelTab = 'priority'"
               >
                 <span>优先事项</span>
-                <i v-if="panelPriorityTasks.length" class="task-tab-badge">{{ panelPriorityTasks.length > 99 ? '99+' : panelPriorityTasks.length }}</i>
+                <i v-if="panelTabTotal('priority')" class="task-tab-badge">{{ panelTabTotal('priority') > 99 ? '99+' : panelTabTotal('priority') }}</i>
               </button>
             </div>
 
-            <div class="task-panel__list">
-              <template v-if="taskPanelTab === 'priority'">
-                <button
-                  v-for="(item, idx) in panelPriorityTasks"
-                  :key="'p' + item.id"
-                  type="button"
-                  class="task-panel__item task-panel__item--priority"
-                  @click="openTask(item)"
-                >
-                  <i class="task-panel__index">{{ idx + 1 }}</i>
-                  <el-tag :type="riskTypeMap[item.riskType]?.type || 'info'" size="small">
-                    {{ riskTypeMap[item.riskType]?.label || '关注' }}
-                  </el-tag>
-                  <div class="task-panel__item-main">
-                    <strong>{{ item.title }}</strong>
-                    <span>{{ item.projectName || '—' }}</span>
-                  </div>
-                  <div class="task-panel__item-meta">
-                    <strong>{{ item.dueDate || '未设日期' }}</strong>
-                    <span>{{ taskStatusMap[item.status] || '未知状态' }}</span>
-                  </div>
-                </button>
-                <div v-if="!panelPriorityTasks.length" class="task-panel__empty">{{ panelTaskEmpty }}</div>
-              </template>
-              <template v-else>
-                <button
-                  v-for="(t, idx) in panelTaskList"
-                  :key="t.id"
-                  type="button"
-                  class="task-panel__item"
-                  @click="openTask(t)"
-                >
-                  <i class="task-panel__index">{{ idx + 1 }}</i>
-                  <div class="task-panel__item-main">
-                    <strong>{{ t.title }}</strong>
-                    <span>{{ t.projectName || '—' }} · 截止 {{ t.dueDate || '未设' }}</span>
-                  </div>
-                  <em :class="{ overdue: t.overdue }">{{ t.statusLabel || taskStatusMap[t.status] || t.status || '—' }}</em>
-                </button>
-                <div v-if="!panelTaskList.length" class="task-panel__empty">{{ panelTaskEmpty }}</div>
-              </template>
+            <div
+              ref="taskPanelListRef"
+              class="task-panel__list"
+              v-loading="panelTaskLoading"
+              @scroll.passive="onTaskPanelScroll"
+            >
+              <div v-if="!panelTaskList.length && !panelTaskLoading" class="task-panel__empty">{{ panelTaskEmpty }}</div>
+              <div
+                v-else-if="panelTaskList.length"
+                class="task-panel__virtual"
+                :style="{ height: panelVirtualHeight + 'px' }"
+              >
+                <div class="task-panel__virtual-inner" :style="{ transform: `translateY(${panelVirtualOffset}px)` }">
+                  <template v-if="taskPanelTab === 'priority'">
+                    <button
+                      v-for="{ item, idx } in panelVirtualItems"
+                      :key="'p' + item.id"
+                      type="button"
+                      class="task-panel__item task-panel__item--priority"
+                      @click="openTask(item)"
+                    >
+                      <i class="task-panel__index">{{ idx + 1 }}</i>
+                      <el-tag :type="riskTypeMap[item.riskType]?.type || 'info'" size="small">
+                        {{ riskTypeMap[item.riskType]?.label || '关注' }}
+                      </el-tag>
+                      <div class="task-panel__item-main">
+                        <strong>{{ item.title }}</strong>
+                        <span>{{ item.projectName || '—' }}</span>
+                      </div>
+                      <div class="task-panel__item-meta">
+                        <strong>{{ item.dueDate || '未设日期' }}</strong>
+                        <span>{{ taskStatusMap[item.status] || '未知状态' }}</span>
+                      </div>
+                    </button>
+                  </template>
+                  <template v-else>
+                    <button
+                      v-for="{ item: t, idx } in panelVirtualItems"
+                      :key="t.id"
+                      type="button"
+                      class="task-panel__item"
+                      @click="openTask(t)"
+                    >
+                      <i class="task-panel__index">{{ idx + 1 }}</i>
+                      <div class="task-panel__item-main">
+                        <strong>{{ t.title }}</strong>
+                        <span>{{ t.projectName || '—' }} · 截止 {{ t.dueDate || '未设' }}</span>
+                      </div>
+                      <em :class="{ overdue: t.overdue }">{{ t.statusLabel || taskStatusMap[t.status] || t.status || '—' }}</em>
+                    </button>
+                  </template>
+                </div>
+              </div>
+              <div v-if="panelTaskLoadingMore" class="task-panel__more">加载中...</div>
+              <div v-else-if="panelTaskList.length && !panelHasMore && panelTaskTotal > TASK_PAGE_SIZE" class="task-panel__more">已加载全部</div>
             </div>
           </div>
         </div>
@@ -2370,6 +2512,19 @@ onUnmounted(() => {
   scrollbar-gutter: stable;
 }
 
+.task-panel__virtual {
+  position: relative;
+  width: 100%;
+  flex: 0 0 auto;
+}
+
+.task-panel__virtual-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  will-change: transform;
+}
+
 .task-panel__item {
   display: flex;
   align-items: center;
@@ -2377,7 +2532,10 @@ onUnmounted(() => {
   gap: 10px;
   width: 100%;
   box-sizing: border-box;
-  padding: 10px 12px;
+  height: 52px;
+  flex-shrink: 0;
+  overflow: hidden;
+  padding: 8px 12px;
   border: 1px solid transparent;
   border-radius: 9px;
   background: transparent;
@@ -2476,6 +2634,14 @@ onUnmounted(() => {
   text-align: center;
   color: var(--kk-text-muted);
   font-size: 13px;
+}
+
+.task-panel__more {
+  flex-shrink: 0;
+  padding: 8px 4px 4px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--kk-text-muted);
 }
 
 .freeze-link {
