@@ -98,10 +98,9 @@ const isMajorShell = computed(
 const isChildProject = computed(() => !!detail.value?.parentId)
 const canCreateTask = computed(() => {
   if (!detail.value || isMajorShell.value) return false
-  const scale = String(detail.value.scale || 'NORMAL').toUpperCase()
-  if (scale === 'NORMAL') return true
-  return userStore.hasPermission('project:task:add')
-    || Number(detail.value.ownerId) === Number(userStore.user?.id)
+  const loginId = Number(userStore.user?.id)
+  return Number(detail.value.ownerId) === loginId
+    || (detail.value.members || []).some((member: any) => Number(member.userId) === loginId)
 })
 const saving = ref(false)
 const filteredEmpty = computed(

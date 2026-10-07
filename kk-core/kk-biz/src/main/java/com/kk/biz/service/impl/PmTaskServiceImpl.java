@@ -716,25 +716,21 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         assertCanAccessProject(project);
         long loginId = StpUtil.getLoginIdAsLong();
-        String scale = StringUtils.hasText(project.getScale())
-                ? project.getScale().trim().toUpperCase()
-                : ProjectScales.NORMAL;
-        boolean restrictedScale = ProjectScales.KEY.equals(scale) || ProjectScales.MAJOR.equals(scale);
         boolean taskManager = StpUtil.hasPermission("project:task:add");
+        Set<Long> eligible = eligibleTaskParticipantIds(project.getId());
         if (!taskManager) {
             // 普通成员即使绕过前端提交该字段，也不能设定任务报酬。
             task.setTaskReward(null);
         } else {
             validateTaskReward(task.getTaskReward());
         }
-        if (restrictedScale && !taskManager && !Objects.equals(project.getOwnerId(), loginId)) {
-            throw new BusinessException("重点和重大项目仅任务管理员或项目负责人可以创建任务");
+        if (!eligible.contains(loginId)) {
+            throw new BusinessException("仅项目负责人或项目参与人可以创建任务");
         }
         task.setCompanyId(project.getCompanyId());
         if (project.getCompanyId() == null) {
             throw new BusinessException("项目缺少所属公司，无法创建任务");
         }
-        Set<Long> eligible = eligibleTaskParticipantIds(project.getId());
         List<Long> participants = task.getParticipantIds() == null
                 ? new ArrayList<>()
                 : new ArrayList<>(task.getParticipantIds());
