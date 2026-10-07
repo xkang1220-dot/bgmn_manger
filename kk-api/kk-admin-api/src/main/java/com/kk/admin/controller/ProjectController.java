@@ -1,10 +1,14 @@
 package com.kk.admin.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.annotation.SaMode;
 import cn.dev33.satoken.stp.StpUtil;
 import com.kk.biz.dto.ApprovalSubmitRequest;
 import com.kk.biz.entity.PmProject;
 import com.kk.biz.entity.PmProjectFlow;
+import com.kk.biz.entity.PmProjectNote;
+import com.kk.biz.entity.SysFile;
+import com.kk.biz.service.PmProjectNoteService;
 import com.kk.biz.service.PmProjectService;
 import com.kk.biz.service.WfApprovalFlowService;
 import com.kk.biz.service.WfApprovalService;
@@ -13,9 +17,11 @@ import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
 import com.kk.common.result.PageResult;
 import com.kk.common.result.Result;
+import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.HashMap;
 import java.util.List;
@@ -27,6 +33,7 @@ import java.util.Map;
 public class ProjectController {
 
     private final PmProjectService projectService;
+    private final PmProjectNoteService projectNoteService;
     private final WfApprovalService approvalService;
     private final WfApprovalFlowService approvalFlowService;
 
@@ -77,6 +84,31 @@ public class ProjectController {
     @SaCheckPermission("project:list")
     public Result<List<PmProjectFlow>> flows(@PathVariable Long id) {
         return Result.ok(projectService.listFlows(id));
+    }
+
+    @GetMapping("/{id:\\d+}/notes")
+    @SaCheckPermission("project:list")
+    public Result<List<PmProjectNote>> notes(@PathVariable Long id) {
+        return Result.ok(projectNoteService.listNotes(id));
+    }
+
+    @PostMapping("/{id:\\d+}/notes")
+    @SaCheckPermission(value = {"project:list", "project:edit"}, mode = SaMode.OR)
+    public Result<PmProjectNote> addNote(@PathVariable Long id, @RequestBody NoteRequest request) {
+        return Result.ok(projectNoteService.addNote(id, request.getContent(), request.getFileIds()));
+    }
+
+    @PostMapping("/note/attachment")
+    @SaCheckPermission(value = {"project:list", "project:edit"}, mode = SaMode.OR)
+    public Result<SysFile> uploadNoteAttachment(@RequestParam("file") MultipartFile file) {
+        return Result.ok(projectNoteService.uploadAttachment(file));
+    }
+
+    @DeleteMapping("/note/attachment/{fileId}")
+    @SaCheckPermission(value = {"project:list", "project:edit"}, mode = SaMode.OR)
+    public Result<Void> deleteNoteAttachment(@PathVariable Long fileId) {
+        projectNoteService.deleteAttachment(fileId);
+        return Result.ok();
     }
 
     /** 预览下一项目编号（按公司拼音前缀 + 序号，不占号） */
@@ -202,5 +234,11 @@ public class ProjectController {
         payload.put("companyId", project.getCompanyId());
         req.setPayload(payload);
         return Result.ok(approvalService.submit(req));
+    }
+
+    @Data
+    public static class NoteRequest {
+        private String content;
+        private List<Long> fileIds;
     }
 }

@@ -3,6 +3,7 @@ USE kk_manager;
 
 DROP TABLE IF EXISTS sys_file;
 DROP TABLE IF EXISTS pm_task_comment;
+DROP TABLE IF EXISTS pm_project_note;
 DROP TABLE IF EXISTS pm_task_flow;
 DROP TABLE IF EXISTS pm_task_member;
 DROP TABLE IF EXISTS pm_task;
@@ -261,6 +262,18 @@ CREATE TABLE pm_task_comment (
     deleted     TINYINT       DEFAULT 0,
     KEY idx_task_id (task_id)
 ) COMMENT='任务评论';
+
+CREATE TABLE pm_project_note (
+    id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+    project_id  BIGINT        NOT NULL,
+    content     TEXT          NOT NULL,
+    create_time DATETIME      DEFAULT CURRENT_TIMESTAMP,
+    update_time DATETIME      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    create_by   BIGINT        DEFAULT NULL,
+    update_by   BIGINT        DEFAULT NULL,
+    deleted     TINYINT       DEFAULT 0,
+    KEY idx_project_id (project_id)
+) COMMENT='项目备注';
 
 CREATE TABLE pm_task_flow (
     id            BIGINT PRIMARY KEY AUTO_INCREMENT,

@@ -205,6 +205,23 @@ export const bizApi = {
   projectFlows(id: number) {
     return request<any[]>({ url: `/project/${id}/flows`, method: 'get' })
   },
+  projectNotes(id: number) {
+    return request<any[]>({ url: `/project/${id}/notes`, method: 'get' })
+  },
+  addProjectNote(id: number, content: string, fileIds: number[] = []) {
+    return request<any>({ url: `/project/${id}/notes`, method: 'post', data: { content, fileIds } })
+  },
+  uploadProjectNoteAttachment(file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return request<any>({
+      url: '/project/note/attachment', method: 'post', data: form,
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 10 * 60 * 1000,
+    })
+  },
+  deleteProjectNoteAttachment(fileId: number) {
+    return request<void>({ url: `/project/note/attachment/${fileId}`, method: 'delete' })
+  },
   deleteProject(id: number) {
     return request<any>({ url: `/project/${id}`, method: 'delete' })
   },

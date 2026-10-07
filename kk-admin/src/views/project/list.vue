@@ -10,6 +10,7 @@ import { approvalFlowTip } from '@/utils/approvalTip'
 import { useUserStore } from '@/stores/user'
 import TaskKanban from '@/components/task/TaskKanban.vue'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
+import ProjectNotes from '@/components/project/ProjectNotes.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -906,6 +907,13 @@ onMounted(async () => {
               </el-timeline-item>
             </el-timeline>
             <el-empty v-else description="暂无操作记录" />
+          </el-tab-pane>
+
+          <el-tab-pane label="项目备注" name="notes">
+            <ProjectNotes
+              v-if="activeProjectId && detailTab === 'notes'"
+              :project-id="activeProjectId"
+            />
           </el-tab-pane>
         </el-tabs>
       </section>
