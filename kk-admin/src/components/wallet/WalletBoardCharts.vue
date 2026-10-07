@@ -321,7 +321,7 @@ function onPeriod(v: string | number | boolean | undefined) {
 
 .board-charts__grid {
   display: grid;
-  grid-template-columns: 1.5fr 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 
