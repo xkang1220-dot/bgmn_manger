@@ -66,8 +66,9 @@ public class TaskController {
     @GetMapping("/management/summary")
     @SaCheckPermission("project:task:list")
     public Result<Map<String, Object>> managementSummary(
-            Long projectId, Integer priority, Long participantId, String title) {
-        return Result.ok(taskService.managementSummary(projectId, priority, participantId, title));
+            Long projectId, Integer priority, Long participantId, String title,
+            String periodFrom, String periodTo) {
+        return Result.ok(taskService.managementSummary(projectId, priority, participantId, title, periodFrom, periodTo));
     }
 
     @GetMapping("/management/dashboard")

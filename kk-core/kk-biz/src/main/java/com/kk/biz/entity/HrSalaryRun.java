@@ -30,7 +30,7 @@ public class HrSalaryRun extends BaseEntity {
     /** PREVIEW / PAY */
     private String phase;
 
-    /** RUNNING / DONE / FAILED */
+    /** RUNNING / DONE / FAILED / PARTIALLY_VOIDED / VOIDED */
     private String status;
 
     /** CRON / MANUAL */

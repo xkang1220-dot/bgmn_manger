@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { bizApi } from '@/api/biz'
 
 const list = ref<any[]>([])
@@ -13,6 +13,16 @@ const allForSummary = ref<any[]>([])
 const ledgerTotal = ref(0)
 const loadingDetail = ref(false)
 const ledgerQuery = reactive({ page: 1, pageSize: 20 })
+const adjustmentDialog = ref(false)
+const adjustmentSubmitting = ref(false)
+const adjustmentUploading = ref(false)
+const adjustmentFiles = ref<any[]>([])
+const adjustmentForm = reactive({
+  direction: 'INCREASE' as 'INCREASE' | 'DECREASE',
+  amount: 0,
+  reason: '',
+  remark: '',
+})
 
 const SOURCE_LABEL: Record<string, string> = {
   SETTLE: '项目分成',
@@ -22,6 +32,8 @@ const SOURCE_LABEL: Record<string, string> = {
   ROLLBACK: '资金回退',
   INCOME: '其他入账',
   EXPENSE: '其他出账',
+  ADJUST_IN: '余额调增',
+  ADJUST_OUT: '余额调减',
 }
 
 const SOURCE_TAG: Record<string, string> = {
@@ -32,6 +44,8 @@ const SOURCE_TAG: Record<string, string> = {
   ROLLBACK: 'danger',
   INCOME: 'success',
   EXPENSE: 'danger',
+  ADJUST_IN: 'success',
+  ADJUST_OUT: 'danger',
 }
 
 const AVATAR_TONES = ['indigo', 'cyan', 'violet', 'amber'] as const
@@ -145,6 +159,94 @@ async function loadLedgers() {
   }
 }
 
+function availableBalance(wallet: any) {
+  if (wallet?.available != null) return Number(wallet.available)
+  return Number(wallet?.balance || 0) - Number(wallet?.frozen || 0)
+}
+
+const canDecreaseBalance = computed(() => availableBalance(active.value) > 0)
+
+function balanceAfterAdjustment() {
+  const available = availableBalance(active.value)
+  const amount = Number(adjustmentForm.amount || 0)
+  return adjustmentForm.direction === 'DECREASE' ? available - amount : available + amount
+}
+
+function openAdjustment(direction: 'INCREASE' | 'DECREASE') {
+  if (direction === 'DECREASE' && !canDecreaseBalance.value) {
+    ElMessage.warning('当前无可用余额，暂不可调减')
+    return
+  }
+  adjustmentForm.direction = direction
+  adjustmentForm.amount = 0
+  adjustmentForm.reason = ''
+  adjustmentForm.remark = ''
+  adjustmentFiles.value = []
+  adjustmentDialog.value = true
+}
+
+async function uploadAdjustmentVoucher(options: any) {
+  adjustmentUploading.value = true
+  try {
+    const file = await bizApi.uploadWalletAdjustmentVoucher(options.file)
+    adjustmentFiles.value.push(file)
+    options.onSuccess?.(file)
+    ElMessage.success('凭证已上传')
+  } catch (e: any) {
+    options.onError?.(e)
+    ElMessage.error(e?.message || '凭证上传失败')
+  } finally {
+    adjustmentUploading.value = false
+  }
+}
+
+function removeAdjustmentVoucher(index: number) {
+  adjustmentFiles.value.splice(index, 1)
+}
+
+async function submitAdjustment() {
+  if (!active.value?.userId) return
+  if (!adjustmentForm.amount || adjustmentForm.amount <= 0) {
+    ElMessage.warning('请输入大于 0 的调账金额')
+    return
+  }
+  if (adjustmentForm.direction === 'DECREASE' && adjustmentForm.amount > availableBalance(active.value)) {
+    ElMessage.warning(`调减金额不能超过可用余额 ¥${fmt(availableBalance(active.value))}`)
+    return
+  }
+  if (!adjustmentForm.reason.trim()) {
+    ElMessage.warning('请填写调账原因')
+    return
+  }
+  const action = adjustmentForm.direction === 'INCREASE' ? '余额调增' : '余额调减'
+  await ElMessageBox.confirm(
+    `确认对 ${displayName(active.value)} 执行${action} ¥${fmt(adjustmentForm.amount)}？提交后将立即记账。`,
+    `确认${action}`,
+    { type: adjustmentForm.direction === 'DECREASE' ? 'warning' : 'info', confirmButtonText: '确认记账' },
+  )
+  adjustmentSubmitting.value = true
+  try {
+    const wallet = await bizApi.adjustWallet(active.value.userId, {
+      ...adjustmentForm,
+      reason: adjustmentForm.reason.trim(),
+      remark: adjustmentForm.remark.trim() || undefined,
+      voucherFileIds: adjustmentFiles.value.map((file) => Number(file.id)),
+    })
+    active.value.balance = wallet.balance
+    active.value.frozen = wallet.frozen
+    active.value.available = wallet.available
+    const row = list.value.find((item) => item.userId === active.value.userId)
+    if (row) Object.assign(row, wallet)
+    adjustmentDialog.value = false
+    ElMessage.success(`${action}成功，流水已生成`)
+    await Promise.all([loadLedgers(), loadSummaryLedgers(), load()])
+  } catch (e: any) {
+    ElMessage.error(e?.message || `${action}失败`)
+  } finally {
+    adjustmentSubmitting.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -211,8 +313,8 @@ onMounted(load)
           <el-icon class="person-go" :size="16"><ArrowRight /></el-icon>
         </div>
         <div class="bal">¥ {{ fmt(row.balance) }}</div>
-        <div v-if="Number(row.frozen) > 0" class="bal-sub">
-          冻 ¥{{ fmt(row.frozen) }} · 可用 ¥{{ fmt(row.available ?? (Number(row.balance || 0) - Number(row.frozen || 0))) }}
+        <div class="bal-sub">
+          冻结 ¥{{ fmt(row.frozen) }} · 可用 ¥{{ fmt(availableBalance(row)) }}
         </div>
       </article>
     </div>
@@ -229,9 +331,47 @@ onMounted(load)
       append-to-body
     >
       <div v-if="active" class="drawer-body" v-loading="loadingDetail">
-        <div class="drawer-balance">
-          <span>当前余额</span>
-          <b>¥ {{ fmt(active.balance) }}</b>
+        <div class="balance-overview" aria-label="钱包余额构成">
+          <div class="balance-metric balance-metric--total">
+            <span>当前余额</span>
+            <b>¥ {{ fmt(active.balance) }}</b>
+          </div>
+          <div class="balance-metric balance-metric--frozen">
+            <span>冻结金额</span>
+            <b>¥ {{ fmt(active.frozen) }}</b>
+          </div>
+          <div class="balance-metric balance-metric--available">
+            <span>可用余额</span>
+            <b>¥ {{ fmt(availableBalance(active)) }}</b>
+          </div>
+        </div>
+
+        <div v-permission="'finance:wallet:adjust'" class="adjustment-actions">
+          <div>
+            <div class="adjustment-actions__title">钱包账务调整</div>
+            <div class="adjustment-actions__hint">操作将立即记入钱包流水，请核对金额与依据</div>
+          </div>
+          <div class="adjustment-actions__buttons">
+            <el-button type="success" plain @click="openAdjustment('INCREASE')">余额调增</el-button>
+            <el-tooltip
+              content="当前无可用余额，暂不可调减"
+              placement="top"
+              :disabled="canDecreaseBalance"
+            >
+              <span
+                class="adjustment-actions__decrease"
+                :tabindex="canDecreaseBalance ? -1 : 0"
+                :aria-label="canDecreaseBalance ? undefined : '当前无可用余额，暂不可调减'"
+              >
+                <el-button
+                  type="danger"
+                  plain
+                  :disabled="!canDecreaseBalance"
+                  @click="openAdjustment('DECREASE')"
+                >余额调减</el-button>
+              </span>
+            </el-tooltip>
+          </div>
         </div>
 
         <div class="section-title">来源汇总</div>
@@ -253,13 +393,37 @@ onMounted(load)
               <el-tag :type="bizTagType(row.bizType)" size="small">{{ bizLabel(row.bizType) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="title" label="说明" min-width="140" show-overflow-tooltip />
+          <el-table-column label="说明" min-width="160">
+            <template #default="{ row }">
+              <div class="ledger-title">{{ row.title || '—' }}</div>
+              <div v-if="row.remark" class="ledger-remark">{{ row.remark }}</div>
+            </template>
+          </el-table-column>
           <el-table-column prop="projectName" label="项目" width="110" show-overflow-tooltip>
             <template #default="{ row }">{{ row.projectName || '—' }}</template>
           </el-table-column>
           <el-table-column label="金额" width="110" align="right">
             <template #default="{ row }">
               <span :class="amountClass(row.amount)">{{ fmtMoney(row.amount, true) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="凭证" width="72" align="center">
+            <template #default="{ row }">
+              <el-popover v-if="row.vouchers?.length" placement="left" :width="260" trigger="click">
+                <template #reference>
+                  <el-button link type="primary">{{ row.vouchers.length }} 份</el-button>
+                </template>
+                <div class="ledger-vouchers">
+                  <a
+                    v-for="file in row.vouchers"
+                    :key="file.id"
+                    :href="file.url || `/api/file/preview/${file.id}`"
+                    target="_blank"
+                    rel="noopener"
+                  >{{ file.originalName || `凭证#${file.id}` }}</a>
+                </div>
+              </el-popover>
+              <span v-else>—</span>
             </template>
           </el-table-column>
         </el-table>
@@ -274,6 +438,107 @@ onMounted(load)
         </div>
       </div>
     </el-drawer>
+
+    <el-dialog
+      v-model="adjustmentDialog"
+      :title="adjustmentForm.direction === 'INCREASE' ? '余额调增' : '余额调减'"
+      width="520px"
+      destroy-on-close
+      append-to-body
+      @closed="adjustmentFiles = []"
+    >
+      <div class="adjustment-person">
+        <span>调账对象</span>
+        <b>{{ active ? displayName(active) : '—' }}</b>
+      </div>
+      <div class="adjustment-summary" aria-label="调账对象余额构成">
+        <div>
+          <span>当前余额</span>
+          <b>¥ {{ fmt(active?.balance) }}</b>
+        </div>
+        <div>
+          <span>冻结金额</span>
+          <b class="is-frozen">¥ {{ fmt(active?.frozen) }}</b>
+        </div>
+        <div>
+          <span>可用余额</span>
+          <b class="is-available">¥ {{ fmt(availableBalance(active)) }}</b>
+        </div>
+      </div>
+      <el-alert
+        v-if="adjustmentForm.direction === 'DECREASE'"
+        title="调减金额不能超过当前可用余额，冻结金额不会被扣减。"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="adjustment-alert"
+      />
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item label="调账金额" required>
+          <el-input-number
+            v-model="adjustmentForm.amount"
+            :min="0.01"
+            :max="adjustmentForm.direction === 'DECREASE' ? availableBalance(active) : 999999999999.99"
+            :precision="2"
+            :step="100"
+            controls-position="right"
+            style="width: 100%"
+          />
+          <div class="amount-hint">
+            {{ adjustmentForm.direction === 'DECREASE' ? '调减后可用' : '调增后可用' }}：
+            <b :class="{ 'is-negative': balanceAfterAdjustment() < 0 }">¥ {{ fmt(balanceAfterAdjustment()) }}</b>
+          </div>
+        </el-form-item>
+        <el-form-item label="调账原因" required>
+          <el-input
+            v-model="adjustmentForm.reason"
+            maxlength="128"
+            show-word-limit
+            placeholder="例如：历史余额差异更正、奖金补录"
+          />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input
+            v-model="adjustmentForm.remark"
+            type="textarea"
+            :rows="3"
+            maxlength="255"
+            show-word-limit
+            placeholder="补充说明核算期间、关联事项等"
+          />
+        </el-form-item>
+        <el-form-item label="凭证">
+          <div class="voucher-box">
+            <el-upload
+              :show-file-list="false"
+              :http-request="uploadAdjustmentVoucher"
+              accept="image/*,.pdf"
+            >
+              <el-button :loading="adjustmentUploading">上传凭证</el-button>
+            </el-upload>
+            <div v-if="adjustmentFiles.length" class="voucher-list">
+              <div v-for="(file, index) in adjustmentFiles" :key="file.id" class="voucher-item">
+                <a :href="file.url || `/api/file/preview/${file.id}`" target="_blank" rel="noopener">
+                  {{ file.originalName || file.name || `文件#${file.id}` }}
+                </a>
+                <el-button link type="danger" @click="removeAdjustmentVoucher(index)">移除</el-button>
+              </div>
+            </div>
+            <div v-else class="voucher-empty">支持图片或 PDF，可上传多份</div>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="adjustmentDialog = false">取消</el-button>
+        <el-button
+          :type="adjustmentForm.direction === 'INCREASE' ? 'success' : 'danger'"
+          :loading="adjustmentSubmitting"
+          @click="submitAdjustment"
+        >
+          确认{{ adjustmentForm.direction === 'INCREASE' ? '调增' : '调减' }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -433,22 +698,88 @@ onMounted(load)
 .person.is-zero .bal { color: var(--kk-text-muted); font-weight: 600; }
 
 .drawer-body { padding: 0 4px 12px; }
-.drawer-balance {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  padding: 14px 16px;
+.balance-overview {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1fr;
+  gap: 1px;
   margin-bottom: 16px;
+  overflow: hidden;
+  border: 1px solid var(--kk-glass-border);
+  border-radius: var(--kk-radius-sm);
+  background: var(--kk-glass-border);
+}
+.balance-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.62);
+}
+.balance-metric span { color: var(--kk-text-secondary); font-size: 12px; }
+.balance-metric b {
+  color: var(--kk-text);
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+.balance-metric--total b { font-size: 20px; }
+.balance-metric--frozen b { color: var(--kk-warning); }
+.balance-metric--available b { color: var(--kk-success); }
+.adjustment-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+  padding: 12px 16px;
   background: rgba(255, 255, 255, 0.45);
   border: 1px solid var(--kk-glass-border);
   border-radius: var(--kk-radius-sm);
 }
-.drawer-balance span { color: var(--kk-text-secondary); font-size: 13px; }
-.drawer-balance b {
-  font-size: 22px;
-  color: var(--kk-text);
-  font-variant-numeric: tabular-nums;
+.adjustment-actions__title { color: var(--kk-text); font-size: 14px; font-weight: 600; }
+.adjustment-actions__hint { margin-top: 3px; color: var(--kk-text-muted); font-size: 12px; }
+.adjustment-actions__buttons { display: flex; flex-shrink: 0; gap: 8px; }
+.adjustment-actions__decrease { display: inline-flex; }
+.adjustment-person {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: var(--el-fill-color-light);
+  border-radius: 8px;
 }
+.adjustment-person span { color: var(--kk-text-secondary); font-size: 13px; }
+.adjustment-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 16px; }
+.adjustment-summary > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+}
+.adjustment-summary span { color: var(--kk-text-secondary); font-size: 12px; }
+.adjustment-summary b { color: var(--kk-text); font-size: 15px; font-variant-numeric: tabular-nums; }
+.adjustment-summary .is-frozen { color: var(--kk-warning); }
+.adjustment-summary .is-available { color: var(--kk-success); }
+.amount-hint { width: 100%; margin-top: 6px; color: var(--kk-text-secondary); font-size: 12px; text-align: right; }
+.amount-hint b { color: var(--kk-text); font-variant-numeric: tabular-nums; }
+.amount-hint b.is-negative { color: var(--kk-danger); }
+.adjustment-alert { margin-bottom: 16px; }
+.voucher-box { width: 100%; }
+.voucher-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.voucher-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.voucher-item a { color: var(--kk-primary); overflow-wrap: anywhere; }
+.voucher-empty { margin-top: 6px; color: var(--kk-text-muted); font-size: 12px; }
 .section-title {
   margin: 8px 0 10px;
   font-size: 14px;
@@ -473,9 +804,19 @@ onMounted(load)
 .source-card span { color: var(--kk-text-secondary); }
 .amt-in { color: var(--kk-success); font-weight: 600; font-variant-numeric: tabular-nums; }
 .amt-out { color: var(--kk-danger); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ledger-title { color: var(--kk-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ledger-remark { margin-top: 2px; color: var(--kk-text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.ledger-vouchers { display: flex; flex-direction: column; gap: 8px; }
+.ledger-vouchers a { color: var(--kk-primary); overflow-wrap: anywhere; }
 
 @media (max-width: 1100px) {
   .stat-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .adjustment-actions { align-items: stretch; flex-direction: column; }
+  .adjustment-actions__buttons > * { flex: 1; }
+  .balance-overview { grid-template-columns: 1fr; }
+  .adjustment-summary { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-transparency: reduce) {
   .stat-card,

@@ -24,7 +24,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'finance/pool', redirect: '/finance/ledger' },
       { path: 'finance/ledger', component: () => import('@/views/finance/ledger.vue'), meta: { title: '公司总账' } },
       { path: 'finance/project-account', component: () => import('@/views/finance/project-account.vue'), meta: { title: '项目账款' } },
-      { path: 'finance/project-share', redirect: '/finance/project-account' },
+      { path: 'finance/project-share', component: () => import('@/views/finance/project-share.vue'), meta: { title: '资金配置' } },
       { path: 'finance/distribute', redirect: '/finance/project-account' },
       { path: 'finance/wallet-board', component: () => import('@/views/finance/wallet-board.vue'), meta: { title: '全员钱包' } },
       { path: 'finance/wallet', redirect: '/account' },

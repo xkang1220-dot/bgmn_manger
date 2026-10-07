@@ -126,7 +126,8 @@ function period(task: PublicCompanyTaskItem) {
             <span>{{ task.participantNames?.length ? task.participantNames.join('、') : '无参与人' }}</span>
           </div>
           <div v-if="isOpen(section.person.userId, task.id)" class="detail">
-            <p class="content">{{ task.content?.trim() || '暂无说明' }}</p>
+            <div v-if="task.content?.trim()" class="content" v-html="task.content" />
+            <p v-else class="content muted">暂无说明</p>
             <h3>最近评论</h3>
             <p v-if="!task.comments?.length" class="muted">暂无评论</p>
             <ul v-else class="comments">

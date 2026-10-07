@@ -11,6 +11,7 @@ import com.kk.biz.dto.ProjectSettleRequest;
 import com.kk.biz.dto.ProjectShareSaveRequest;
 import com.kk.biz.dto.WithdrawTaxCalcResult;
 import com.kk.biz.dto.WithdrawTaxTierSaveRequest;
+import com.kk.biz.dto.WalletAdjustmentRequest;
 import com.kk.biz.entity.FinLedger;
 import com.kk.biz.entity.FinLedgerThreshold;
 import com.kk.biz.entity.FinPool;
@@ -206,6 +207,19 @@ public class FinanceController {
         q.setAccountType("WALLET");
         q.setUserId(userId);
         return Result.ok(PageResult.of(financeService.pageLedger(q)));
+    }
+
+    @PostMapping("/wallet/{userId}/adjustment")
+    @SaCheckPermission("finance:wallet:adjust")
+    public Result<HrWallet> adjustWallet(@PathVariable Long userId,
+                                         @Valid @RequestBody WalletAdjustmentRequest request) {
+        return Result.ok(financeService.adjustWallet(userId, request));
+    }
+
+    @PostMapping("/wallet/adjustment/voucher")
+    @SaCheckPermission("finance:wallet:adjust")
+    public Result<SysFile> uploadWalletAdjustmentVoucher(@RequestParam("file") MultipartFile file) {
+        return Result.ok(fileService.upload(file, "wallet_adjustment_voucher", null));
     }
 
     @GetMapping("/ledger/page")

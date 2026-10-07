@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
@@ -8,6 +9,8 @@ import { approvalFlowTip } from '@/utils/approvalTip'
 import { useUserStore } from '@/stores/user'
 
 const userStore = useUserStore()
+const route = useRoute()
+const router = useRouter()
 const list = ref<any[]>([])
 const companies = ref<any[]>([])
 const filter = reactive({
@@ -22,11 +25,241 @@ const account = ref<any>(null)
 const shareDetail = ref<any>(null)
 const users = ref<any[]>([])
 const ledgers = ref<any[]>([])
+const analyticsLedgers = ref<any[]>([])
+const analyticsTimeRange = ref<string[]>([])
 const ledgerTotal = ref(0)
 const ledgerQuery = reactive({ page: 1, pageSize: 20 })
+const ledgerFilter = reactive({
+  keyword: '',
+  bizType: '',
+  direction: '',
+  accountType: '',
+})
 const tab = ref('overview')
+const ledgerSectionRef = ref<HTMLElement | null>(null)
+type ChartDrilldown = {
+  label: string
+  month?: string
+  direction?: 'IN' | 'OUT'
+  bizTypes?: string[]
+  otherExpense?: boolean
+  otherFlow?: boolean
+}
+const chartDrilldown = ref<ChartDrilldown | null>(null)
 
-const savingShare = ref(false)
+function routeId(value: unknown) {
+  const parsed = Number(Array.isArray(value) ? value[0] : value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+function syncDetailRoute(projectId: number | null, shellId: number | null = null) {
+  const query = { ...route.query }
+  if (projectId) query.projectId = String(projectId)
+  else delete query.projectId
+  if (shellId) query.shellId = String(shellId)
+  else delete query.shellId
+  delete query.tab
+  void router.replace({ query })
+}
+
+const balanceBreakdown = computed(() =>
+  Number(account.value?.sharePendingBalance || 0) + Number(account.value?.nonShareBalance || 0),
+)
+const balanceVariance = computed(() =>
+  Number((Number(account.value?.balance || 0) - balanceBreakdown.value).toFixed(2)),
+)
+const balanceMatched = computed(() => Math.abs(balanceVariance.value) <= 0.01)
+
+const visibleLedgers = computed(() => {
+  const keyword = ledgerFilter.keyword.trim().toLowerCase()
+  const source = chartDrilldown.value ? analyticsLedgers.value : ledgers.value
+  return source.filter((row) => {
+    const drilldown = chartDrilldown.value
+    if (drilldown) {
+      if (row.accountType !== 'PROJECT') return false
+      if (drilldown.month && String(row.occurTime || '').slice(0, 7) !== drilldown.month) return false
+      if (!drilldown.month && analyticsTimeRange.value?.length === 2) {
+        const day = String(row.occurTime || '').slice(0, 10)
+        if (day < analyticsTimeRange.value[0] || day > analyticsTimeRange.value[1]) return false
+      }
+      if (drilldown.direction === 'IN' && Number(row.amount) < 0) return false
+      if (drilldown.direction === 'OUT' && Number(row.amount) >= 0) return false
+      if (drilldown.bizTypes && !drilldown.bizTypes.includes(row.bizType)) return false
+      if (drilldown.otherExpense && (Number(row.amount) >= 0 || ['SALARY', 'REIMBURSE', 'EXPENSE', 'PAYOUT', 'SETTLE', 'RESERVE'].includes(row.bizType))) return false
+      if (drilldown.otherFlow && (Number(row.amount) >= 0 || ['SALARY', 'REIMBURSE', 'SETTLE', 'PAYOUT'].includes(row.bizType))) return false
+    }
+    if (ledgerFilter.bizType && row.bizType !== ledgerFilter.bizType) return false
+    if (ledgerFilter.accountType && row.accountType !== ledgerFilter.accountType) return false
+    if (ledgerFilter.direction === 'IN' && Number(row.amount) < 0) return false
+    if (ledgerFilter.direction === 'OUT' && Number(row.amount) >= 0) return false
+    if (keyword) {
+      const haystack = [row.bizNo, row.title, row.userName, bizLabel(row.bizType), accountLabel(row)]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      if (!haystack.includes(keyword)) return false
+    }
+    return true
+  })
+})
+
+async function applyChartDrilldown(filter: ChartDrilldown) {
+  chartDrilldown.value = filter
+  ledgerFilter.keyword = ''
+  ledgerFilter.bizType = ''
+  ledgerFilter.direction = ''
+  ledgerFilter.accountType = ''
+  tab.value = 'overview'
+  await nextTick()
+  ledgerSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function clearChartDrilldown() {
+  chartDrilldown.value = null
+}
+
+function drillMonthly(month: string, direction: 'IN' | 'OUT') {
+  applyChartDrilldown({ month, direction, label: `${month} ${direction === 'IN' ? '流入' : '流出'}` })
+}
+
+function drillExpense(item: { key: string; label: string }) {
+  applyChartDrilldown({
+    label: `支出构成 · ${item.label}`,
+    direction: 'OUT',
+    ...(item.key === 'OTHER' ? { otherExpense: true } : { bizTypes: [item.key] }),
+  })
+}
+
+function drillFundFlow(item: { key: string; label: string }) {
+  const filter: ChartDrilldown = { label: `资金流向 · ${item.label}` }
+  if (item.key === 'in') filter.direction = 'IN'
+  else {
+    filter.direction = 'OUT'
+    if (item.key === 'salary') filter.bizTypes = ['SALARY', 'REIMBURSE']
+    else if (item.key === 'distribution') filter.bizTypes = ['SETTLE', 'PAYOUT']
+    else filter.otherFlow = true
+  }
+  applyChartDrilldown(filter)
+}
+
+const currentPageProjectFlow = computed(() => {
+  const rows = visibleLedgers.value.filter((row) => row.accountType === 'PROJECT')
+  const inflow = rows.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0)
+  const outflow = rows.reduce((sum, row) => sum + Math.abs(Math.min(0, Number(row.amount || 0))), 0)
+  return { count: rows.length, inflow, outflow, net: inflow - outflow }
+})
+
+const analyticsDateShortcuts = [
+  {
+    text: '本月',
+    value: () => {
+      const now = new Date()
+      return [new Date(now.getFullYear(), now.getMonth(), 1), now]
+    },
+  },
+  {
+    text: '近 30 天',
+    value: () => {
+      const end = new Date()
+      const start = new Date()
+      start.setDate(start.getDate() - 29)
+      return [start, end]
+    },
+  },
+  {
+    text: '本年度',
+    value: () => {
+      const now = new Date()
+      return [new Date(now.getFullYear(), 0, 1), now]
+    },
+  },
+]
+
+const filteredAnalyticsLedgers = computed(() => {
+  const [start, end] = analyticsTimeRange.value || []
+  if (!start || !end) return analyticsLedgers.value
+  return analyticsLedgers.value.filter((row) => {
+    const day = String(row.occurTime || '').slice(0, 10)
+    return day >= start && day <= end
+  })
+})
+
+const analyticsProjectRows = computed(() =>
+  filteredAnalyticsLedgers.value.filter((row) => row.accountType === 'PROJECT'),
+)
+
+const monthlyCashFlow = computed(() => {
+  const buckets = new Map<string, { month: string; inflow: number; outflow: number }>()
+  analyticsProjectRows.value.forEach((row) => {
+    const month = String(row.occurTime || '').slice(0, 7)
+    if (!month) return
+    const item = buckets.get(month) || { month, inflow: 0, outflow: 0 }
+    const amount = Number(row.amount || 0)
+    if (amount >= 0) item.inflow += amount
+    else item.outflow += Math.abs(amount)
+    buckets.set(month, item)
+  })
+  return [...buckets.values()].sort((a, b) => a.month.localeCompare(b.month)).slice(-6)
+})
+
+const monthlyCashMax = computed(() => Math.max(
+  1,
+  ...monthlyCashFlow.value.flatMap((item) => [item.inflow, item.outflow]),
+))
+
+const expenseBreakdown = computed(() => {
+  const meta: Record<string, { label: string; color: string }> = {
+    SALARY: { label: '工资', color: '#f59e0b' },
+    REIMBURSE: { label: '报销', color: '#ef4444' },
+    EXPENSE: { label: '项目支出', color: '#8b5cf6' },
+    PAYOUT: { label: '余额发放', color: '#0ea5e9' },
+    SETTLE: { label: '项目分成', color: '#14b8a6' },
+    RESERVE: { label: '结余/预留', color: '#64748b' },
+  }
+  const amounts = new Map<string, number>()
+  analyticsProjectRows.value.forEach((row) => {
+    const amount = Number(row.amount || 0)
+    if (amount >= 0) return
+    const key = meta[row.bizType] ? row.bizType : 'OTHER'
+    amounts.set(key, (amounts.get(key) || 0) + Math.abs(amount))
+  })
+  const other = { label: '其他', color: '#94a3b8' }
+  return [...amounts.entries()]
+    .map(([key, value]) => ({ ...(meta[key] || other), key, value }))
+    .sort((a, b) => b.value - a.value)
+})
+
+const expenseTotal = computed(() => expenseBreakdown.value.reduce((sum, item) => sum + item.value, 0))
+const expenseDonutStyle = computed(() => {
+  if (!expenseTotal.value) return { background: '#e5e7eb' }
+  let cursor = 0
+  const stops = expenseBreakdown.value.map((item) => {
+    const start = cursor
+    cursor += (item.value / expenseTotal.value) * 100
+    return `${item.color} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`
+  })
+  return { background: `conic-gradient(${stops.join(',')})` }
+})
+
+const fundFlowRanking = computed(() => {
+  const groups = [
+    { key: 'in', label: '公司转入项目', color: '#10b981', value: 0 },
+    { key: 'salary', label: '工资与报销', color: '#f59e0b', value: 0 },
+    { key: 'distribution', label: '分成与余额发放', color: '#6366f1', value: 0 },
+    { key: 'other', label: '其他支出/退回', color: '#64748b', value: 0 },
+  ]
+  analyticsProjectRows.value.forEach((row) => {
+    const amount = Number(row.amount || 0)
+    if (amount > 0) groups[0].value += amount
+    else if (['SALARY', 'REIMBURSE'].includes(row.bizType)) groups[1].value += Math.abs(amount)
+    else if (['SETTLE', 'PAYOUT'].includes(row.bizType)) groups[2].value += Math.abs(amount)
+    else groups[3].value += Math.abs(amount)
+  })
+  return groups.filter((item) => item.value > 0)
+})
+
+const fundFlowMax = computed(() => Math.max(1, ...fundFlowRanking.value.map((item) => item.value)))
+
 const advanceDialog = ref(false)
 const reimburseDialog = ref(false)
 const salaryDialog = ref(false)
@@ -226,6 +459,7 @@ function bizLabel(v?: string) {
     ROLLBACK: '回退',
     REIMBURSE: '报销',
     SALARY: '工资',
+    PAYOUT: '余额发放',
   } as any)[v || ''] || v || '—'
 }
 
@@ -238,6 +472,7 @@ function bizTagType(v?: string) {
     ROLLBACK: 'danger',
     REIMBURSE: 'warning',
     SALARY: 'warning',
+    PAYOUT: 'primary',
   } as Record<string, string>)[v || ''] || 'info'
 }
 
@@ -276,7 +511,12 @@ async function enter(row: any) {
   shellParentId.value = null
   tab.value = 'overview'
   childAccounts.value = []
+  syncDetailRoute(activeId.value)
   await loadDetail()
+}
+
+function enterFundConfig(row: any) {
+  void router.push({ path: '/finance/project-share', query: { projectId: String(row.projectId) } })
 }
 
 async function enterChild(row: any) {
@@ -284,6 +524,7 @@ async function enterChild(row: any) {
   activeId.value = row.projectId
   tab.value = 'overview'
   childAccounts.value = []
+  syncDetailRoute(activeId.value, shellParentId.value)
   await loadDetail()
 }
 
@@ -292,6 +533,7 @@ function back() {
     activeId.value = shellParentId.value
     shellParentId.value = null
     childAccounts.value = []
+    syncDetailRoute(activeId.value)
     void loadDetail()
     return
   }
@@ -299,10 +541,12 @@ function back() {
   account.value = null
   shareDetail.value = null
   childAccounts.value = []
+  syncDetailRoute(null)
 }
 
 async function loadDetail() {
   if (!activeId.value) return
+  clearChartDrilldown()
   await ensureUsers()
   account.value = await bizApi.projectAccountDetail(activeId.value)
   if (account.value?.majorShell) {
@@ -313,6 +557,7 @@ async function loadDetail() {
     }
     shareDetail.value = null
     ledgers.value = []
+    analyticsLedgers.value = []
     ledgerTotal.value = 0
     return
   }
@@ -335,52 +580,14 @@ async function loadDetail() {
   const res = await bizApi.projectAccountLedger(activeId.value, ledgerQuery)
   ledgers.value = res.list
   ledgerTotal.value = res.total
-}
-
-function addMember() {
-  shareForm.members.push({ userId: undefined, layer: '协助', percent: 0, remark: '' })
-}
-
-function removeMember(index: number) {
-  if (shareForm.members.length <= 1) return
-  shareForm.members.splice(index, 1)
-}
-
-async function saveShare() {
-  if (!activeId.value) return
-  if (shareForm.members.some((m) => !m.userId)) {
-    ElMessage.warning('请选择全部参与人')
-    return
-  }
-  if (!fundSplitOk.value) {
-    ElMessage.warning('分成% + 预留% 须为 100%')
-    return
-  }
-  if (Math.abs(percentSum.value - 100) > 0.01) {
-    ElMessage.warning(`分成人员合计必须为 100%，当前 ${percentSum.value.toFixed(2)}%`)
-    return
-  }
-  savingShare.value = true
-  try {
-    const approval = await workflowApi.submit({
-      type: 'SHARE_CONFIG',
-      title: `资金配置 · ${account.value?.projectName || ''}`,
-      projectId: activeId.value,
-      poolId: shareDetail.value?.poolId,
-      payload: {
-        poolId: shareDetail.value?.poolId,
-        budget: 0,
-        expensePercent: 0,
-        reservePercent: shareForm.reservePercent,
-        settlePercent: shareForm.settlePercent,
-        members: shareForm.members,
-      },
-      remark: '项目资金配置：分成/预留合计 100%；支出直接从项目结余扣（只改规则）',
+  if (res.total > res.list.length) {
+    const analytics = await bizApi.projectAccountLedger(activeId.value, {
+      page: 1,
+      pageSize: Math.min(500, Math.max(res.total, ledgerQuery.pageSize)),
     })
-    ElMessage.success(approvalFlowTip(approval, '已提交资金配置审批'))
-    await loadDetail()
-  } finally {
-    savingShare.value = false
+    analyticsLedgers.value = analytics.list || []
+  } else {
+    analyticsLedgers.value = res.list || []
   }
 }
 
@@ -497,12 +704,12 @@ async function openPeriodShareDialog() {
   }
   if (!fundSplitOk.value) {
     ElMessage.warning('请先配置分成% + 预留% = 100%')
-    tab.value = 'share'
+    void router.push({ path: '/finance/project-share', query: { projectId: String(activeId.value) } })
     return
   }
   if (!shareForm.members.length || shareForm.members.some((m) => !m.userId)) {
     ElMessage.warning('请先配置分成人员及比例')
-    tab.value = 'share'
+    void router.push({ path: '/finance/project-share', query: { projectId: String(activeId.value) } })
     return
   }
   selectedPeriodMonth.value = formatPeriodMonth()
@@ -878,6 +1085,19 @@ async function submitPay(type: 'REIMBURSE_PROJECT' | 'SALARY_APPLY') {
 onMounted(async () => {
   await loadCompanies()
   await loadList()
+  const restoredId = routeId(route.query.projectId)
+  if (!restoredId) return
+  activeId.value = restoredId
+  shellParentId.value = routeId(route.query.shellId)
+  tab.value = 'overview'
+  try {
+    await loadDetail()
+  } catch {
+    activeId.value = null
+    shellParentId.value = null
+    syncDetailRoute(null)
+    ElMessage.warning('原项目账款已无法访问，已返回项目列表')
+  }
 })
 </script>
 
@@ -908,15 +1128,7 @@ onMounted(async () => {
         </el-form>
       </div>
       <div v-if="list.length" class="acc-grid">
-        <article
-          v-for="row in list"
-          :key="row.projectId"
-          class="acc-card"
-          role="button"
-          tabindex="0"
-          @click="enter(row)"
-          @keyup.enter="enter(row)"
-        >
+        <article v-for="row in list" :key="row.projectId" class="acc-card">
           <div class="acc-card__head">
             <div class="acc-card__title-row">
               <h4>{{ row.projectName || `项目#${row.projectId}` }}</h4>
@@ -936,6 +1148,10 @@ onMounted(async () => {
             <div><span>非分成</span><b>¥ {{ fmt(row.nonShareBalance) }}</b></div>
             <div><span>预留占用</span><b>¥ {{ fmt(row.reserveHeld) }}</b></div>
           </div>
+          <div class="acc-card__actions">
+            <el-button @click="enter(row)">查看详情</el-button>
+            <el-button type="primary" @click="enterFundConfig(row)">资金配置</el-button>
+          </div>
         </article>
       </div>
       <el-empty v-else description="暂无项目账款" />
@@ -946,40 +1162,67 @@ onMounted(async () => {
         <div class="page-top">
           <div class="page-top__main">
             <el-button @click="back">返回列表</el-button>
-            <h2 class="detail-name">{{ account.projectName }}</h2>
-            <p class="page-desc">负责人 {{ account.ownerName || shareDetail?.ownerName || '—' }}</p>
+            <div class="project-heading">
+              <div class="project-heading__title">
+                <h2 class="detail-name">{{ account.projectName }}</h2>
+                <el-tag v-if="account.scale" :type="scaleTone(account.scale)" effect="plain">{{ scaleLabel(account.scale) }}</el-tag>
+              </div>
+              <p class="page-desc">
+                {{ account.companyName || '所属公司未设置' }}
+                <span class="meta-separator">·</span>
+                负责人 {{ account.ownerName || shareDetail?.ownerName || '—' }}
+              </p>
+            </div>
           </div>
           <div class="page-actions">
             <template v-if="!account.majorShell">
-              <div class="fund-swap">
+              <div class="action-group">
+                <span class="action-group__label">资金调拨</span>
                 <el-button type="primary" @click="openAdvanceDialog">从公司转入</el-button>
                 <el-button
                   :disabled="returnableAdvance <= 0"
                   @click="openReverseAdvanceDialog"
                 >退回公司</el-button>
               </div>
-              <el-button @click="openPayDialog('reimburse')">申请报销</el-button>
-              <el-button @click="openPayDialog('salary')">申请发工资</el-button>
-              <el-button
-                type="success"
-                :loading="periodSharing"
-                :disabled="Number(account.sharePendingBalance || 0) <= 0"
-                @click="openPeriodShareDialog"
-              >自然月分成</el-button>
-              <el-button
-                v-if="Number(account.balance) > 0 || Number(account.reserveHeld || 0) > 0"
-                @click="openRemainderDialog"
-              >结余回公司</el-button>
+              <div class="action-group">
+                <span class="action-group__label">业务支出</span>
+                <el-button @click="openPayDialog('reimburse')">申请报销</el-button>
+                <el-button @click="openPayDialog('salary')">申请发工资</el-button>
+              </div>
+              <div class="action-group">
+                <span class="action-group__label">结算</span>
+                <el-button
+                  type="success"
+                  :loading="periodSharing"
+                  :disabled="Number(account.sharePendingBalance || 0) <= 0"
+                  @click="openPeriodShareDialog"
+                >自然月分成</el-button>
+                <el-button
+                  v-if="Number(account.balance) > 0 || Number(account.reserveHeld || 0) > 0"
+                  @click="openRemainderDialog"
+                >结余回公司</el-button>
+              </div>
             </template>
             <el-tag v-else type="warning" effect="plain">重大项目汇总（请进入小项目动账）</el-tag>
           </div>
         </div>
 
+        <section class="finance-overview" aria-label="项目资金概览">
+          <header class="section-head">
+            <div>
+              <h3>资金概览</h3>
+              <p>余额、资金分桶与累计支出</p>
+            </div>
+            <el-tag :type="balanceMatched ? 'success' : 'danger'" effect="light">
+              {{ balanceMatched ? '余额已勾稽' : `余额差额 ¥${fmt(Math.abs(balanceVariance))}` }}
+            </el-tag>
+          </header>
         <div class="metric-grid">
-          <div class="metric-card metric-card--indigo">
+          <div class="metric-card metric-card--indigo metric-card--primary">
             <div class="metric-body">
-              <div class="metric-label">总可用</div>
+              <div class="metric-label">当前可用余额</div>
               <div class="metric-value">¥ {{ fmt(account.balance) }}</div>
+              <div class="metric-hint">项目当前可动用资金</div>
             </div>
             <el-icon class="metric-glyph" :size="48"><Wallet /></el-icon>
           </div>
@@ -1001,8 +1244,9 @@ onMounted(async () => {
           </div>
           <div class="metric-card metric-card--amber">
             <div class="metric-body">
-              <div class="metric-label">已支出 · 工资/报销</div>
+              <div class="metric-label">累计业务支出</div>
               <div class="metric-value sm">¥ {{ fmt(account.expenseAmount) }}</div>
+              <div class="metric-hint">工资、报销及项目支出</div>
             </div>
             <el-icon class="metric-glyph" :size="48"><Ticket /></el-icon>
           </div>
@@ -1015,15 +1259,113 @@ onMounted(async () => {
             <el-icon class="metric-glyph" :size="48"><Box /></el-icon>
           </div>
         </div>
-
-        <p class="rule-tip">
+        <div class="balance-equation" :class="{ 'balance-equation--warning': !balanceMatched }">
           <template v-if="account.majorShell">
-            重大项目仅展示小项目汇总结余；请先创建小项目，再在小项目上转入/报销/发工资/分成。
+            <div class="balance-equation__copy">重大项目仅展示小项目汇总结余；请进入小项目进行资金操作。</div>
           </template>
           <template v-else>
-            总可用 = 待分成 + 非分成。支出默认扣待分成；对待分成按分成/预留配置走「自然月分成」审批（月份可自选），预留占用结束时随「结余回公司」退回。
+            <div class="equation-item"><span>待分成</span><b>¥{{ fmt(account.sharePendingBalance) }}</b></div>
+            <span class="equation-sign">+</span>
+            <div class="equation-item"><span>非分成</span><b>¥{{ fmt(account.nonShareBalance) }}</b></div>
+            <span class="equation-sign">=</span>
+            <div class="equation-item"><span>分桶合计</span><b>¥{{ fmt(balanceBreakdown) }}</b></div>
+            <span class="equation-sign">对比</span>
+            <div class="equation-item equation-item--strong"><span>当前可用</span><b>¥{{ fmt(account.balance) }}</b></div>
+            <div v-if="!balanceMatched" class="balance-alert">分桶合计与当前可用不一致，请核查待分成/非分成扣减是否同步。</div>
           </template>
-        </p>
+        </div>
+        <p v-if="!account.majorShell" class="rule-tip">支出默认扣待分成；待分成按配置走自然月分成审批，预留占用在项目结束时随结余退回公司。</p>
+        </section>
+
+        <section v-if="!account.majorShell" class="analytics-section" aria-label="项目财务统计">
+          <header class="section-head analytics-head">
+            <div>
+              <h3>财务统计</h3>
+              <p>
+                当前范围 {{ filteredAnalyticsLedgers.length }} 条流水
+                <template v-if="filteredAnalyticsLedgers.length !== analyticsLedgers.length">（全部 {{ analyticsLedgers.length }} 条）</template>
+                ，最多加载最近 500 条
+              </p>
+            </div>
+            <div class="analytics-controls">
+              <el-date-picker
+                v-model="analyticsTimeRange"
+                type="daterange"
+                value-format="YYYY-MM-DD"
+                format="YYYY-MM-DD"
+                range-separator="至"
+                start-placeholder="开始日期"
+                end-placeholder="结束日期"
+                unlink-panels
+                clearable
+                :shortcuts="analyticsDateShortcuts"
+                style="width: 260px"
+              />
+              <el-tag effect="plain">项目账户口径</el-tag>
+            </div>
+          </header>
+          <div class="analytics-grid">
+            <article class="chart-card chart-card--trend">
+              <header class="chart-card__head">
+                <div class="chart-title">
+                  <span class="chart-icon chart-icon--blue"><el-icon><TrendCharts /></el-icon></span>
+                  <div><h4>月度收支趋势</h4><p>判断资金流入与消耗节奏</p></div>
+                </div>
+                <div class="chart-legend"><span class="legend-in">流入</span><span class="legend-out">流出</span></div>
+              </header>
+              <div v-if="monthlyCashFlow.length" class="cash-chart" role="img" aria-label="最近六个月项目账户流入流出柱状图">
+                <div v-for="item in monthlyCashFlow" :key="item.month" class="cash-column">
+                  <div class="cash-bars">
+                    <button class="cash-bar cash-bar--in" type="button" :style="{ height: `${Math.max(3, item.inflow / monthlyCashMax * 100)}%` }" :title="`筛选 ${item.month} 流入 ¥${fmt(item.inflow)}`" :aria-label="`筛选 ${item.month} 流入流水，金额 ${fmt(item.inflow)} 元`" @click="drillMonthly(item.month, 'IN')"></button>
+                    <button class="cash-bar cash-bar--out" type="button" :style="{ height: `${Math.max(3, item.outflow / monthlyCashMax * 100)}%` }" :title="`筛选 ${item.month} 流出 ¥${fmt(item.outflow)}`" :aria-label="`筛选 ${item.month} 流出流水，金额 ${fmt(item.outflow)} 元`" @click="drillMonthly(item.month, 'OUT')"></button>
+                  </div>
+                  <span>{{ item.month.slice(5) }}月</span>
+                  <small>净 {{ item.inflow - item.outflow >= 0 ? '+' : '-' }}¥{{ fmt(Math.abs(item.inflow - item.outflow)) }}</small>
+                </div>
+              </div>
+              <el-empty v-else :image-size="54" description="暂无趋势数据" />
+            </article>
+
+            <article class="chart-card">
+              <header class="chart-card__head">
+                <div class="chart-title">
+                  <span class="chart-icon chart-icon--amber"><el-icon><PieChart /></el-icon></span>
+                  <div><h4>支出构成</h4><p>识别主要资金消耗类型</p></div>
+                </div>
+              </header>
+              <div v-if="expenseBreakdown.length" class="donut-layout">
+                <div class="donut-chart" :style="expenseDonutStyle" role="img" :aria-label="`支出合计 ${fmt(expenseTotal)} 元`">
+                  <div class="donut-center"><span>支出合计</span><b>¥{{ fmt(expenseTotal) }}</b></div>
+                </div>
+                <div class="donut-legend">
+                  <button v-for="item in expenseBreakdown" :key="item.key" class="donut-legend__item" type="button" :aria-label="`筛选${item.label}流水`" @click="drillExpense(item)">
+                    <i :style="{ background: item.color }"></i>
+                    <span>{{ item.label }}</span>
+                    <b>{{ expenseTotal ? (item.value / expenseTotal * 100).toFixed(1) : '0.0' }}%</b>
+                    <small>¥{{ fmt(item.value) }}</small>
+                  </button>
+                </div>
+              </div>
+              <el-empty v-else :image-size="54" description="暂无支出数据" />
+            </article>
+
+            <article class="chart-card">
+              <header class="chart-card__head">
+                <div class="chart-title">
+                  <span class="chart-icon chart-icon--violet"><el-icon><DataAnalysis /></el-icon></span>
+                  <div><h4>资金流向</h4><p>比较转入与各类资金去向</p></div>
+                </div>
+              </header>
+              <div v-if="fundFlowRanking.length" class="flow-ranking" role="img" aria-label="项目资金流向金额排行">
+                <button v-for="item in fundFlowRanking" :key="item.key" class="flow-row" type="button" :aria-label="`筛选${item.label}流水`" @click="drillFundFlow(item)">
+                  <div class="flow-row__label"><span>{{ item.label }}</span><b>¥{{ fmt(item.value) }}</b></div>
+                  <div class="flow-track"><i :style="{ width: `${Math.max(2, item.value / fundFlowMax * 100)}%`, background: item.color }"></i></div>
+                </button>
+              </div>
+              <el-empty v-else :image-size="54" description="暂无流向数据" />
+            </article>
+          </div>
+        </section>
 
         <div v-if="account.majorShell" class="page-card" style="margin-bottom: 16px">
           <h3 style="margin: 0 0 12px; font-size: 16px">小项目账款</h3>
@@ -1031,7 +1373,7 @@ onMounted(async () => {
             <article
               v-for="row in childAccounts"
               :key="row.projectId"
-              class="acc-card"
+              class="acc-card acc-card--clickable"
               role="button"
               tabindex="0"
               @click="enterChild(row)"
@@ -1052,20 +1394,53 @@ onMounted(async () => {
           <el-empty v-else description="暂无小项目，请先在项目管理中创建" />
         </div>
 
-        <div v-if="!account.majorShell" class="page-card">
+        <div v-if="!account.majorShell" ref="ledgerSectionRef" class="page-card ledger-section">
         <el-tabs v-model="tab" class="tabs">
           <el-tab-pane label="项目流水" name="overview">
-            <el-table :data="ledgers" stripe empty-text="暂无流水">
+            <div class="ledger-toolbar">
+              <div class="ledger-toolbar__filters">
+                <el-input v-model="ledgerFilter.keyword" clearable placeholder="搜索摘要、单号或人员" style="width: 240px" />
+                <el-select v-model="ledgerFilter.bizType" clearable placeholder="业务类型" style="width: 140px">
+                  <el-option label="预支入账" value="ADVANCE" />
+                  <el-option label="项目支出" value="EXPENSE" />
+                  <el-option label="报销" value="REIMBURSE" />
+                  <el-option label="工资" value="SALARY" />
+                  <el-option label="余额发放" value="PAYOUT" />
+                  <el-option label="项目分钱" value="SETTLE" />
+                  <el-option label="预留" value="RESERVE" />
+                </el-select>
+                <el-select v-model="ledgerFilter.direction" clearable placeholder="收支方向" style="width: 120px">
+                  <el-option label="流入" value="IN" />
+                  <el-option label="流出" value="OUT" />
+                </el-select>
+                <el-select v-model="ledgerFilter.accountType" clearable placeholder="账户范围" style="width: 130px">
+                  <el-option label="项目账户" value="PROJECT" />
+                  <el-option label="公司账户" value="POOL" />
+                  <el-option label="个人钱包" value="WALLET" />
+                </el-select>
+              </div>
+              <div class="ledger-summary">
+                <span>当前页项目账户 {{ currentPageProjectFlow.count }} 笔</span>
+                <span class="in">流入 ¥{{ fmt(currentPageProjectFlow.inflow) }}</span>
+                <span class="out">流出 ¥{{ fmt(currentPageProjectFlow.outflow) }}</span>
+                <b>净额 {{ currentPageProjectFlow.net >= 0 ? '+' : '' }}¥{{ fmt(currentPageProjectFlow.net) }}</b>
+              </div>
+            </div>
+            <div v-if="chartDrilldown" class="chart-filter-notice" role="status">
+              <span>图表筛选：<b>{{ chartDrilldown.label }}</b></span>
+              <span>以下仅显示匹配的项目账户流水</span>
+              <el-button link type="primary" @click="clearChartDrilldown">清除筛选</el-button>
+            </div>
+            <el-table :data="visibleLedgers" stripe empty-text="暂无符合条件的流水">
               <el-table-column label="时间" width="150">
                 <template #default="{ row }">{{ fmtTime(row.occurTime) }}</template>
               </el-table-column>
-              <el-table-column label="编号" prop="bizNo" width="170" show-overflow-tooltip />
-              <el-table-column label="类型" width="100">
+              <el-table-column label="业务类型" width="110">
                 <template #default="{ row }">
                   <el-tag :type="bizTagType(row.bizType)" size="small">{{ bizLabel(row.bizType) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column prop="title" label="摘要" min-width="160" show-overflow-tooltip />
+              <el-table-column prop="title" label="业务摘要" min-width="210" show-overflow-tooltip />
               <el-table-column label="金额" width="120" align="right">
                 <template #default="{ row }">
                   <span :class="Number(row.amount) >= 0 ? 'in' : 'out'">
@@ -1073,9 +1448,23 @@ onMounted(async () => {
                   </span>
                 </template>
               </el-table-column>
-              <el-table-column label="账户" width="140" show-overflow-tooltip>
+              <el-table-column label="记账账户" width="140" show-overflow-tooltip>
                 <template #default="{ row }">
                   {{ accountLabel(row) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="业务单号" prop="bizNo" width="150">
+                <template #default="{ row }">
+                  <el-tooltip
+                    :content="row.bizNo || '—'"
+                    placement="top-end"
+                    :show-after="250"
+                    :disabled="!row.bizNo"
+                    :popper-options="{ strategy: 'fixed' }"
+                    popper-class="biz-no-tooltip"
+                  >
+                    <span class="biz-no-cell">{{ row.bizNo || '—' }}</span>
+                  </el-tooltip>
                 </template>
               </el-table-column>
               <el-table-column label="操作" width="80" align="center" fixed="right">
@@ -1084,7 +1473,7 @@ onMounted(async () => {
                 </template>
               </el-table-column>
             </el-table>
-            <div v-if="ledgerTotal > ledgerQuery.pageSize" class="page-footer">
+            <div v-if="!chartDrilldown && ledgerTotal > ledgerQuery.pageSize" class="page-footer">
               <el-pagination
                 v-model:current-page="ledgerQuery.page"
                 :page-size="ledgerQuery.pageSize"
@@ -1095,89 +1484,6 @@ onMounted(async () => {
             </div>
           </el-tab-pane>
 
-          <el-tab-pane label="资金配置" name="share">
-            <div class="share-layout">
-              <section class="share-panel">
-                <header class="share-panel-head">
-                  <h4>资金配置</h4>
-                  <p>只配「分成」和「预留」（合计 100%）。点「自然月分成」时按此比例拆待分成余额；工资/报销不占比例，默认从待分成扣。只改规则，已分/已花不变。</p>
-                </header>
-
-                <div class="percent-row two">
-                  <div class="percent-item">
-                    <span class="field-label">分成 %</span>
-                    <el-input-number
-                      v-model="shareForm.settlePercent"
-                      :min="0"
-                      :max="100"
-                      :precision="2"
-                      controls-position="right"
-                    />
-                    <span class="sub">已分 ¥{{ fmt(account.settleAmount) }}</span>
-                  </div>
-                  <div class="percent-item">
-                    <span class="field-label">预留 %</span>
-                    <el-input-number
-                      v-model="shareForm.reservePercent"
-                      :min="0"
-                      :max="100"
-                      :precision="2"
-                      controls-position="right"
-                    />
-                    <span class="sub">规划额度 · 分成后进预留占用</span>
-                  </div>
-                </div>
-                <div class="sum-line">
-                  分成 {{ Number(shareForm.settlePercent || 0).toFixed(2) }}%
-                  + 预留 {{ Number(shareForm.reservePercent || 0).toFixed(2) }}%
-                  = 100%（联动互补；支出不占比例）
-                </div>
-
-                <div class="members-head">
-                  <span class="field-label">分成人员比例</span>
-                  <span class="hint">只拆「分成」那一块；自然月分成时按此比例进个人钱包</span>
-                </div>
-                <el-table :data="shareForm.members" class="members-table">
-                  <el-table-column label="人员" min-width="150">
-                    <template #default="{ row }">
-                      <el-select v-model="row.userId" filterable placeholder="选择人员" style="width: 100%">
-                        <el-option v-for="u in users" :key="u.id" :label="u.nickname || u.username" :value="u.id" />
-                      </el-select>
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="角色" width="120">
-                    <template #default="{ row }">
-                      <el-input v-model="row.layer" placeholder="如 主理人" />
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="分成 %" width="130">
-                    <template #default="{ row }">
-                      <el-input-number v-model="row.percent" :min="0" :max="100" :precision="2" controls-position="right" style="width: 110px" />
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="备注" min-width="100">
-                    <template #default="{ row }">
-                      <el-input v-model="row.remark" />
-                    </template>
-                  </el-table-column>
-                  <el-table-column width="56" align="center">
-                    <template #default="{ $index }">
-                      <el-button link type="danger" @click="removeMember($index)">删</el-button>
-                    </template>
-                  </el-table-column>
-                </el-table>
-                <div class="panel-foot">
-                  <div class="foot-left">
-                    <el-button @click="addMember">添加参与人</el-button>
-                    <span class="sum-line inline" :class="{ bad: Math.abs(percentSum - 100) > 0.01 }">
-                      人员合计 {{ percentSum.toFixed(2) }}%
-                    </span>
-                  </div>
-                  <el-button type="primary" :loading="savingShare" @click="saveShare">提交配置审批</el-button>
-                </div>
-              </section>
-            </div>
-          </el-tab-pane>
         </el-tabs>
       </div>
       </template>
@@ -1512,12 +1818,63 @@ onMounted(async () => {
 
 <style scoped>
 .detail-name {
-  margin: 10px 0 4px;
+  margin: 0;
   font-size: 22px;
   font-weight: 600;
   letter-spacing: -0.03em;
   color: var(--kk-text);
 }
+.project-heading { margin-top: 12px; }
+.project-heading__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.meta-separator { margin: 0 6px; color: var(--kk-text-muted); }
+.page-actions {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.action-group {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 18px 4px 4px;
+  position: relative;
+}
+.action-group__label {
+  position: absolute;
+  top: 0;
+  left: 4px;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--kk-text-muted);
+}
+.action-group :deep(.el-button) { margin-left: 0; border-radius: 0; }
+.action-group :deep(.el-button:first-of-type) { border-radius: 8px 0 0 8px; }
+.action-group :deep(.el-button:last-of-type) { border-radius: 0 8px 8px 0; }
+.action-group :deep(.el-button:only-of-type) { border-radius: 8px; }
+.action-group :deep(.el-button + .el-button) { margin-left: -1px; }
+.finance-overview {
+  margin-bottom: 16px;
+  padding: 18px;
+  background: #fff;
+  border: 1px solid #e8edf3;
+  border-radius: var(--kk-radius);
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.04);
+}
+.section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.section-head h3 { margin: 0; font-size: 16px; color: var(--kk-text); }
+.section-head p { margin: 4px 0 0; font-size: 12px; color: var(--kk-text-muted); }
 .fund-swap {
   display: inline-flex;
   align-items: stretch;
@@ -1547,7 +1904,6 @@ onMounted(async () => {
   position: relative;
   overflow: hidden;
   padding: 20px;
-  cursor: pointer;
   background: var(--kk-glass-bg);
   border: 1px solid var(--kk-glass-border);
   border-radius: var(--kk-radius);
@@ -1555,6 +1911,7 @@ onMounted(async () => {
   backdrop-filter: var(--kk-glass-blur);
   -webkit-backdrop-filter: var(--kk-glass-blur);
 }
+.acc-card--clickable { cursor: pointer; }
 .acc-card:hover { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08); }
 .acc-card:focus-visible {
   outline: 2px solid var(--kk-primary);
@@ -1626,6 +1983,15 @@ onMounted(async () => {
   font-variant-numeric: tabular-nums;
   color: var(--kk-text);
 }
+.acc-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+.acc-card__actions :deep(.el-button + .el-button) { margin-left: 0; }
 .metric-grid {
   display: grid;
   grid-template-columns: 1.25fr repeat(4, minmax(0, 1fr));
@@ -1640,13 +2006,21 @@ onMounted(async () => {
   gap: 10px;
   min-height: 96px;
   padding: 16px 14px 16px 18px;
-  background: var(--kk-glass-bg);
-  border: 1px solid var(--kk-glass-border);
+  background: #f8fafc;
+  border: 1px solid #edf1f5;
   border-radius: var(--kk-radius);
   box-shadow: var(--kk-glass-shadow);
   backdrop-filter: var(--kk-glass-blur);
   -webkit-backdrop-filter: var(--kk-glass-blur);
 }
+.metric-card--primary {
+  background: #171717;
+  border-color: #171717;
+}
+.metric-card--primary .metric-label,
+.metric-card--primary .metric-hint { color: rgba(255, 255, 255, 0.66); }
+.metric-card--primary .metric-value,
+.metric-card--primary .metric-glyph { color: #fff; }
 .metric-card::before {
   content: "";
   position: absolute;
@@ -1684,11 +2058,173 @@ onMounted(async () => {
 .metric-value.sm { font-size: 18px; }
 .metric-hint { margin-top: 4px; font-size: 12px; color: var(--kk-text-muted); }
 .rule-tip {
-  margin: 0;
+  margin: 10px 2px 0;
   font-size: 13px;
   line-height: 1.6;
   color: var(--kk-text-secondary);
 }
+.balance-equation {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding: 12px 14px;
+  background: #f8fafc;
+  border: 1px solid #e8edf3;
+  border-radius: 10px;
+}
+.balance-equation--warning { background: #fff8ed; border-color: #fed7aa; }
+.equation-item { display: flex; flex-direction: column; gap: 2px; }
+.equation-item span { font-size: 11px; color: var(--kk-text-muted); }
+.equation-item b { font-size: 14px; color: var(--kk-text); font-variant-numeric: tabular-nums; }
+.equation-item--strong b { color: var(--kk-primary); }
+.equation-sign { color: var(--kk-text-muted); font-size: 12px; }
+.balance-alert { margin-left: auto; font-size: 12px; font-weight: 600; color: #b45309; }
+.balance-equation__copy { font-size: 13px; color: var(--kk-text-secondary); }
+.ledger-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #edf1f5;
+  border-radius: 10px;
+}
+.ledger-toolbar__filters { display: flex; gap: 8px; flex-wrap: wrap; }
+.ledger-summary { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--kk-text-secondary); }
+.ledger-summary b { color: var(--kk-text); font-variant-numeric: tabular-nums; }
+.ledger-section { scroll-margin-top: 16px; }
+.biz-no-cell {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:global(.biz-no-tooltip) {
+  max-width: calc(100vw - 24px);
+  white-space: nowrap;
+}
+.chart-filter-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: -2px 0 12px;
+  padding: 9px 12px;
+  color: #475569;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 9px;
+  font-size: 12px;
+}
+.chart-filter-notice b { color: #1d4ed8; }
+.chart-filter-notice .el-button { margin-left: auto; }
+.analytics-section {
+  margin-bottom: 16px;
+  padding: 18px;
+  background: #fff;
+  border: 1px solid #e8edf3;
+  border-radius: var(--kk-radius);
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.04);
+}
+.analytics-head { margin-bottom: 14px; }
+.analytics-controls { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+.analytics-grid {
+  display: grid;
+  grid-template-columns: 1.25fr 1fr 1fr;
+  gap: 14px;
+}
+.chart-card {
+  min-width: 0;
+  min-height: 286px;
+  padding: 16px;
+  background: #fbfcfe;
+  border: 1px solid #edf1f5;
+  border-radius: 12px;
+}
+.chart-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.chart-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.chart-title h4 { margin: 0; font-size: 14px; color: var(--kk-text); }
+.chart-title p { margin: 3px 0 0; font-size: 11px; color: var(--kk-text-muted); }
+.chart-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 9px;
+  font-size: 18px;
+}
+.chart-icon--blue { color: #2563eb; background: #dbeafe; }
+.chart-icon--amber { color: #d97706; background: #fef3c7; }
+.chart-icon--violet { color: #7c3aed; background: #ede9fe; }
+.chart-legend { display: flex; gap: 10px; font-size: 11px; white-space: nowrap; color: var(--kk-text-secondary); }
+.chart-legend span::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 2px; }
+.legend-in::before { background: #10b981; }
+.legend-out::before { background: #f97316; }
+.cash-chart {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-around;
+  gap: 10px;
+  height: 205px;
+  padding: 10px 4px 0;
+  border-bottom: 1px solid #dfe5ec;
+  background-image: linear-gradient(to bottom, #eef2f7 1px, transparent 1px);
+  background-size: 100% 25%;
+}
+.cash-column { flex: 1; min-width: 42px; text-align: center; display: flex; flex-direction: column; }
+.cash-bars { flex: 1; display: flex; align-items: flex-end; justify-content: center; gap: 5px; min-height: 130px; }
+.cash-bar { width: min(18px, 34%); min-height: 3px; padding: 0; border: 0; border-radius: 4px 4px 1px 1px; cursor: pointer; transition: opacity 0.2s ease, transform 0.2s ease; }
+.cash-bar:hover { opacity: 0.78; transform: translateY(-2px); }
+.cash-bar:focus-visible, .donut-legend__item:focus-visible, .flow-row:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+.cash-bar--in { background: #10b981; }
+.cash-bar--out { background: #f97316; }
+.cash-column > span { margin-top: 7px; font-size: 11px; color: var(--kk-text-secondary); }
+.cash-column > small { margin-top: 2px; font-size: 9px; color: var(--kk-text-muted); white-space: nowrap; }
+.donut-layout { display: grid; grid-template-columns: 132px 1fr; align-items: center; gap: 18px; min-height: 200px; }
+.donut-chart {
+  position: relative;
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+}
+.donut-chart::after {
+  content: '';
+  position: absolute;
+  inset: 22px;
+  background: #fbfcfe;
+  border-radius: 50%;
+}
+.donut-center { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.donut-center span { font-size: 10px; color: var(--kk-text-muted); }
+.donut-center b { margin-top: 3px; font-size: 12px; color: var(--kk-text); font-variant-numeric: tabular-nums; }
+.donut-legend { min-width: 0; }
+.donut-legend__item { display: grid; width: 100%; grid-template-columns: 8px minmax(48px, 1fr) auto; gap: 7px; align-items: center; padding: 5px; border: 0; border-radius: 6px; background: transparent; text-align: left; font: inherit; font-size: 11px; cursor: pointer; }
+.donut-legend__item:hover { background: #f1f5f9; }
+.donut-legend__item i { width: 8px; height: 8px; border-radius: 2px; }
+.donut-legend__item span { color: var(--kk-text-secondary); }
+.donut-legend__item b { color: var(--kk-text); font-variant-numeric: tabular-nums; }
+.donut-legend__item small { grid-column: 2 / 4; margin-top: -5px; color: var(--kk-text-muted); font-variant-numeric: tabular-nums; }
+.flow-ranking { display: flex; flex-direction: column; gap: 19px; padding-top: 5px; }
+.flow-row { width: 100%; padding: 4px; border: 0; border-radius: 7px; background: transparent; text-align: left; font: inherit; cursor: pointer; }
+.flow-row:hover { background: #f1f5f9; }
+.flow-row__label { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 7px; font-size: 11px; }
+.flow-row__label span { color: var(--kk-text-secondary); }
+.flow-row__label b { color: var(--kk-text); font-variant-numeric: tabular-nums; }
+.flow-track { height: 9px; overflow: hidden; background: #e9eef4; border-radius: 99px; }
+.flow-track i { display: block; height: 100%; border-radius: inherit; }
 .dialog-box {
   margin: 0 0 14px;
   padding: 12px 14px;
@@ -1885,6 +2421,9 @@ onMounted(async () => {
 @media (max-width: 1280px) {
   .metric-grid { grid-template-columns: 1fr 1fr; }
   .acc-card__meta { grid-template-columns: 1fr 1fr; }
+  .page-top { align-items: flex-start; }
+  .analytics-grid { grid-template-columns: 1fr 1fr; }
+  .chart-card--trend { grid-column: 1 / -1; }
 }
 @media (max-width: 1100px) {
   .percent-row { grid-template-columns: 1fr; }
@@ -1892,6 +2431,17 @@ onMounted(async () => {
 @media (max-width: 720px) {
   .metric-grid,
   .acc-grid { grid-template-columns: 1fr; }
+  .finance-overview { padding: 14px; }
+  .analytics-section { padding: 14px; }
+  .analytics-head { flex-direction: column; }
+  .analytics-controls { width: 100%; justify-content: flex-start; }
+  .analytics-controls :deep(.el-date-editor) { width: 100% !important; }
+  .analytics-grid { grid-template-columns: 1fr; }
+  .chart-card--trend { grid-column: auto; }
+  .donut-layout { grid-template-columns: 118px 1fr; }
+  .donut-chart { width: 118px; height: 118px; }
+  .ledger-toolbar__filters :deep(.el-input),
+  .ledger-toolbar__filters :deep(.el-select) { width: 100% !important; }
 }
 @media (prefers-reduced-transparency: reduce) {
   .acc-card,

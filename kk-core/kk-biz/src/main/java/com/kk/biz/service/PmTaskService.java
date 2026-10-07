@@ -32,7 +32,8 @@ public interface PmTaskService extends IService<PmTask> {
     Map<String, Object> summary(Long projectId, Integer priority, Long participantId, String title);
 
     /** 任务管理页统计，范围规则与 {@link #pageManagementTasks} 一致。 */
-    Map<String, Object> managementSummary(Long projectId, Integer priority, Long participantId, String title);
+    Map<String, Object> managementSummary(Long projectId, Integer priority, Long participantId, String title,
+                                          String periodFrom, String periodTo);
 
     Map<String, Object> managementDashboard(Long projectId, Integer priority, Long participantId, String title,
                                             String periodFrom, String periodTo);

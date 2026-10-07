@@ -12,6 +12,7 @@ import com.kk.biz.dto.LedgerThresholdSaveRequest;
 import com.kk.biz.dto.ManualShareItem;
 import com.kk.biz.dto.ProjectManualSettleRequest;
 import com.kk.biz.dto.ProjectSettleRequest;
+import com.kk.biz.dto.WalletAdjustmentRequest;
 import com.kk.biz.entity.FaAsset;
 import com.kk.biz.entity.FinLedger;
 import com.kk.biz.entity.FinLedgerThreshold;
@@ -104,6 +105,48 @@ public class FinanceServiceImpl extends ServiceImpl<FinPoolMapper, FinPool> impl
     @Lazy
     @Autowired
     private FinProjectAccountService projectAccountService;
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public HrWallet adjustWallet(Long userId, WalletAdjustmentRequest request) {
+        if (userId == null || userService.getById(userId) == null) {
+            throw new BusinessException("调账人员不存在");
+        }
+        String direction = request.getDirection() == null ? "" : request.getDirection().trim().toUpperCase();
+        if (!"INCREASE".equals(direction) && !"DECREASE".equals(direction)) {
+            throw new BusinessException("调账方向仅支持余额调增或余额调减");
+        }
+        BigDecimal amount = request.getAmount().setScale(2, RoundingMode.HALF_UP);
+        BigDecimal delta = "DECREASE".equals(direction) ? amount.negate() : amount;
+        walletService.getOrCreate(userId);
+        HrWallet beforeWallet = walletMapper.selectOne(new LambdaQueryWrapper<HrWallet>()
+                .eq(HrWallet::getUserId, userId)
+                .last("FOR UPDATE"));
+        BigDecimal before = beforeWallet.getBalance() == null ? BigDecimal.ZERO : beforeWallet.getBalance();
+        validateAdjustmentVouchers(request.getVoucherFileIds());
+        HrWallet afterWallet = walletService.changeBalance(userId, delta);
+        Long ledgerId = writeLedger(
+                "INCREASE".equals(direction) ? "ADJUST_IN" : "ADJUST_OUT",
+                "WALLET", null, userId, delta, before, afterWallet.getBalance(),
+                null, null, request.getReason().trim(),
+                StringUtils.hasText(request.getRemark()) ? request.getRemark().trim() : null);
+        fileService.bindBiz(request.getVoucherFileIds(), "ledger", ledgerId);
+        return afterWallet;
+    }
+
+    private void validateAdjustmentVouchers(List<Long> fileIds) {
+        if (fileIds == null || fileIds.isEmpty()) {
+            return;
+        }
+        Long operatorId = StpUtil.getLoginIdAsLong();
+        for (Long fileId : fileIds) {
+            SysFile file = fileService.get(fileId);
+            if (!"wallet_adjustment_voucher".equals(file.getBizType())
+                    || !Objects.equals(operatorId, file.getCreateBy())) {
+                throw new BusinessException("调账凭证无效，请重新上传");
+            }
+        }
+    }
 
     @Override
     public FinPool getDefaultPool() {

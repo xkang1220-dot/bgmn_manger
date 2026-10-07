@@ -12,6 +12,7 @@ import com.kk.biz.entity.HrSalarySchedule;
 import com.kk.biz.entity.HrArchive;
 import com.kk.biz.entity.HrDutyRecord;
 import com.kk.biz.entity.PmProject;
+import com.kk.biz.entity.PmTask;
 import com.kk.biz.mapper.HrSalaryItemMapper;
 import com.kk.biz.mapper.HrSalaryRunLineMapper;
 import com.kk.biz.mapper.HrSalaryRunMapper;
@@ -19,6 +20,7 @@ import com.kk.biz.mapper.HrSalaryScheduleMapper;
 import com.kk.biz.mapper.HrArchiveMapper;
 import com.kk.biz.mapper.HrDutyRecordMapper;
 import com.kk.biz.mapper.PmProjectMapper;
+import com.kk.biz.mapper.PmTaskMapper;
 import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.HrLeaveService;
 import com.kk.biz.service.HrHolidayCalendarService;
@@ -74,6 +76,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
     private static final Pattern ISO_WEEK = Pattern.compile("^(\\d{4})-W(\\d{2})$");
     private static final String CYCLE_MONTHLY = "MONTHLY";
     private static final String CYCLE_WEEKLY = "WEEKLY";
+    private static final int MONTHLY_CYCLE_END_DAY = 20;
     private static final WeekFields ISO_WEEKS = WeekFields.ISO;
 
     private final HrSalaryItemMapper itemMapper;
@@ -84,6 +87,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
     private final HrDutyRecordMapper dutyRecordMapper;
     private final HrHolidayCalendarService holidayCalendarService;
     private final PmProjectMapper projectMapper;
+    private final PmTaskMapper taskMapper;
     private final FinProjectAccountService projectAccountService;
     private final HrLeaveService leaveService;
     private final SysUserService userService;
@@ -113,6 +117,16 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             }
         }
         return list;
+    }
+
+    @Override
+    public List<HrSalaryItem> listBudgetItems() {
+        List<HrSalaryItem> items = listItems(null, null);
+        if (dataScopeService.isGlobalAdmin(StpUtil.getLoginIdAsLong())) {
+            return items;
+        }
+        Set<Long> visibleCompanyIds = dataScopeService.visibleCompanyIds(StpUtil.getLoginIdAsLong());
+        return items.stream().filter(item -> visibleCompanyIds.contains(item.getCompanyId())).toList();
     }
 
     @Override
@@ -154,7 +168,10 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             BigDecimal normal = item.getNormalCoefficient() == null ? BigDecimal.ONE : item.getNormalCoefficient();
             BigDecimal rest = item.getRestCoefficient() == null ? BigDecimal.ZERO : item.getRestCoefficient();
             if (normal.compareTo(BigDecimal.ZERO) < 0 || rest.compareTo(BigDecimal.ZERO) < 0) {
-                throw new BusinessException("工资系数不能为负数");
+                throw new BusinessException("计薪权重不能为负数");
+            }
+            if (normal.add(rest).compareTo(BigDecimal.ZERO) == 0) {
+                throw new BusinessException("常规日和休息日计薪权重不能同时为 0");
             }
             item.setNormalCoefficient(normal); item.setRestCoefficient(rest);
             item.setNormalDayRate(null); item.setRestDayRate(null);
@@ -286,14 +303,21 @@ public class HrSalaryServiceImpl implements HrSalaryService {
 
     @Override
     public List<HrSalaryRun> listRuns(Long companyId, String yearMonth) {
-        if (companyId == null) {
-            throw new BusinessException("请选择公司");
+        if (companyId != null) {
+            assertCompanyVisible(companyId);
         }
-        assertCompanyVisible(companyId);
-        List<HrSalaryRun> list = runMapper.selectList(new LambdaQueryWrapper<HrSalaryRun>()
-                .eq(HrSalaryRun::getCompanyId, companyId)
+        LambdaQueryWrapper<HrSalaryRun> query = new LambdaQueryWrapper<HrSalaryRun>()
+                .eq(companyId != null, HrSalaryRun::getCompanyId, companyId)
                 .eq(StringUtils.hasText(yearMonth), HrSalaryRun::getYearMonth, yearMonth)
-                .orderByDesc(HrSalaryRun::getId));
+                .orderByDesc(HrSalaryRun::getId);
+        if (companyId == null && !dataScopeService.isGlobalAdmin(StpUtil.getLoginIdAsLong())) {
+            Set<Long> visibleCompanyIds = dataScopeService.visibleCompanyIds(StpUtil.getLoginIdAsLong());
+            if (visibleCompanyIds.isEmpty()) {
+                return List.of();
+            }
+            query.in(HrSalaryRun::getCompanyId, visibleCompanyIds);
+        }
+        List<HrSalaryRun> list = runMapper.selectList(query);
         Map<Long, String> companyNames = deptService.listCompanies().stream()
                 .collect(Collectors.toMap(SysDept::getId, SysDept::getName, (a, b) -> a));
         for (HrSalaryRun run : list) {
@@ -315,6 +339,355 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         fillLineNames(lines);
         return lines;
     }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void voidRunLine(Long lineId, String reason) {
+        String voidReason = reason == null ? "" : reason.trim();
+        if (voidReason.isEmpty()) {
+            throw new BusinessException("请输入作废原因");
+        }
+        HrSalaryRunLine line = lineMapper.selectById(lineId);
+        if (line == null) {
+            throw new BusinessException("批次明细不存在");
+        }
+        HrSalaryRun run = runMapper.selectById(line.getRunId());
+        if (run == null) {
+            throw new BusinessException("跑批记录不存在");
+        }
+        assertCompanyVisible(run.getCompanyId());
+        if (!"BUDGET".equals(run.getPhase()) || !"BUDGETED".equals(line.getStatus())) {
+            throw new BusinessException("仅已预算且未作废的明细可以作废");
+        }
+        line.setStatus("VOIDED");
+        line.setSkipReason(voidReason);
+        lineMapper.updateById(line);
+
+        Long totalCount = lineMapper.selectCount(new LambdaQueryWrapper<HrSalaryRunLine>()
+                .eq(HrSalaryRunLine::getRunId, run.getId()));
+        Long voidedCount = lineMapper.selectCount(new LambdaQueryWrapper<HrSalaryRunLine>()
+                .eq(HrSalaryRunLine::getRunId, run.getId())
+                .eq(HrSalaryRunLine::getStatus, "VOIDED"));
+        run.setStatus(totalCount > 0 && totalCount.equals(voidedCount) ? "VOIDED" : "PARTIALLY_VOIDED");
+        runMapper.updateById(run);
+    }
+
+    @Override
+    public Map<String, Object> previewBudget(String yearMonth, List<Long> itemIds,
+                                             Map<Long, BigDecimal> taskRewardOverrides) {
+        return previewBudgetInternal(yearMonth, itemIds, taskRewardOverrides, true);
+    }
+
+    private Map<String, Object> previewBudgetInternal(String yearMonth, List<Long> itemIds,
+                                                       Map<Long, BigDecimal> taskRewardOverrides,
+                                                       boolean rejectUnknownOverrides) {
+        String ym = normalizePeriod(null, yearMonth);
+        List<HrSalaryItem> selected = selectedBudgetItems(itemIds);
+        Map<Long, BigDecimal> overrides = normalizeTaskRewardOverrides(taskRewardOverrides);
+        Map<Long, List<HrSalaryItem>> byUser = selected.stream()
+                .collect(Collectors.groupingBy(HrSalaryItem::getUserId, LinkedHashMap::new, Collectors.toList()));
+        List<Map<String, Object>> people = new ArrayList<>();
+        BigDecimal total = BigDecimal.ZERO;
+        for (Map.Entry<Long, List<HrSalaryItem>> entry : byUser.entrySet()) {
+            Map<String, Object> payload = buildPayload(entry.getKey(), ym, CYCLE_MONTHLY, entry.getValue());
+            enrichBudgetDetails(payload, entry.getValue(), ym, overrides);
+            people.add(payload);
+            total = total.add(asAmount(payload.get("totalAmount")));
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("yearMonth", ym);
+        result.put("periodStart", selected.stream().map(item -> salaryPeriodRange(item, ym)[0]).min(LocalDate::compareTo).orElse(null));
+        result.put("periodEnd", selected.stream().map(item -> salaryPeriodRange(item, ym)[1]).max(LocalDate::compareTo).orElse(null));
+        result.put("people", people);
+        result.put("peopleCount", people.size());
+        result.put("itemCount", selected.size());
+        result.put("companyCount", selected.stream().map(HrSalaryItem::getCompanyId).distinct().count());
+        result.put("totalAmount", total.setScale(2, RoundingMode.HALF_UP));
+        if (rejectUnknownOverrides && !overrides.isEmpty()) {
+            Set<Long> includedTaskIds = people.stream()
+                    .flatMap(person -> taskRewardRows(person).stream())
+                    .map(reward -> toLong(reward.get("taskId")))
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+            if (!includedTaskIds.containsAll(overrides.keySet())) {
+                throw new BusinessException("部分任务报酬不属于本次预算，请重新计算后再提交");
+            }
+        }
+        return result;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public List<HrSalaryRun> saveBudget(String yearMonth, List<Long> itemIds,
+                                        Map<Long, BigDecimal> taskRewardOverrides) {
+        List<HrSalaryItem> selected = selectedBudgetItems(itemIds);
+        Map<Long, BigDecimal> overrides = normalizeTaskRewardOverrides(taskRewardOverrides);
+        // Validate all adjusted tasks against the complete selection before splitting runs by company.
+        previewBudgetInternal(yearMonth, itemIds, overrides, true);
+        Map<Long, List<Long>> idsByCompany = selected.stream().collect(Collectors.groupingBy(
+                HrSalaryItem::getCompanyId, LinkedHashMap::new,
+                Collectors.mapping(HrSalaryItem::getId, Collectors.toList())));
+        List<HrSalaryRun> runs = new ArrayList<>();
+        for (Map.Entry<Long, List<Long>> entry : idsByCompany.entrySet()) {
+            Long companyId = entry.getKey();
+            String normalizedMonth = normalizePeriod(null, yearMonth);
+            List<HrSalaryRun> previousBudgetRuns = runMapper.selectList(new LambdaQueryWrapper<HrSalaryRun>()
+                    .eq(HrSalaryRun::getCompanyId, companyId)
+                    .eq(HrSalaryRun::getYearMonth, normalizedMonth)
+                    .eq(HrSalaryRun::getPhase, "BUDGET")
+                    .ne(HrSalaryRun::getStatus, "VOIDED")
+                    .orderByDesc(HrSalaryRun::getId));
+            Map<String, Object> unadjustedBudget = previewBudgetInternal(yearMonth, entry.getValue(), Map.of(), false);
+            Set<Long> companyTaskIds = ((List<Map<String, Object>>) unadjustedBudget.get("people")).stream()
+                    .flatMap(person -> taskRewardRows(person).stream())
+                    .map(reward -> toLong(reward.get("taskId")))
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+            Map<Long, BigDecimal> companyOverrides = overrides.entrySet().stream()
+                    .filter(override -> companyTaskIds.contains(override.getKey()))
+                    .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue,
+                            (a, b) -> b, LinkedHashMap::new));
+            Map<String, Object> budget = previewBudgetInternal(yearMonth, entry.getValue(), companyOverrides, false);
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> people = (List<Map<String, Object>>) budget.get("people");
+            HrSalaryRun run = new HrSalaryRun();
+            run.setCompanyId(companyId);
+            run.setYearMonth(String.valueOf(budget.get("yearMonth")));
+            run.setPhase("BUDGET");
+            run.setStatus("DONE");
+            run.setTriggerType("MANUAL");
+            run.setStartedAt(LocalDateTime.now());
+            run.setFinishedAt(LocalDateTime.now());
+            run.setMessage("预算已入库（" + budget.get("periodStart") + " 至 " + budget.get("periodEnd")
+                    + "），共 " + budget.get("peopleCount") + " 人，合计 ¥" + budget.get("totalAmount"));
+            runMapper.insert(run);
+            voidSupersededBudgetRuns(previousBudgetRuns, run.getId());
+            for (Map<String, Object> person : people) {
+                HrSalaryRunLine line = new HrSalaryRunLine();
+                line.setRunId(run.getId());
+                line.setUserId(toLong(person.get("userId")));
+                line.setStatus("BUDGETED");
+                line.setTotalAmount(asAmount(person.get("totalAmount")));
+                line.setPayloadSnapshot(JSONUtil.toJsonStr(person));
+                lineMapper.insert(line);
+            }
+            runs.add(run);
+        }
+        return runs;
+    }
+
+    private void voidSupersededBudgetRuns(List<HrSalaryRun> previousRuns, Long replacementRunId) {
+        if (previousRuns == null || previousRuns.isEmpty()) {
+            return;
+        }
+        String reason = "同月份重新预算入库，已由预算批次 #" + replacementRunId + " 替代";
+        for (HrSalaryRun previous : previousRuns) {
+            List<HrSalaryRunLine> oldLines = lineMapper.selectList(new LambdaQueryWrapper<HrSalaryRunLine>()
+                    .eq(HrSalaryRunLine::getRunId, previous.getId()));
+            for (HrSalaryRunLine line : oldLines) {
+                if (!"VOIDED".equals(line.getStatus())) {
+                    line.setStatus("VOIDED");
+                    line.setSkipReason(reason);
+                    lineMapper.updateById(line);
+                }
+            }
+            previous.setStatus("VOIDED");
+            String oldMessage = StringUtils.hasText(previous.getMessage()) ? previous.getMessage() + "；" : "";
+            previous.setMessage(oldMessage + "已作废：" + reason);
+            runMapper.updateById(previous);
+        }
+    }
+
+    private List<HrSalaryItem> selectedBudgetItems(List<Long> itemIds) {
+        if (itemIds == null || itemIds.isEmpty()) throw new BusinessException("请至少选择一项工资配置");
+        List<HrSalaryItem> items = itemMapper.selectList(new LambdaQueryWrapper<HrSalaryItem>()
+                .in(HrSalaryItem::getId, itemIds)
+                .eq(HrSalaryItem::getEnabled, 1));
+        if (items.size() != new HashSet<>(itemIds).size()) throw new BusinessException("部分工资配置无效或已停用，请重新选择");
+        items.forEach(item -> assertCompanyVisible(item.getCompanyId()));
+        fillItemNames(items);
+        return items;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void enrichBudgetDetails(Map<String, Object> payload, List<HrSalaryItem> configs, String ym,
+                                     Map<Long, BigDecimal> taskRewardOverrides) {
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) payload.get("items");
+        for (int i = 0; i < rows.size(); i++) {
+            Map<String, Object> row = rows.get(i);
+            HrSalaryItem item = configs.get(i);
+            LocalDate[] range = salaryPeriodRange(item, ym);
+            row.put("itemId", item.getId());
+            row.put("periodStart", range[0]);
+            row.put("periodEnd", range[1]);
+            row.put("dailyDetails", buildDailySalaryDetails(item, toLong(payload.get("userId")), ym,
+                    asAmount(row.get("amount")), range));
+            if ("DAILY".equalsIgnoreCase(item.getPayMode())) {
+                row.put("formula", "工作日日薪 × 实际工作日 + 休息日日薪 × 实际休息日");
+                row.put("formulaDetail", moneyText(item.getNormalDayRate()) + " × " + ((Integer) row.get("normalDays") - (Integer) row.get("absentNormalDays"))
+                        + " + " + moneyText(item.getRestDayRate()) + " × " + ((Integer) row.get("restDays") - (Integer) row.get("absentRestDays")));
+            } else {
+                row.put("formula", "固定月薪 × 实际出勤权重 ÷ 应计总权重（满勤时等于固定月薪）");
+                row.put("formulaDetail", monthlyFormulaDetail(item, row));
+            }
+        }
+        addTaskRewards(payload, configs, ym, taskRewardOverrides);
+    }
+
+    /**
+     * 将计薪周期内最终完成的任务报酬加入预算。待确认完成（status=4）不会被计入。
+     * 当前每名员工只允许一项工资配置，因此以该配置的发薪周期作为任务报酬周期。
+     */
+    private void addTaskRewards(Map<String, Object> payload, List<HrSalaryItem> configs, String ym,
+                                Map<Long, BigDecimal> taskRewardOverrides) {
+        if (configs.isEmpty()) {
+            return;
+        }
+        Long userId = toLong(payload.get("userId"));
+        HrArchive archive = archiveMapper.selectOne(new LambdaQueryWrapper<HrArchive>()
+                .eq(HrArchive::getUserId, userId)
+                .select(HrArchive::getTaskRewardEnabled)
+                .last("LIMIT 1"));
+        if (archive == null || !Objects.equals(archive.getTaskRewardEnabled(), 1)) {
+            payload.put("taskRewards", List.of());
+            payload.put("taskRewardAmount", BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
+            payload.put("salaryAmount", asAmount(payload.get("totalAmount")));
+            return;
+        }
+
+        LocalDate[] range = salaryPeriodRange(configs.get(0), ym);
+        List<PmTask> tasks = taskMapper.selectList(new LambdaQueryWrapper<PmTask>()
+                .eq(PmTask::getAssigneeId, userId)
+                .eq(PmTask::getStatus, 2)
+                .isNotNull(PmTask::getTaskReward)
+                .gt(PmTask::getTaskReward, BigDecimal.ZERO)
+                .ge(PmTask::getCompletedAt, range[0].atStartOfDay())
+                .lt(PmTask::getCompletedAt, range[1].plusDays(1).atStartOfDay())
+                .orderByAsc(PmTask::getCompletedAt)
+                .orderByAsc(PmTask::getId));
+        Set<Long> projectIds = tasks.stream().map(PmTask::getProjectId)
+                .filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<Long, String> projectNames = projectIds.isEmpty() ? Map.of()
+                : projectMapper.selectBatchIds(projectIds).stream()
+                .collect(Collectors.toMap(PmProject::getId, PmProject::getName, (a, b) -> a));
+
+        List<Map<String, Object>> rewards = new ArrayList<>();
+        BigDecimal rewardTotal = BigDecimal.ZERO;
+        for (PmTask task : tasks) {
+            BigDecimal amount = taskRewardOverrides.getOrDefault(task.getId(), nz(task.getTaskReward()))
+                    .setScale(2, RoundingMode.HALF_UP);
+            Map<String, Object> reward = new LinkedHashMap<>();
+            reward.put("taskId", task.getId());
+            reward.put("taskTitle", task.getTitle());
+            reward.put("projectId", task.getProjectId());
+            reward.put("projectName", task.getProjectId() == null ? "未关联项目"
+                    : projectNames.getOrDefault(task.getProjectId(), "#" + task.getProjectId()));
+            reward.put("completedAt", task.getCompletedAt());
+            reward.put("amount", amount);
+            rewards.add(reward);
+            rewardTotal = rewardTotal.add(amount);
+        }
+        BigDecimal salaryAmount = asAmount(payload.get("totalAmount"));
+        payload.put("salaryAmount", salaryAmount);
+        payload.put("taskRewards", rewards);
+        payload.put("taskRewardAmount", rewardTotal.setScale(2, RoundingMode.HALF_UP));
+        payload.put("totalAmount", salaryAmount.add(rewardTotal).setScale(2, RoundingMode.HALF_UP));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> taskRewardRows(Map<String, Object> person) {
+        Object rows = person.get("taskRewards");
+        return rows instanceof List<?> ? (List<Map<String, Object>>) rows : List.of();
+    }
+
+    private Map<Long, BigDecimal> normalizeTaskRewardOverrides(Map<Long, BigDecimal> values) {
+        if (values == null || values.isEmpty()) return Map.of();
+        Map<Long, BigDecimal> result = new LinkedHashMap<>();
+        values.forEach((taskId, amount) -> {
+            if (taskId == null || amount == null) throw new BusinessException("任务报酬调整值不能为空");
+            if (amount.signum() < 0) throw new BusinessException("任务报酬不能小于 0");
+            if (amount.scale() > 2) throw new BusinessException("任务报酬最多保留两位小数");
+            if (amount.compareTo(new BigDecimal("999999999999.99")) > 0) {
+                throw new BusinessException("任务报酬超出允许范围");
+            }
+            result.put(taskId, amount.setScale(2, RoundingMode.HALF_UP));
+        });
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String monthlyFormulaDetail(HrSalaryItem item, Map<String, Object> row) {
+        int normalDays = (Integer) row.get("normalDays");
+        int restDays = (Integer) row.get("restDays");
+        int paidNormalDays = normalDays - (Integer) row.get("absentNormalDays");
+        int paidRestDays = restDays - (Integer) row.get("absentRestDays");
+        BigDecimal normalWeight = nz(item.getNormalCoefficient());
+        BigDecimal restWeight = nz(item.getRestCoefficient());
+        return moneyText(item.getAmount()) + " ×（" + paidNormalDays + " × " + normalWeight + " + "
+                + paidRestDays + " × " + restWeight + "）÷（" + normalDays + " × "
+                + normalWeight + " + " + restDays + " × " + restWeight + "）";
+    }
+
+    private List<Map<String, Object>> buildDailySalaryDetails(HrSalaryItem item, Long userId, String period,
+                                                               BigDecimal expectedAmount, LocalDate[] customRange) {
+        LocalDate[] range = customRange == null ? salaryPeriodRange(item, period) : customRange;
+        Map<LocalDate, Map<String, Object>> calendar = holidayCalendarService.calendarByDate(range[0], range[1]);
+        Set<LocalDate> dutyDays = dutyRecordMapper.selectList(new LambdaQueryWrapper<HrDutyRecord>()
+                        .eq(HrDutyRecord::getUserId, userId)
+                        .ge(HrDutyRecord::getDutyDate, range[0]).le(HrDutyRecord::getDutyDate, range[1]))
+                .stream().map(HrDutyRecord::getDutyDate).collect(Collectors.toSet());
+        Set<LocalDate> absentDays = new HashSet<>(salaryLeaveDates(userId, range));
+        boolean dailyMode = "DAILY".equalsIgnoreCase(item.getPayMode());
+        BigDecimal monthlyTotalWeight = BigDecimal.ZERO;
+        if (!dailyMode) {
+            for (LocalDate date = range[0]; !date.isAfter(range[1]); date = date.plusDays(1)) {
+                Map<String, Object> calendarDay = calendar.get(date);
+                boolean normal = dutyDays.contains(date)
+                        || (calendarDay != null && Boolean.TRUE.equals(calendarDay.get("workday")));
+                monthlyTotalWeight = monthlyTotalWeight.add(
+                        normal ? nz(item.getNormalCoefficient()) : nz(item.getRestCoefficient()));
+            }
+            if (monthlyTotalWeight.compareTo(BigDecimal.ZERO) <= 0) {
+                throw new BusinessException("发薪周期的应计总权重必须大于 0");
+            }
+        }
+        List<Map<String, Object>> details = new ArrayList<>();
+        Map<String, Object> lastPaidDay = null;
+        BigDecimal displayedTotal = BigDecimal.ZERO;
+        for (LocalDate date = range[0]; !date.isAfter(range[1]); date = date.plusDays(1)) {
+            Map<String, Object> calendarDay = calendar.get(date);
+            boolean duty = dutyDays.contains(date);
+            boolean normal = duty || (calendarDay != null && Boolean.TRUE.equals(calendarDay.get("workday")));
+            boolean absent = absentDays.contains(date);
+            BigDecimal scheduledAmount = dailyMode
+                    ? (normal ? nz(item.getNormalDayRate()) : nz(item.getRestDayRate()))
+                    : nz(item.getAmount()).multiply(
+                            normal ? nz(item.getNormalCoefficient()) : nz(item.getRestCoefficient()))
+                    .divide(monthlyTotalWeight, 8, RoundingMode.HALF_UP);
+            BigDecimal dayAmount = absent ? BigDecimal.ZERO : scheduledAmount;
+            dayAmount = dayAmount.setScale(2, RoundingMode.HALF_UP);
+            Map<String, Object> detail = new LinkedHashMap<>();
+            detail.put("date", date);
+            detail.put("dayType", normal ? "NORMAL" : "REST");
+            detail.put("duty", duty);
+            detail.put("absent", absent);
+            detail.put("amount", dayAmount);
+            detail.put("deductionAmount", absent
+                    ? scheduledAmount.setScale(2, RoundingMode.HALF_UP)
+                    : BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
+            details.add(detail);
+            displayedTotal = displayedTotal.add(dayAmount);
+            if (dayAmount.compareTo(BigDecimal.ZERO) > 0) lastPaidDay = detail;
+        }
+        // 每日金额以两位小数展示；把累计舍入差额归入最后一个计薪日，确保日历合计与预算金额严格一致。
+        BigDecimal roundingDelta = expectedAmount.subtract(displayedTotal).setScale(2, RoundingMode.HALF_UP);
+        if (lastPaidDay != null && roundingDelta.compareTo(BigDecimal.ZERO) != 0) {
+            lastPaidDay.put("amount", asAmount(lastPaidDay.get("amount")).add(roundingDelta).setScale(2, RoundingMode.HALF_UP));
+        }
+        return details;
+    }
+
+    private String moneyText(BigDecimal value) { return nz(value).setScale(2, RoundingMode.HALF_UP).toPlainString(); }
 
     @Override
     public List<Map<String, Object>> myConfirmQueue(String yearMonth) {
@@ -395,274 +768,6 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         lineMapper.updateById(line);
     }
 
-    @Override
-    public List<Map<String, Object>> preparePayDraft(Long companyId, String yearMonth) {
-        if (companyId == null) {
-            throw new BusinessException("请选择公司");
-        }
-        assertCompanyVisible(companyId);
-        String ym = normalizePeriod(companyId, yearMonth);
-        String cycle = cycleOfPeriod(companyId, ym);
-        Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId, cycle);
-        List<Map<String, Object>> rows = new ArrayList<>();
-        for (Map.Entry<Long, List<HrSalaryItem>> e : byUser.entrySet()) {
-            Long userId = e.getKey();
-            if (hasApprovalCreated(companyId, ym, userId)) {
-                continue;
-            }
-            Map<String, Object> payload = buildPayload(userId, ym, cycle, e.getValue());
-            List<LocalDate> leaveDates = salaryLeaveDates(e.getValue().get(0), userId, ym);
-            int leaveDays = leaveDates.size();
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("userId", userId);
-            row.put("userName", payload.get("userName"));
-            row.put("yearMonth", ym);
-            row.put("cycleType", cycle);
-            row.put("grossAmount", payload.get("totalAmount"));
-            row.put("items", payload.get("items"));
-            row.put("leaveDays", leaveDays);
-            row.put("leaveDates", leaveDates.stream().map(LocalDate::toString).toList());
-            row.put("fullAttendance", leaveDays <= 0);
-            row.put("deductionAmount", BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
-            row.put("deductionRemark", "");
-            row.put("netAmount", payload.get("totalAmount"));
-            HrSalaryRunLine preview = findPreviewLine(companyId, ym, userId);
-            if (preview != null) {
-                row.put("previewStatus", preview.getStatus());
-                row.put("previewLineId", preview.getId());
-            }
-            rows.add(row);
-        }
-        return rows;
-    }
-
-    @Override
-    public HrSalaryRun preparePayConfirm(Long companyId, String yearMonth, List<Map<String, Object>> lines) {
-        if (companyId == null) {
-            throw new BusinessException("请选择公司");
-        }
-        assertCompanyVisible(companyId);
-        if (lines == null || lines.isEmpty()) {
-            throw new BusinessException("请至少选择一名发薪人员");
-        }
-        String ym = normalizePeriod(companyId, yearMonth);
-        String cycle = cycleOfPeriod(companyId, ym);
-        String periodWord = CYCLE_WEEKLY.equals(cycle) ? "周度" : "月度";
-        Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId, cycle);
-
-        // 先完整校验，避免中途失败留下 RUNNING 批次 / 作废旧确认却看不到新确认
-        List<Map<String, Object>> prepared = new ArrayList<>();
-        Set<Long> seenUsers = new HashSet<>();
-        for (Map<String, Object> input : lines) {
-            Long userId = toLong(input.get("userId"));
-            if (userId == null) {
-                throw new BusinessException("发薪确认缺少人员");
-            }
-            if (!seenUsers.add(userId)) {
-                throw new BusinessException(userDisplayName(userId) + " 重复提交，请合并为一条");
-            }
-            List<HrSalaryItem> items = byUser.get(userId);
-            if (items == null || items.isEmpty()) {
-                throw new BusinessException("用户 " + userDisplayName(userId) + " 当期无启用工资配置");
-            }
-            if (hasApprovalCreated(companyId, ym, userId)) {
-                throw new BusinessException(userDisplayName(userId) + " 本期已生成审批，勿重复确认");
-            }
-            Map<String, Object> base = buildPayload(userId, ym, cycle, items);
-            BigDecimal gross = asAmount(base.get("totalAmount"));
-            BigDecimal deduction = asAmount(input.get("deductionAmount"));
-            String remark = input.get("deductionRemark") == null ? "" : String.valueOf(input.get("deductionRemark")).trim();
-            List<LocalDate> leaveDates = salaryLeaveDates(items.get(0), userId, ym);
-            int leaveDays = leaveDates.size();
-            if (deduction.compareTo(BigDecimal.ZERO) > 0 && !StringUtils.hasText(remark)) {
-                throw new BusinessException(userDisplayName(userId) + " 扣款请填写备注");
-            }
-            if (deduction.compareTo(BigDecimal.ZERO) < 0) {
-                throw new BusinessException(userDisplayName(userId) + " 扣款不能为负");
-            }
-            if (deduction.compareTo(gross) > 0) {
-                throw new BusinessException(userDisplayName(userId) + " 扣款不能超过应发 ¥" + gross.toPlainString());
-            }
-            Map<String, Object> payload = applySalaryDeduction(base, deduction, remark, leaveDays, leaveDates);
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("userId", userId);
-            row.put("payload", payload);
-            prepared.add(row);
-        }
-
-        TransactionTemplate tx = new TransactionTemplate(transactionManager);
-        HrSalaryRun run = tx.execute(status -> {
-            HrSalaryRun r = new HrSalaryRun();
-            r.setCompanyId(companyId);
-            r.setYearMonth(ym);
-            r.setPhase("PREVIEW");
-            r.setStatus("RUNNING");
-            r.setTriggerType("MANUAL");
-            r.setStartedAt(LocalDateTime.now());
-            runMapper.insert(r);
-            return r;
-        });
-        if (run == null || run.getId() == null) {
-            throw new BusinessException("创建发薪确认批次失败");
-        }
-
-        TransactionTemplate requiresNew = requiresNewTx();
-        int notified = 0;
-        try {
-            for (Map<String, Object> row : prepared) {
-                Long userId = toLong(row.get("userId"));
-                @SuppressWarnings("unchecked")
-                Map<String, Object> payload = (Map<String, Object>) row.get("payload");
-                // 作废同周期旧待确认/已确认预告，以本次财务确认为准
-                invalidateOldPreviewLines(requiresNew, companyId, ym, userId);
-
-                Long lineId = requiresNew.execute(status -> {
-                    HrSalaryRunLine line = new HrSalaryRunLine();
-                    line.setRunId(run.getId());
-                    line.setUserId(userId);
-                    line.setStatus("PENDING_CONFIRM");
-                    line.setTotalAmount(asAmount(payload.get("totalAmount")));
-                    line.setPayloadSnapshot(JSONUtil.toJsonStr(payload));
-                    lineMapper.insert(line);
-                    return line.getId();
-                });
-                String content = buildPayConfirmContent(payload);
-                notificationService.notifyUser(
-                        userId,
-                        "工资确认 · " + ym,
-                        truncate(content, 480),
-                        "salary_preview",
-                        lineId,
-                        "/account/salary-confirm?yearMonth=" + ym);
-                notified++;
-            }
-
-            int finalNotified = notified;
-            tx.executeWithoutResult(status -> {
-                HrSalaryRun fresh = runMapper.selectById(run.getId());
-                if (fresh == null) {
-                    return;
-                }
-                fresh.setStatus("DONE");
-                fresh.setFinishedAt(LocalDateTime.now());
-                fresh.setMessage(periodWord + "发薪确认已发送 " + finalNotified + " 人");
-                runMapper.updateById(fresh);
-                run.setStatus(fresh.getStatus());
-                run.setFinishedAt(fresh.getFinishedAt());
-                run.setMessage(fresh.getMessage());
-            });
-            return run;
-        } catch (RuntimeException ex) {
-            int finalNotified = notified;
-            tx.executeWithoutResult(status -> {
-                HrSalaryRun fresh = runMapper.selectById(run.getId());
-                if (fresh == null || !"RUNNING".equals(fresh.getStatus())) {
-                    return;
-                }
-                // 已写入的明细挂在本批次上：有成功发出的则标 DONE，避免员工确认队列读不到
-                if (finalNotified > 0) {
-                    fresh.setStatus("DONE");
-                    fresh.setFinishedAt(LocalDateTime.now());
-                    fresh.setMessage(periodWord + "发薪确认部分发送 " + finalNotified
-                            + " 人后中断：" + truncate(ex.getMessage(), 160));
-                } else {
-                    fresh.setStatus("FAILED");
-                    fresh.setFinishedAt(LocalDateTime.now());
-                    fresh.setMessage("发薪确认失败：" + truncate(ex.getMessage(), 200));
-                }
-                runMapper.updateById(fresh);
-            });
-            throw ex;
-        }
-    }
-
-    private void invalidateOldPreviewLines(TransactionTemplate requiresNew, Long companyId, String ym, Long userId) {
-        requiresNew.executeWithoutResult(s -> {
-            List<HrSalaryRun> previewRuns = runMapper.selectList(new LambdaQueryWrapper<HrSalaryRun>()
-                    .eq(HrSalaryRun::getCompanyId, companyId)
-                    .eq(HrSalaryRun::getYearMonth, ym)
-                    .eq(HrSalaryRun::getPhase, "PREVIEW"));
-            if (previewRuns.isEmpty()) {
-                return;
-            }
-            List<Long> runIds = previewRuns.stream().map(HrSalaryRun::getId).toList();
-            List<HrSalaryRunLine> oldLines = lineMapper.selectList(new LambdaQueryWrapper<HrSalaryRunLine>()
-                    .in(HrSalaryRunLine::getRunId, runIds)
-                    .eq(HrSalaryRunLine::getUserId, userId)
-                    .in(HrSalaryRunLine::getStatus, "PENDING_CONFIRM", "CONFIRMED"));
-            for (HrSalaryRunLine old : oldLines) {
-                old.setStatus("SKIPPED");
-                old.setSkipReason("已被新的发薪确认覆盖");
-                lineMapper.updateById(old);
-            }
-        });
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> applySalaryDeduction(Map<String, Object> base, BigDecimal deduction, String remark,
-                                                     int leaveDays, List<LocalDate> leaveDates) {
-        Map<String, Object> payload = new LinkedHashMap<>(base);
-        BigDecimal gross = asAmount(base.get("totalAmount")).setScale(2, RoundingMode.HALF_UP);
-        BigDecimal ded = deduction == null ? BigDecimal.ZERO : deduction.setScale(2, RoundingMode.HALF_UP);
-        BigDecimal net = gross.subtract(ded).setScale(2, RoundingMode.HALF_UP);
-        List<Map<String, Object>> items = (List<Map<String, Object>>) base.get("items");
-        List<Map<String, Object>> adjusted = new ArrayList<>();
-        if (items != null && !items.isEmpty()) {
-            if (ded.compareTo(BigDecimal.ZERO) == 0 || gross.compareTo(BigDecimal.ZERO) == 0) {
-                for (Map<String, Object> item : items) {
-                    adjusted.add(new LinkedHashMap<>(item));
-                }
-            } else {
-                BigDecimal allocated = BigDecimal.ZERO;
-                for (int i = 0; i < items.size(); i++) {
-                    Map<String, Object> src = items.get(i);
-                    Map<String, Object> row = new LinkedHashMap<>(src);
-                    BigDecimal origin = asAmount(src.get("amount")).setScale(2, RoundingMode.HALF_UP);
-                    BigDecimal next;
-                    if (i == items.size() - 1) {
-                        next = net.subtract(allocated).setScale(2, RoundingMode.HALF_UP);
-                    } else {
-                        next = origin.multiply(net).divide(gross, 2, RoundingMode.HALF_UP);
-                        allocated = allocated.add(next);
-                    }
-                    if (next.compareTo(BigDecimal.ZERO) < 0) {
-                        next = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
-                    }
-                    row.put("amount", next);
-                    row.put("originAmount", origin);
-                    adjusted.add(row);
-                }
-            }
-        }
-        payload.put("items", adjusted);
-        payload.put("grossAmount", gross);
-        payload.put("deductionAmount", ded);
-        payload.put("deductionRemark", StringUtils.hasText(remark) ? remark : null);
-        payload.put("leaveDays", leaveDays);
-        payload.put("leaveDates", leaveDates == null ? List.of()
-                : leaveDates.stream().map(LocalDate::toString).toList());
-        payload.put("fullAttendance", leaveDays <= 0);
-        payload.put("totalAmount", net);
-        return payload;
-    }
-
-    private String buildPayConfirmContent(Map<String, Object> payload) {
-        boolean weekly = CYCLE_WEEKLY.equals(String.valueOf(payload.get("cycleType")));
-        String scope = weekly ? "本周" : "本月";
-        StringBuilder sb = new StringBuilder();
-        sb.append(scope).append("应发 ").append(payload.get("grossAmount")).append(" 元");
-        BigDecimal ded = asAmount(payload.get("deductionAmount"));
-        if (ded.compareTo(BigDecimal.ZERO) > 0) {
-            sb.append("，扣款 ").append(ded).append(" 元");
-            Object remark = payload.get("deductionRemark");
-            if (remark != null && StringUtils.hasText(String.valueOf(remark))) {
-                sb.append("（").append(remark).append("）");
-            }
-        }
-        sb.append("，实发 ").append(payload.get("totalAmount")).append(" 元，请确认");
-        return sb.toString();
-    }
-
     private Long toLong(Object raw) {
         if (raw == null) {
             return null;
@@ -678,19 +783,15 @@ public class HrSalaryServiceImpl implements HrSalaryService {
     }
 
     @Override
-    public HrSalaryRun runPreview(Long companyId, String yearMonth, boolean manual) {
+    public HrSalaryRun runPreview(Long companyId, String yearMonth) {
         if (companyId == null) {
             throw new BusinessException("请选择公司");
         }
         String ym = normalizePeriod(companyId, yearMonth);
         String cycle = cycleOfPeriod(companyId, ym);
-        if (!manual) {
-            assertCompanyExists(companyId);
-        } else {
-            assertCompanyVisible(companyId);
-        }
+        assertCompanyExists(companyId);
         HrSalaryRun existing = latestDone(companyId, ym, "PREVIEW");
-        if (existing != null && !manual) {
+        if (existing != null) {
             return existing;
         }
 
@@ -710,7 +811,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             r.setYearMonth(ym);
             r.setPhase("PREVIEW");
             r.setStatus("RUNNING");
-            r.setTriggerType(manual ? "MANUAL" : "CRON");
+            r.setTriggerType("CRON");
             r.setStartedAt(LocalDateTime.now());
             runMapper.insert(r);
             return r;
@@ -764,18 +865,14 @@ public class HrSalaryServiceImpl implements HrSalaryService {
     }
 
     @Override
-    public HrSalaryRun runPay(Long companyId, String yearMonth, boolean manual) {
+    public HrSalaryRun runPay(Long companyId, String yearMonth) {
         if (companyId == null) {
             throw new BusinessException("请选择公司");
         }
         String ym = normalizePeriod(companyId, yearMonth);
         String cycle = cycleOfPeriod(companyId, ym);
         String periodWord = CYCLE_WEEKLY.equals(cycle) ? "周度" : "月度";
-        if (manual) {
-            assertCompanyVisible(companyId);
-        } else {
-            assertCompanyExists(companyId);
-        }
+        assertCompanyExists(companyId);
 
         // 本周期是否已有发薪批次：后续补跑不再给「未确认」重复记跳过
         boolean firstPayWave = latestDone(companyId, ym, "PAY") == null;
@@ -787,7 +884,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             r.setYearMonth(ym);
             r.setPhase("PAY");
             r.setStatus("RUNNING");
-            r.setTriggerType(manual ? "MANUAL" : "CRON");
+            r.setTriggerType("CRON");
             r.setStartedAt(LocalDateTime.now());
             runMapper.insert(r);
             return r;
@@ -796,7 +893,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             throw new BusinessException("创建发薪批次失败");
         }
 
-        Long submitterId = resolveSubmitter(companyId, manual);
+        Long submitterId = resolveSubmitter(companyId);
         Map<Long, List<HrSalaryItem>> byUser = enabledItemsByUser(companyId, cycle);
         int created = 0;
         int skipped = 0;
@@ -897,11 +994,11 @@ public class HrSalaryServiceImpl implements HrSalaryService {
                 if (monthlyPreview != null
                         && Integer.valueOf(1).equals(schedule.getPreviewEnabled())
                         && latestDone(companyId, monthlyPreview, "PREVIEW") == null) {
-                    self.runPreview(companyId, monthlyPreview, false);
+                    self.runPreview(companyId, monthlyPreview);
                 }
                 String monthlyPay = resolveMonthlyPay(schedule, now);
                 if (monthlyPay != null && shouldCronPay(companyId, monthlyPay)) {
-                    self.runPay(companyId, monthlyPay, false);
+                    self.runPay(companyId, monthlyPay);
                 }
             } catch (Exception e) {
                 log.error("月结工资定时任务失败 companyId={}: {}", companyId, e.getMessage());
@@ -1063,10 +1160,7 @@ public class HrSalaryServiceImpl implements HrSalaryService {
         return m == null ? 0 : m;
     }
 
-    private Long resolveSubmitter(Long companyId, boolean manual) {
-        if (manual && StpUtil.isLogin()) {
-            return StpUtil.getLoginIdAsLong();
-        }
+    private Long resolveSubmitter(Long companyId) {
         HrSalarySchedule schedule = scheduleMapper.selectOne(new LambdaQueryWrapper<HrSalarySchedule>()
                 .eq(HrSalarySchedule::getCompanyId, companyId)
                 .last("LIMIT 1"));
@@ -1123,12 +1217,17 @@ public class HrSalaryServiceImpl implements HrSalaryService {
     }
 
     private Map<String, Object> buildPayload(Long userId, String ym, String cycleType, List<HrSalaryItem> items) {
+        return buildPayload(userId, ym, cycleType, items, null);
+    }
+
+    private Map<String, Object> buildPayload(Long userId, String ym, String cycleType, List<HrSalaryItem> items,
+                                             LocalDate[] customRange) {
         List<Map<String, Object>> rows = new ArrayList<>();
         BigDecimal total = BigDecimal.ZERO;
         for (HrSalaryItem item : items) {
             PmProject p = projectMapper.selectById(item.getProjectId());
             Map<String, Object> row = new LinkedHashMap<>();
-            SalaryAmount calculated = calculateSalary(item, userId, ym);
+            SalaryAmount calculated = calculateSalary(item, userId, ym, customRange);
             BigDecimal actualAmount = calculated.amount();
             FinProjectAccount account = projectAccountService.getOrCreate(item.getProjectId());
             String fundType = ProjectFundTypes.SHARE_PENDING;
@@ -1147,6 +1246,15 @@ public class HrSalaryServiceImpl implements HrSalaryService {
             row.put("restDays", calculated.restDays());
             row.put("absentNormalDays", calculated.absentNormalDays());
             row.put("absentRestDays", calculated.absentRestDays());
+            row.put("salarySegments", calculated.segments().stream().map(segment -> {
+                Map<String, Object> value = new LinkedHashMap<>();
+                value.put("yearMonth", segment.month().format(YM));
+                value.put("normalDays", segment.normalDays());
+                value.put("restDays", segment.restDays());
+                value.put("absentNormalDays", segment.absentNormalDays());
+                value.put("absentRestDays", segment.absentRestDays());
+                return value;
+            }).toList());
             row.put("fundType", fundType);
             rows.add(row);
             total = total.add(actualAmount);
@@ -1162,59 +1270,91 @@ public class HrSalaryServiceImpl implements HrSalaryService {
     }
 
     private SalaryAmount calculateSalary(HrSalaryItem item, Long userId, String period) {
+        return calculateSalary(item, userId, period, null);
+    }
+
+    private SalaryAmount calculateSalary(HrSalaryItem item, Long userId, String period, LocalDate[] customRange) {
         String mode = "DAILY".equalsIgnoreCase(item.getPayMode()) ? "DAILY" : "MONTHLY";
         HrArchive archive = archiveMapper.selectOne(new LambdaQueryWrapper<HrArchive>()
                 .eq(HrArchive::getUserId, userId).last("LIMIT 1"));
         boolean attendanceEnabled = archive != null && Objects.equals(archive.getAttendanceEnabled(), 1);
         if (!attendanceEnabled) {
             BigDecimal amount = "DAILY".equals(mode) ? BigDecimal.ZERO : item.getAmount();
-            return new SalaryAmount(nz(amount), 0, 0, 0, 0);
+            return new SalaryAmount(nz(amount), 0, 0, 0, 0, List.of());
         }
-        LocalDate[] range = salaryPeriodRange(item, period);
+        LocalDate[] range = customRange == null ? salaryPeriodRange(item, period) : customRange;
         Map<LocalDate, Map<String, Object>> calendar = holidayCalendarService.calendarByDate(range[0], range[1]);
         Set<LocalDate> dutyDays = dutyRecordMapper.selectList(new LambdaQueryWrapper<HrDutyRecord>()
                         .eq(HrDutyRecord::getUserId, userId)
                         .ge(HrDutyRecord::getDutyDate, range[0]).le(HrDutyRecord::getDutyDate, range[1]))
                 .stream().map(HrDutyRecord::getDutyDate).collect(Collectors.toSet());
-        Set<LocalDate> absent = new HashSet<>(salaryLeaveDates(item, userId, period));
+        Set<LocalDate> absent = new HashSet<>(salaryLeaveDates(userId, range));
         int normal = 0, rest = 0, absentNormal = 0, absentRest = 0;
+        Map<YearMonth, int[]> segmentCounts = new LinkedHashMap<>();
         for (LocalDate d = range[0]; !d.isAfter(range[1]); d = d.plusDays(1)) {
             Map<String, Object> day = calendar.get(d);
             boolean isNormal = dutyDays.contains(d) || (day != null && Boolean.TRUE.equals(day.get("workday")));
-            if (isNormal) { normal++; if (absent.contains(d)) absentNormal++; }
-            else { rest++; if (absent.contains(d)) absentRest++; }
+            boolean isAbsent = absent.contains(d);
+            int[] counts = segmentCounts.computeIfAbsent(YearMonth.from(d), ignored -> new int[4]);
+            if (isNormal) {
+                normal++;
+                counts[0]++;
+                if (isAbsent) { absentNormal++; counts[2]++; }
+            } else {
+                rest++;
+                counts[1]++;
+                if (isAbsent) { absentRest++; counts[3]++; }
+            }
         }
+        List<SalarySegment> segments = segmentCounts.entrySet().stream()
+                .map(entry -> new SalarySegment(entry.getKey(), entry.getValue()[0], entry.getValue()[1],
+                        entry.getValue()[2], entry.getValue()[3]))
+                .toList();
         BigDecimal result;
         if ("DAILY".equals(mode)) {
             result = nz(item.getNormalDayRate()).multiply(BigDecimal.valueOf(normal - absentNormal))
                     .add(nz(item.getRestDayRate()).multiply(BigDecimal.valueOf(rest - absentRest)));
         } else {
-            int calendarDays = YearMonth.parse(period, YM).lengthOfMonth();
-            BigDecimal dailyBase = nz(item.getAmount()).divide(BigDecimal.valueOf(calendarDays), 8, RoundingMode.HALF_UP);
-            BigDecimal weightedDays = nz(item.getNormalCoefficient()).multiply(BigDecimal.valueOf(normal - absentNormal))
-                    .add(nz(item.getRestCoefficient()).multiply(BigDecimal.valueOf(rest - absentRest)));
-            result = dailyBase.multiply(weightedDays);
+            BigDecimal normalWeight = nz(item.getNormalCoefficient());
+            BigDecimal restWeight = nz(item.getRestCoefficient());
+            BigDecimal totalWeight = normalWeight.multiply(BigDecimal.valueOf(normal))
+                    .add(restWeight.multiply(BigDecimal.valueOf(rest)));
+            if (totalWeight.compareTo(BigDecimal.ZERO) <= 0) {
+                throw new BusinessException("发薪周期的应计总权重必须大于 0");
+            }
+            BigDecimal attendedWeight = normalWeight.multiply(BigDecimal.valueOf(normal - absentNormal))
+                    .add(restWeight.multiply(BigDecimal.valueOf(rest - absentRest)));
+            // 权重只用于分配固定月薪：满勤时分子与分母相同，实发额恒等于配置月薪。
+            result = nz(item.getAmount()).multiply(attendedWeight)
+                    .divide(totalWeight, 8, RoundingMode.HALF_UP);
         }
-        return new SalaryAmount(result.setScale(2, RoundingMode.HALF_UP), normal, rest, absentNormal, absentRest);
+        return new SalaryAmount(result.setScale(2, RoundingMode.HALF_UP), normal, rest, absentNormal, absentRest, segments);
     }
 
     private BigDecimal nz(BigDecimal value) { return value == null ? BigDecimal.ZERO : value; }
 
     private LocalDate[] salaryPeriodRange(HrSalaryItem item, String period) {
         YearMonth current = YearMonth.parse(period, YM);
-        int payDay = item.getPayDay() == null ? 20 : item.getPayDay();
+        int payDay = item == null || item.getPayDay() == null ? MONTHLY_CYCLE_END_DAY : item.getPayDay();
         return new LocalDate[]{current.minusMonths(1).atDay(payDay).plusDays(1), current.atDay(payDay)};
     }
 
     private List<LocalDate> salaryLeaveDates(HrSalaryItem item, Long userId, String period) {
         LocalDate[] range = salaryPeriodRange(item, period);
+        return salaryLeaveDates(userId, range);
+    }
+
+    private List<LocalDate> salaryLeaveDates(Long userId, LocalDate[] range) {
         return leaveService.listAttendance(range[0], range[1]).stream()
                 .filter(row -> Objects.equals(row.getUserId(), userId))
                 .map(row -> row.getLeaveDate()).filter(Objects::nonNull).distinct().sorted().toList();
     }
 
     private record SalaryAmount(BigDecimal amount, int normalDays, int restDays,
-                                int absentNormalDays, int absentRestDays) {}
+                                int absentNormalDays, int absentRestDays, List<SalarySegment> segments) {}
+
+    private record SalarySegment(YearMonth month, int normalDays, int restDays,
+                                 int absentNormalDays, int absentRestDays) {}
 
     private String buildPreviewContent(Map<String, Object> payload) {
         boolean weekly = CYCLE_WEEKLY.equals(String.valueOf(payload.get("cycleType")));

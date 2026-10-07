@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { useUserStore } from '@/stores/user'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
+import TaskTimeline from '@/components/task/TaskTimeline.vue'
 import CompanyTaskShareDialog from '@/components/task/CompanyTaskShareDialog.vue'
 import { companyTaskShareApi, type CompanyTaskShareOption } from '@/api/companyTaskShare'
 
@@ -27,6 +28,51 @@ const query = reactive({
   overdue: undefined as boolean | undefined,
 })
 
+type PeriodKey = 'all' | 'thisMonth' | 'lastMonth' | 'last7Days' | 'last30Days' | 'custom'
+const periodKey = ref<PeriodKey>('all')
+const customPeriod = ref<[string, string] | null>(null)
+const periodOptions: Array<{ value: PeriodKey; label: string }> = [
+  { value: 'all', label: '全部时间' },
+  { value: 'thisMonth', label: '本月' },
+  { value: 'lastMonth', label: '上个月' },
+  { value: 'last7Days', label: '近 7 天' },
+  { value: 'last30Days', label: '近 30 天' },
+  { value: 'custom', label: '自定义' },
+]
+
+function formatLocalDate(date: Date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+/** 后端使用左闭右开区间，因此结束日期统一转换为次日。 */
+function resolvePeriod(): { periodFrom?: string; periodTo?: string } {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  let from: Date | undefined
+  let to: Date | undefined
+  if (periodKey.value === 'thisMonth') {
+    from = new Date(today.getFullYear(), today.getMonth(), 1)
+    to = new Date(today.getFullYear(), today.getMonth() + 1, 1)
+  } else if (periodKey.value === 'lastMonth') {
+    from = new Date(today.getFullYear(), today.getMonth() - 1, 1)
+    to = new Date(today.getFullYear(), today.getMonth(), 1)
+  } else if (periodKey.value === 'last7Days' || periodKey.value === 'last30Days') {
+    const days = periodKey.value === 'last7Days' ? 7 : 30
+    from = new Date(today)
+    from.setDate(from.getDate() - days + 1)
+    to = new Date(today)
+    to.setDate(to.getDate() + 1)
+  } else if (periodKey.value === 'custom' && customPeriod.value?.length === 2) {
+    from = new Date(`${customPeriod.value[0]}T00:00:00`)
+    to = new Date(`${customPeriod.value[1]}T00:00:00`)
+    to.setDate(to.getDate() + 1)
+  }
+  return from && to ? { periodFrom: formatLocalDate(from), periodTo: formatLocalDate(to) } : {}
+}
+
 const list = ref<any[]>([])
 const total = ref(0)
 const summary = ref<any>({})
@@ -38,6 +84,26 @@ const taskDrawerAction = ref<TaskDrawerAction>('view')
 const listLoading = ref(false)
 const shareOpen = ref(false)
 const shareCompanies = ref<CompanyTaskShareOption[]>([])
+type TaskViewMode = 'timeline' | 'details'
+const taskViewMode = ref<TaskViewMode>('details')
+
+function taskContentPreview(content?: string) {
+  if (!content) return ''
+  const document = new DOMParser().parseFromString(content, 'text/html')
+  return document.body.textContent?.trim() || ''
+}
+
+function selectTaskView(mode: TaskViewMode, moveFocus = false) {
+  taskViewMode.value = mode
+  if (moveFocus) document.getElementById(`task-view-tab-${mode}`)?.focus()
+}
+
+function onTaskViewKeydown(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const mode = event.key === 'ArrowLeft' || event.key === 'Home' ? 'details' : 'timeline'
+  selectTaskView(mode, true)
+}
 
 type ProjectTreeNode = {
   id: number | string
@@ -147,6 +213,7 @@ const employeeStatCards = [
   { key: 'doing', label: '进行中', hint: '当前正在推进', icon: 'Loading', tone: 'cyan' },
   { key: 'overdue', label: '已逾期', hint: '需要优先处理', icon: 'Warning', tone: 'rose' },
   { key: 'pending', label: '待确认完成', hint: '已提交，等待确认', icon: 'CircleCheck', tone: 'amber' },
+  { key: 'done', label: '完成任务量', hint: '已确认完成', icon: 'Finished', tone: 'emerald' },
 ]
 
 const statCards = computed(() => employeeStatCards)
@@ -156,6 +223,7 @@ function isStatActive(key: string) {
   if (key === 'pending') return query.status === 4 && !query.overdue
   if (key === 'todo') return query.status === 0 && !query.overdue
   if (key === 'doing') return query.status === 1 && !query.overdue
+  if (key === 'done') return query.status === 2 && !query.overdue
   return false
 }
 
@@ -167,6 +235,7 @@ function onStatClick(key: string) {
   if (key === 'todo') return filterByStatus(0)
   if (key === 'doing') return filterByStatus(1)
   if (key === 'pending') filterByStatus(4)
+  if (key === 'done') filterByStatus(2)
 }
 
 const maxTrend = computed(() => Math.max(1, ...(summary.value.trend || []).flatMap((item: any) => [item.created || 0, item.completed || 0])))
@@ -194,10 +263,13 @@ async function loadSummary() {
     projectId?: number
     priority?: number
     title?: string
+    periodFrom?: string
+    periodTo?: string
   } = {}
   if (query.projectId != null) params.projectId = query.projectId
   if (query.priority != null) params.priority = query.priority
   if (query.title.trim()) params.title = query.title.trim()
+  Object.assign(params, resolvePeriod())
   summary.value = await bizApi.managementTaskSummary(params)
 }
 
@@ -207,6 +279,7 @@ async function load() {
     const params: Record<string, unknown> = {
       page: query.page,
       pageSize: query.pageSize,
+      ...resolvePeriod(),
     }
     if (query.title.trim()) params.title = query.title.trim()
     if (query.projectId != null) params.projectId = query.projectId
@@ -232,6 +305,11 @@ function onFilter() {
   load()
 }
 
+function onPeriodChange() {
+  query.page = 1
+  if (periodKey.value !== 'custom' || customPeriod.value) load()
+}
+
 function resetQuery() {
   Object.assign(query, {
     page: 1,
@@ -242,6 +320,8 @@ function resetQuery() {
     priority: undefined,
     overdue: undefined,
   })
+  periodKey.value = 'all'
+  customPeriod.value = null
   load()
 }
 
@@ -322,6 +402,34 @@ onMounted(async () => {
         <el-button type="primary" @click="open()">新建任务</el-button>
       </div>
     </div>
+
+    <el-form class="filter-bar task-filter-bar" @submit.prevent="onFilter">
+      <el-form-item label="标题">
+        <el-input v-model="query.title" clearable placeholder="任务标题" class="filter-keyword--wide" @keyup.enter="onFilter" @change="onFilter" />
+      </el-form-item>
+      <el-form-item label="状态">
+        <el-select v-model="statusFilterKey" clearable placeholder="全部" class="filter-select--wide">
+          <el-option v-for="item in statusFilterOptions" :key="item.value" :label="item.label" :value="item.value" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="优先级">
+        <el-select v-model="query.priority" clearable placeholder="全部" class="filter-select" @change="onFilter">
+          <el-option v-for="(label, value) in priorityMap" :key="value" :label="label" :value="Number(value)" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="时间周期">
+        <el-select v-model="periodKey" class="period-select" aria-label="按任务创建时间筛选" @change="onPeriodChange">
+          <el-option v-for="item in periodOptions" :key="item.value" :label="item.label" :value="item.value" />
+        </el-select>
+      </el-form-item>
+      <el-form-item v-if="periodKey === 'custom'" label="自定义日期">
+        <el-date-picker v-model="customPeriod" type="daterange" value-format="YYYY-MM-DD" range-separator="至"
+          start-placeholder="开始日期" end-placeholder="结束日期" unlink-panels @change="onPeriodChange" />
+      </el-form-item>
+      <el-form-item class="filter-actions">
+        <el-button @click="resetQuery">重置</el-button>
+      </el-form-item>
+    </el-form>
 
     <div class="stat-grid" :class="{ 'stat-grid--personal': !isTaskManager }">
       <button
@@ -404,37 +512,57 @@ onMounted(async () => {
       </aside>
 
       <div class="task-workspace-main">
-    <el-form class="filter-bar" @submit.prevent="onFilter">
-      <el-form-item label="标题">
-        <el-input
-          v-model="query.title"
-          clearable
-          placeholder="任务标题"
-          class="filter-keyword--wide"
-          @keyup.enter="onFilter"
-          @change="onFilter"
-        />
-      </el-form-item>
-      <el-form-item label="状态">
-        <el-select v-model="statusFilterKey" clearable placeholder="全部" class="filter-select--wide" @change="onFilter">
-          <el-option v-for="item in statusFilterOptions" :key="item.value" :label="item.label" :value="item.value" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="优先级">
-        <el-select v-model="query.priority" clearable placeholder="全部" class="filter-select" @change="onFilter">
-          <el-option v-for="(label, value) in priorityMap" :key="value" :label="label" :value="Number(value)" />
-        </el-select>
-      </el-form-item>
-      <el-form-item class="filter-actions">
-        <el-button @click="resetQuery">重置</el-button>
-      </el-form-item>
-    </el-form>
-
-    <div class="page-card">
-      <div class="section-head task-section-head">
-        <div><h3>{{ isTaskManager ? `${selectedProjectName} · 任务明细` : '我的任务明细' }}</h3><p>{{ isTaskManager ? '用于筛选、下钻和日常执行' : '仅包含我负责或直接参与的任务' }}</p></div>
+    <div class="page-card task-view-card">
+      <div class="task-view-switcher" role="tablist" aria-label="任务展示方式">
+        <button
+          id="task-view-tab-details"
+          type="button"
+          role="tab"
+          :aria-selected="taskViewMode === 'details'"
+          aria-controls="task-view-panel-details"
+          :tabindex="taskViewMode === 'details' ? 0 : -1"
+          :class="{ 'is-active': taskViewMode === 'details' }"
+          @click="selectTaskView('details')"
+          @keydown="onTaskViewKeydown"
+        >
+          我的任务明细
+        </button>
+        <button
+          id="task-view-tab-timeline"
+          type="button"
+          role="tab"
+          :aria-selected="taskViewMode === 'timeline'"
+          aria-controls="task-view-panel-timeline"
+          :tabindex="taskViewMode === 'timeline' ? 0 : -1"
+          :class="{ 'is-active': taskViewMode === 'timeline' }"
+          @click="selectTaskView('timeline')"
+          @keydown="onTaskViewKeydown"
+        >
+          任务时间轴
+        </button>
       </div>
-      <el-table v-loading="listLoading" :data="list" row-key="id" stripe empty-text="暂无任务" class="task-table">
+
+      <div
+        v-show="taskViewMode === 'timeline'"
+        id="task-view-panel-timeline"
+        role="tabpanel"
+        aria-labelledby="task-view-tab-timeline"
+        class="task-view-panel"
+      >
+        <TaskTimeline :tasks="list" :loading="listLoading" @open="open" />
+      </div>
+
+      <div
+        v-show="taskViewMode === 'details'"
+        id="task-view-panel-details"
+        role="tabpanel"
+        aria-labelledby="task-view-tab-details"
+        class="task-view-panel"
+      >
+        <div class="section-head task-section-head">
+          <div><h3>{{ isTaskManager ? `${selectedProjectName} · 任务明细` : '我的任务明细' }}</h3><p>{{ isTaskManager ? '用于筛选、下钻和日常执行' : '仅包含我负责或直接参与的任务' }}</p></div>
+        </div>
+        <el-table v-loading="listLoading" :data="list" row-key="id" stripe empty-text="暂无任务" class="task-table">
         <el-table-column label="任务" min-width="320">
           <template #default="{ row }">
             <div class="task-title-cell">
@@ -446,7 +574,7 @@ onMounted(async () => {
                   {{ priorityMap[row.priority] || '中' }}优先级
                 </el-tag>
               </div>
-              <div v-if="row.content" class="task-content-preview">{{ row.content }}</div>
+              <div v-if="taskContentPreview(row.content)" class="task-content-preview">{{ taskContentPreview(row.content) }}</div>
             </div>
           </template>
         </el-table-column>
@@ -465,6 +593,11 @@ onMounted(async () => {
         <el-table-column label="交付状态" min-width="120">
           <template #default="{ row }">
             <el-tag :type="statusType[row.status]" size="small">{{ statusMap[row.status] }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="list.some((row: any) => row.taskReward != null)" label="任务报酬" min-width="120">
+          <template #default="{ row }">
+            <strong v-if="row.taskReward != null">¥{{ Number(row.taskReward).toFixed(2) }}</strong>
           </template>
         </el-table-column>
         <el-table-column label="计划时间" min-width="190">
@@ -489,17 +622,18 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-      </el-table>
-      <div class="page-footer">
-        <el-pagination
-          v-model:current-page="query.page"
-          v-model:page-size="query.pageSize"
-          :total="total"
-          :page-sizes="[10, 20, 50]"
-          layout="total, sizes, prev, pager, next"
-          @current-change="load"
-          @size-change="load"
-        />
+        </el-table>
+        <div class="page-footer">
+          <el-pagination
+            v-model:current-page="query.page"
+            v-model:page-size="query.pageSize"
+            :total="total"
+            :page-sizes="[10, 20, 50]"
+            layout="total, sizes, prev, pager, next"
+            @current-change="load"
+            @size-change="load"
+          />
+        </div>
       </div>
     </div>
       </div>
@@ -560,11 +694,13 @@ onMounted(async () => {
 .stat-card--amber::before { background: #fde68a; }
 .stat-card--cyan::before { background: #a5f3fc; }
 .stat-card--rose::before { background: #fecaca; }
+.stat-card--emerald::before { background: #a7f3d0; }
 .stat-card--indigo::before { background: #d4d4d8; }
 .stat-card--slate .stat-glyph { color: #64748b; }
 .stat-card--amber .stat-glyph { color: #d97706; }
 .stat-card--cyan .stat-glyph { color: #0891b2; }
 .stat-card--rose .stat-glyph { color: #dc2626; }
+.stat-card--emerald .stat-glyph { color: #059669; }
 .stat-card--indigo .stat-glyph { color: var(--kk-primary); }
 .stat-card:hover { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08); }
 .stat-card.is-active {
@@ -619,7 +755,7 @@ onMounted(async () => {
   gap: 14px;
   align-items: stretch;
 }
-.stat-grid--personal { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.stat-grid--personal { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .task-workspace--personal { grid-template-columns: minmax(0, 1fr); }
 .task-workspace-main {
   display: flex;
@@ -627,7 +763,43 @@ onMounted(async () => {
   gap: 14px;
   min-width: 0;
 }
-.task-workspace-main > .filter-bar { margin-bottom: 0; }
+.task-filter-bar { margin-bottom: 0; }
+.period-select { width: 136px; }
+.task-view-card { min-width: 0; overflow: hidden; }
+.task-view-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 16px;
+  padding: 4px;
+  border: 1px solid var(--kk-border, #dcdfe6);
+  border-radius: 10px;
+  background: var(--kk-bg-muted, #f5f7fa);
+}
+.task-view-switcher button {
+  min-height: 36px;
+  padding: 7px 16px;
+  border: 0;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--kk-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  transition: color .15s var(--kk-ease), background-color .15s var(--kk-ease), box-shadow .15s var(--kk-ease);
+}
+.task-view-switcher button:hover { color: var(--kk-text); }
+.task-view-switcher button.is-active {
+  color: var(--kk-primary);
+  background: var(--kk-bg, #fff);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, .08);
+}
+.task-view-switcher button:focus-visible {
+  outline: 2px solid var(--kk-primary);
+  outline-offset: 2px;
+}
+.task-view-panel { min-width: 0; }
 .project-tree-panel {
   min-width: 0;
   padding: 18px 14px;
@@ -777,6 +949,8 @@ onMounted(async () => {
 }
 @media (max-width: 640px) {
   .stat-grid { grid-template-columns: minmax(0, 1fr); }
+  .task-view-switcher { display: flex; width: 100%; }
+  .task-view-switcher button { flex: 1; min-width: 0; padding-inline: 8px; }
   .section-head { gap: 10px; }
   .risk-badges { flex-direction: column; align-items: flex-end; gap: 4px; }
   .risk-row { grid-template-columns: 72px minmax(0, 1fr); }

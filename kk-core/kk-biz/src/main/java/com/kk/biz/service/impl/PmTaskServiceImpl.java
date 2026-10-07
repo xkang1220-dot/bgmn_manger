@@ -4,6 +4,7 @@ import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.kk.biz.entity.HrArchive;
 import com.kk.biz.entity.PmProject;
 import com.kk.biz.entity.PmProjectMember;
 import com.kk.biz.entity.PmTask;
@@ -11,6 +12,7 @@ import com.kk.biz.entity.PmTaskComment;
 import com.kk.biz.entity.PmTaskFlow;
 import com.kk.biz.entity.PmTaskMember;
 import com.kk.biz.entity.SysFile;
+import com.kk.biz.mapper.HrArchiveMapper;
 import com.kk.biz.mapper.PmProjectMapper;
 import com.kk.biz.mapper.PmProjectMemberMapper;
 import com.kk.biz.mapper.PmTaskCommentMapper;
@@ -33,6 +35,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.DayOfWeek;
@@ -62,6 +65,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             .addProtocols("a", "href", "http", "https", "mailto");
 
     private final PmProjectMapper projectMapper;
+    private final HrArchiveMapper archiveMapper;
     private final PmProjectMemberMapper projectMemberMapper;
     private final PmTaskMemberMapper taskMemberMapper;
     private final PmTaskCommentMapper commentMapper;
@@ -230,6 +234,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         assertCanAccessTask(task);
         fillExtras(List.of(task));
+        task.setContent(cleanTaskContent(task.getContent()));
         task.setImages(fileService.listByBiz(TASK_IMAGE_BIZ, id));
         return task;
     }
@@ -240,8 +245,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     }
 
     @Override
-    public Map<String, Object> managementSummary(Long projectId, Integer priority, Long participantId, String title) {
-        return summaryInternal(projectId, priority, participantId, title, true);
+    public Map<String, Object> managementSummary(Long projectId, Integer priority, Long participantId, String title,
+                                                 String periodFrom, String periodTo) {
+        return summaryInternal(projectId, priority, participantId, title, true, periodFrom, periodTo);
     }
 
     @Override
@@ -715,6 +721,12 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 : ProjectScales.NORMAL;
         boolean restrictedScale = ProjectScales.KEY.equals(scale) || ProjectScales.MAJOR.equals(scale);
         boolean taskManager = StpUtil.hasPermission("project:task:add");
+        if (!taskManager) {
+            // 普通成员即使绕过前端提交该字段，也不能设定任务报酬。
+            task.setTaskReward(null);
+        } else {
+            validateTaskReward(task.getTaskReward());
+        }
         if (restrictedScale && !taskManager && !Objects.equals(project.getOwnerId(), loginId)) {
             throw new BusinessException("重点和重大项目仅任务管理员或项目负责人可以创建任务");
         }
@@ -744,6 +756,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             task.setPriority(2);
         }
         validateDateRange(task);
+        task.setContent(cleanTaskContent(task.getContent()));
         applyLifecycle(task, null);
         save(task);
         syncParticipants(task.getId(), task.getParticipantIds());
@@ -766,6 +779,12 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         assertCanWriteTask(existing);
         if (task.getStatus() != null && task.getStatus() == 3 && !Objects.equals(existing.getStatus(), 3)) {
             throw new BusinessException("关闭任务请使用关闭操作并填写原因");
+        }
+        if (StpUtil.hasPermission("project:task:add")) {
+            validateTaskReward(task.getTaskReward());
+        } else {
+            // 普通成员不能通过绕过前端修改任务报酬。
+            task.setTaskReward(existing.getTaskReward());
         }
         Long companyId = existing.getCompanyId();
         if (companyId == null && existing.getProjectId() != null) {
@@ -800,6 +819,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             task.setStatus(4);
         }
         validateDateRange(task);
+        task.setContent(cleanTaskContent(task.getContent()));
         applyLifecycle(task, existing);
         Integer oldStatus = existing.getStatus();
         updateById(task);
@@ -815,6 +835,13 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (task.getStatus() != null && !task.getStatus().equals(oldStatus)) {
             recordFlow(task.getId(), "STATUS", null, null, oldStatus, task.getStatus(), "编辑时变更状态");
         }
+    }
+
+    private String cleanTaskContent(String content) {
+        if (!StringUtils.hasText(content)) {
+            return null;
+        }
+        return Jsoup.clean(content.trim(), COMMENT_HTML_SAFELIST);
     }
 
     @Override
@@ -1545,6 +1572,14 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 : projectMapper.selectList(new LambdaQueryWrapper<PmProject>().in(PmProject::getId, projectIds)).stream()
                 .collect(Collectors.toMap(PmProject::getId, p -> p, (a, b) -> a));
         Map<Long, SysUser> userMap = loadUserMap(userIds);
+        long loginId = StpUtil.getLoginIdAsLong();
+        HrArchive loginArchive = archiveMapper.selectOne(new LambdaQueryWrapper<HrArchive>()
+                .eq(HrArchive::getUserId, loginId)
+                .select(HrArchive::getTaskRewardEnabled)
+                .last("LIMIT 1"));
+        boolean rewardEnabled = loginArchive != null
+                && Integer.valueOf(1).equals(loginArchive.getTaskRewardEnabled());
+        boolean rewardManager = StpUtil.hasPermission("project:task:add");
 
         for (PmTask task : tasks) {
             PmProject project = projectMap.get(task.getProjectId());
@@ -1556,6 +1591,11 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             task.setCanEdit(canWriteTask(task, project));
             task.setCanTransfer(canTransferTask(task, project));
             List<PmTaskMember> members = membersByTask.getOrDefault(task.getId(), List.of());
+            boolean relatedToTask = Objects.equals(task.getAssigneeId(), loginId)
+                    || members.stream().anyMatch(member -> Objects.equals(member.getUserId(), loginId));
+            if (!rewardManager && (!rewardEnabled || !relatedToTask)) {
+                task.setTaskReward(null);
+            }
             if (members.isEmpty()) {
                 task.setParticipantIds(List.of());
                 task.setParticipantNames(List.of());
@@ -1588,6 +1628,21 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (task.getStartDate() != null && task.getDueDate() != null
                 && task.getDueDate().isBefore(task.getStartDate())) {
             throw new BusinessException("截止日期不能早于开始日期");
+        }
+    }
+
+    private void validateTaskReward(BigDecimal taskReward) {
+        if (taskReward == null) {
+            return;
+        }
+        if (taskReward.signum() < 0) {
+            throw new BusinessException("任务报酬不能小于 0");
+        }
+        if (taskReward.scale() > 2) {
+            throw new BusinessException("任务报酬最多保留两位小数");
+        }
+        if (taskReward.compareTo(new BigDecimal("999999999999.99")) > 0) {
+            throw new BusinessException("任务报酬超出允许范围");
         }
     }
 

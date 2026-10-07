@@ -8,9 +8,11 @@ import com.kk.biz.dto.LedgerRegisterResult;
 import com.kk.biz.dto.LedgerThresholdSaveRequest;
 import com.kk.biz.dto.ProjectManualSettleRequest;
 import com.kk.biz.dto.ProjectSettleRequest;
+import com.kk.biz.dto.WalletAdjustmentRequest;
 import com.kk.biz.entity.FinLedger;
 import com.kk.biz.entity.FinLedgerThreshold;
 import com.kk.biz.entity.FinPool;
+import com.kk.biz.entity.HrWallet;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -84,4 +86,7 @@ public interface FinanceService extends IService<FinPool> {
     void settleProjectManual(ProjectManualSettleRequest request);
 
     Map<String, Object> summary();
+
+    /** 财务对个人钱包执行账务调增/调减，并生成可追溯流水。 */
+    HrWallet adjustWallet(Long userId, WalletAdjustmentRequest request);
 }

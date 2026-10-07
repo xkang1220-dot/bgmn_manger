@@ -35,6 +35,7 @@ const closing = ref(false)
 const reviewing = ref(false)
 const editing = ref(false)
 const isNew = ref(false)
+const isTaskManager = computed(() => userStore.hasPermission('project:task:add'))
 const projects = ref<any[]>([])
 const creatableProjects = computed(() => {
   if (!isNew.value) return projects.value
@@ -81,6 +82,7 @@ const form = reactive<any>({
   participantIds: [] as number[],
   status: 0,
   priority: 2,
+  taskReward: undefined as number | undefined,
   startDate: '',
   dueDate: '',
   riskLevel: 'NORMAL',
@@ -108,6 +110,7 @@ function emptyForm() {
     participantIds: selfId != null ? [selfId] : ([] as number[]),
     status: 0,
     priority: 2,
+    taskReward: undefined,
     startDate: '',
     dueDate: '',
     riskLevel: 'NORMAL',
@@ -377,6 +380,10 @@ async function save() {
     ElMessage.warning('请选择任务负责人')
     return
   }
+  if (isTaskManager.value && form.taskReward != null && Number(form.taskReward) < 0) {
+    ElMessage.warning('任务报酬不能小于 0')
+    return
+  }
   const eligibleIds = new Set(
     candidateUsers.value.filter(isEligibleCandidate).map((u) => Number(u.id)),
   )
@@ -397,6 +404,7 @@ async function save() {
     delete payload.projectName
     delete payload.overdue
     delete payload.images
+    if (!isTaskManager.value) delete payload.taskReward
     await bizApi.saveTask(payload, !isNew.value && !!form.id)
     ElMessage.success('保存成功')
     emit('saved')
@@ -659,10 +667,18 @@ function commentAttachmentUrl(file: any, preview = false) {
   <el-drawer
     v-model="visible"
     :title="isNew ? '新建任务' : editing ? '编辑任务' : '任务详情'"
-    size="520px"
+    size="min(680px, 100vw)"
+    class="task-drawer"
     destroy-on-close
     append-to-body
   >
+    <template #header>
+      <div class="drawer-heading">
+        <span class="drawer-heading__eyebrow">TASK MANAGEMENT</span>
+        <h2>{{ isNew ? '新建任务' : editing ? '编辑任务' : '任务详情' }}</h2>
+        <p v-if="editing">补全任务信息，让协作目标和交付节点更清晰。</p>
+      </div>
+    </template>
     <div v-loading="loading" class="task-detail">
       <!-- 查看模式 -->
       <template v-if="!editing && detail">
@@ -681,6 +697,9 @@ function commentAttachmentUrl(file: any, preview = false) {
           <el-descriptions-item label="参与人员">
             {{ detail.participantNames?.length ? detail.participantNames.join('、') : '无' }}
           </el-descriptions-item>
+          <el-descriptions-item v-if="detail.taskReward != null" label="任务报酬">
+            ¥{{ Number(detail.taskReward).toFixed(2) }}
+          </el-descriptions-item>
           <el-descriptions-item label="周期">
             {{ detail.startDate || '—' }} ~ {{ detail.dueDate || '—' }}
           </el-descriptions-item>
@@ -688,7 +707,8 @@ function commentAttachmentUrl(file: any, preview = false) {
             实际开始 {{ fmtTime(detail.startedAt) }} · 实际完成 {{ fmtTime(detail.completedAt) }} · 最后推进 {{ fmtTime(detail.lastActivityAt) }}
           </el-descriptions-item>
           <el-descriptions-item label="描述">
-            <div class="content-text">{{ detail.content || '暂无描述' }}</div>
+            <div v-if="detail.content" class="content-text" v-html="detail.content" />
+            <div v-else class="content-text content-text--empty">暂无描述</div>
           </el-descriptions-item>
         </el-descriptions>
 
@@ -799,57 +819,85 @@ function commentAttachmentUrl(file: any, preview = false) {
 
       <!-- 编辑 / 新建 -->
       <template v-else>
-        <el-form label-width="84px">
-          <el-form-item label="标题" required>
-            <el-input v-model="form.title" placeholder="任务标题" maxlength="128" show-word-limit />
-          </el-form-item>
-          <el-form-item label="项目" required>
-            <ProjectCascadeSelect
-              v-model="form.projectId"
-              :projects="creatableProjects"
-              mode="task"
-              top-placeholder="进行中的项目"
-              child-placeholder="请选择小项目"
-              top-width="100%"
-              child-width="100%"
-              :clearable="false"
-              :disabled="!!defaultProjectId && isNew"
-            />
-          </el-form-item>
-          <el-form-item label="参与人员">
-            <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="仅可选项目负责人/参与人" style="width: 100%" :disabled="!form.projectId || (!isNew && !userStore.hasPermission('project:task:add'))">
-              <el-option v-for="u in candidateUsers" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="负责人" required>
-            <el-select v-model="form.assigneeId" filterable placeholder="唯一交付责任人" style="width: 100%">
-              <el-option v-for="u in candidateUsers.filter(isEligibleCandidate)" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="优先级">
-            <el-select v-model="form.priority" style="width: 100%">
-              <el-option :value="1" label="高" />
-              <el-option :value="2" label="中" />
-              <el-option :value="3" label="低" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="状态">
-            <el-select v-model="form.status" style="width: 100%">
-              <el-option :value="0" label="待办" />
-              <el-option :value="1" label="进行中" />
-              <el-option :value="2" :label="userStore.hasPermission('project:task:confirm') ? '已完成' : '提交完成'" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="开始日期">
-            <el-date-picker v-model="form.startDate" value-format="YYYY-MM-DD" style="width: 100%" :disabled-date="disableStartDate" />
-          </el-form-item>
-          <el-form-item label="截止日期">
-            <el-date-picker v-model="form.dueDate" value-format="YYYY-MM-DD" style="width: 100%" :disabled-date="disableDueDate" />
-          </el-form-item>
-          <el-form-item label="描述">
-            <el-input v-model="form.content" type="textarea" :rows="4" maxlength="1000" show-word-limit />
-          </el-form-item>
-          <el-form-item label="附件">
+        <el-form label-position="top" class="task-form">
+          <section class="form-section form-section--primary">
+            <div class="form-section__head">
+              <span class="form-section__index">01</span>
+              <div><h3>基本信息</h3><p>明确任务目标及所属项目</p></div>
+            </div>
+            <el-form-item label="任务标题" required class="title-field">
+              <el-input v-model="form.title" size="large" placeholder="例如：完成十月运营数据复盘" maxlength="128" show-word-limit />
+            </el-form-item>
+            <el-form-item label="所属项目" required>
+              <ProjectCascadeSelect
+                v-model="form.projectId"
+                :projects="creatableProjects"
+                mode="task"
+                top-placeholder="进行中的项目"
+                child-placeholder="请选择小项目"
+                top-width="100%"
+                child-width="100%"
+                :clearable="false"
+                :disabled="!!defaultProjectId && isNew"
+              />
+              <span class="field-help">选择项目后，将自动加载该项目的可选成员。</span>
+            </el-form-item>
+          </section>
+
+          <section class="form-section">
+            <div class="form-section__head">
+              <span class="form-section__index">02</span>
+              <div><h3>协作与进度</h3><p>安排负责人、参与成员和当前状态</p></div>
+            </div>
+            <div class="form-grid">
+              <el-form-item label="负责人" required>
+                <el-select v-model="form.assigneeId" filterable placeholder="选择唯一交付责任人" style="width: 100%">
+                  <el-option v-for="u in candidateUsers.filter(isEligibleCandidate)" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="参与人员">
+                <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="选择协作成员" style="width: 100%" :disabled="!form.projectId || (!isNew && !userStore.hasPermission('project:task:add'))">
+                  <el-option v-for="u in candidateUsers" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="优先级">
+                <el-radio-group v-model="form.priority" class="option-cards">
+                  <el-radio-button :value="1">高</el-radio-button>
+                  <el-radio-button :value="2">中</el-radio-button>
+                  <el-radio-button :value="3">低</el-radio-button>
+                </el-radio-group>
+              </el-form-item>
+              <el-form-item label="任务状态">
+                <el-radio-group v-model="form.status" class="option-cards">
+                  <el-radio-button :value="0">待办</el-radio-button>
+                  <el-radio-button :value="1">进行中</el-radio-button>
+                  <el-radio-button :value="2">{{ userStore.hasPermission('project:task:confirm') ? '已完成' : '提交完成' }}</el-radio-button>
+                </el-radio-group>
+              </el-form-item>
+            </div>
+          </section>
+
+          <section class="form-section">
+            <div class="form-section__head">
+              <span class="form-section__index">03</span>
+              <div><h3>计划与交付</h3><p>设置周期，并补充任务说明</p></div>
+            </div>
+            <div class="form-grid">
+              <el-form-item label="开始日期">
+                <el-date-picker v-model="form.startDate" value-format="YYYY-MM-DD" placeholder="选择开始日期" style="width: 100%" :disabled-date="disableStartDate" />
+              </el-form-item>
+              <el-form-item label="截止日期">
+                <el-date-picker v-model="form.dueDate" value-format="YYYY-MM-DD" placeholder="选择截止日期" style="width: 100%" :disabled-date="disableDueDate" />
+              </el-form-item>
+            </div>
+            <el-form-item v-if="isTaskManager" label="任务报酬">
+              <el-input-number v-model="form.taskReward" :min="0" :max="999999999999.99" :precision="2" :step="100" controls-position="right" placeholder="请输入任务报酬" style="width: 100%" />
+              <span class="field-help">仅任务管理员可查看和调整，最多保留两位小数。</span>
+            </el-form-item>
+            <el-form-item label="任务描述">
+              <RichTextEditor v-model="form.content" :min-height="150" placeholder="补充任务背景、交付标准或注意事项…" />
+            </el-form-item>
+            <el-form-item label="相关附件" class="attachment-field">
             <el-upload
               v-model:file-list="imageFileList"
               list-type="picture-card"
@@ -860,7 +908,10 @@ function commentAttachmentUrl(file: any, preview = false) {
               :on-remove="onRemoveImage"
               :on-preview="onPreviewImage"
             >
-              <el-icon><Plus /></el-icon>
+              <div class="upload-trigger">
+                <el-icon><Plus /></el-icon>
+                <div><strong>添加附件</strong><span>点击选择图片或视频</span></div>
+              </div>
               <template #file="{ file }">
                 <div class="attach-card">
                   <video
@@ -879,11 +930,15 @@ function commentAttachmentUrl(file: any, preview = false) {
               </template>
             </el-upload>
             <div class="upload-tip">支持图片、视频，单个不超过 {{ MAX_ATTACH_MB }}MB，最多 9 个</div>
-          </el-form-item>
+            </el-form-item>
+          </section>
         </el-form>
-        <div class="detail-actions">
-          <el-button v-if="!isNew" @click="cancelEdit">取消</el-button>
-          <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+        <div class="form-actions">
+          <span class="form-actions__hint"><i aria-hidden="true" />带星号的项目为必填项</span>
+          <div>
+            <el-button @click="cancelEdit">取消</el-button>
+            <el-button type="primary" :loading="saving" @click="save">{{ isNew ? '创建任务' : '保存修改' }}</el-button>
+          </div>
         </div>
       </template>
     </div>
@@ -947,8 +1002,300 @@ function commentAttachmentUrl(file: any, preview = false) {
 </template>
 
 <style scoped>
+:global(.task-drawer) {
+  --task-accent: var(--el-color-primary, #2563eb);
+  --task-border: #e5eaf2;
+  --task-muted: #64748b;
+  background: #f6f8fb;
+}
+
+:global(.task-drawer .el-drawer__header) {
+  margin: 0;
+  padding: 22px 28px 18px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+  background: rgba(255, 255, 255, 0.92);
+}
+
+:global(.task-drawer .el-drawer__body) {
+  padding: 0;
+}
+
+:global(.task-drawer .el-drawer__close-btn) {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+:global(.task-drawer .el-drawer__close-btn:hover) {
+  color: var(--task-accent);
+  background: #eff6ff;
+}
+
+.drawer-heading__eyebrow {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--el-color-primary, #2563eb);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.drawer-heading h2 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.drawer-heading p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .task-detail {
   min-height: 200px;
+  padding: 24px 28px 0;
+}
+
+.task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-section {
+  padding: 20px;
+  border: 1px solid #e5eaf2;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.025);
+}
+
+.form-section--primary {
+  border-top: 3px solid var(--el-color-primary, #2563eb);
+}
+
+.form-section__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.form-section__index {
+  display: inline-flex;
+  flex: 0 0 34px;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--el-color-primary, #2563eb);
+  background: var(--el-color-primary-light-9, #eff6ff);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.form-section__head h3 {
+  margin: 0;
+  color: #172033;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.form-section__head p {
+  margin: 2px 0 0;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.task-form :deep(.el-form-item) {
+  margin-bottom: 18px;
+}
+
+.task-form :deep(.el-form-item:last-child) {
+  margin-bottom: 0;
+}
+
+.task-form :deep(.el-form-item__content) {
+  min-width: 0;
+}
+
+.task-form :deep(.el-form-item__label) {
+  height: auto;
+  margin-bottom: 7px;
+  padding: 0;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.task-form :deep(.el-input__wrapper),
+.task-form :deep(.el-select__wrapper) {
+  min-height: 40px;
+  border-radius: 9px;
+  box-shadow: 0 0 0 1px #dce3ed inset;
+  transition: box-shadow 0.18s ease;
+}
+
+.task-form :deep(.el-input__wrapper:hover),
+.task-form :deep(.el-select__wrapper:hover) {
+  box-shadow: 0 0 0 1px #aebbd0 inset;
+}
+
+.task-form :deep(.el-input__wrapper.is-focus),
+.task-form :deep(.el-select__wrapper.is-focused) {
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-5, #93c5fd) inset;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 16px;
+}
+
+.field-help {
+  display: block;
+  width: 100%;
+  margin-top: 7px;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.option-cards {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.option-cards :deep(.el-radio-button__inner) {
+  width: 100%;
+  min-height: 40px;
+  padding: 11px 8px;
+}
+
+.attachment-field :deep(.el-form-item__content) {
+  display: block;
+}
+
+.task-form :deep(.project-cascade),
+.task-form :deep(.rich-editor) {
+  width: 100%;
+  min-width: 0;
+}
+
+.task-form :deep(.project-cascade) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.task-form :deep(.project-cascade .el-select:only-child) {
+  grid-column: 1 / -1;
+}
+
+.task-form :deep(.project-cascade .el-select) {
+  width: 100% !important;
+}
+
+.attachment-field :deep(.el-upload-list--picture-card) {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.attachment-field :deep(.el-upload-list--picture-card .el-upload-list__item) {
+  width: 100%;
+  height: 104px;
+  margin: 0;
+  border-radius: 10px;
+}
+
+.attachment-field :deep(.el-upload--picture-card) {
+  width: 100%;
+  height: 104px;
+  border-radius: 10px;
+  background: #f8fafc;
+  transition: border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.attachment-field :deep(.el-upload--picture-card:hover) {
+  border-color: var(--el-color-primary, #2563eb);
+  background: var(--el-color-primary-light-9, #eff6ff);
+}
+
+.upload-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #64748b;
+}
+
+.upload-trigger > .el-icon {
+  flex: 0 0 auto;
+  font-size: 22px;
+}
+
+.upload-trigger div {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.upload-trigger strong {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.upload-trigger span {
+  margin-top: 2px;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.form-actions {
+  position: sticky;
+  z-index: 5;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 20px -28px 0;
+  padding: 16px 28px;
+  border-top: 1px solid rgba(226, 232, 240, 0.95);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.04);
+  backdrop-filter: blur(12px);
+}
+
+.form-actions__hint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.form-actions__hint i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ef4444;
+}
+
+.form-actions :deep(.el-button) {
+  min-width: 92px;
+  min-height: 40px;
+  border-radius: 9px;
 }
 
 .detail-head {
@@ -983,6 +1330,25 @@ function commentAttachmentUrl(file: any, preview = false) {
   white-space: pre-wrap;
   line-height: 1.6;
   color: #334155;
+  overflow-wrap: anywhere;
+}
+
+.content-text--empty {
+  color: #94a3b8;
+}
+
+.content-text :deep(p) {
+  margin: 0 0 6px;
+}
+
+.content-text :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.content-text :deep(ul),
+.content-text :deep(ol) {
+  margin: 4px 0;
+  padding-left: 22px;
 }
 
 .section {
@@ -1289,6 +1655,50 @@ function commentAttachmentUrl(file: any, preview = false) {
 }
 
 @media (max-width: 560px) {
+  :global(.task-drawer .el-drawer__header) {
+    padding: 18px 18px 15px;
+  }
+
+  .task-detail {
+    padding: 16px 14px 0;
+  }
+
+  .form-section {
+    padding: 16px 14px;
+    border-radius: 12px;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .task-form :deep(.project-cascade) {
+    grid-template-columns: 1fr;
+  }
+
+  .attachment-field :deep(.el-upload-list--picture-card) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .form-actions {
+    align-items: stretch;
+    flex-direction: column;
+    margin-right: -14px;
+    margin-left: -14px;
+    padding: 12px 14px max(12px, env(safe-area-inset-bottom));
+  }
+
+  .form-actions > div {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .form-actions :deep(.el-button) {
+    width: 100%;
+    margin: 0;
+  }
+
   .flow-timeline {
     padding-left: 24px;
   }

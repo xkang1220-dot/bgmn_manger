@@ -7,6 +7,7 @@ import { useUserStore } from '@/stores/user'
 
 const userStore = useUserStore()
 const canManageAttendance = computed(() => userStore.hasPermission('hr:attendance:edit'))
+const canEditArchive = computed(() => userStore.hasPermission('hr:archive:edit'))
 const canMaintainArchive = computed(() => userStore.hasPermission('hr:archive:add') || userStore.hasPermission('hr:archive:edit'))
 
 const query = reactive({ page: 1, pageSize: 12, realName: '', employeeNo: '' })
@@ -19,6 +20,7 @@ const isEdit = ref(false)
 const saving = ref(false)
 const detail = ref<any>(null)
 const attendanceSavingIds = ref<number[]>([])
+const taskRewardSavingIds = ref<number[]>([])
 const form = reactive<any>({
   userId: undefined,
   realName: '',
@@ -34,6 +36,7 @@ const form = reactive<any>({
   attendanceEnabled: 0,
   attendanceCycleDay: undefined,
   attendanceCycleDate: '',
+  taskRewardEnabled: 0,
   payMethods: [] as any[],
 })
 
@@ -100,6 +103,7 @@ function emptyForm() {
     attendanceEnabled: 0,
     attendanceCycleDay: undefined,
     attendanceCycleDate: '',
+    taskRewardEnabled: 0,
     payMethods: [] as any[],
   }
 }
@@ -201,6 +205,9 @@ async function save() {
     if (canManageAttendance.value && isEdit.value) {
       await bizApi.setArchiveAttendanceEnabled(Number(form.id), Number(form.attendanceEnabled), selectedCycleDay)
     }
+    if (canEditArchive.value && isEdit.value) {
+      await bizApi.setArchiveTaskRewardEnabled(Number(form.id), Number(form.taskRewardEnabled))
+    }
     ElMessage.success('保存成功')
     dialog.value = false
     await load()
@@ -243,6 +250,24 @@ async function toggleAttendance(row: any) {
     throw e
   } finally {
     attendanceSavingIds.value = attendanceSavingIds.value.filter((value) => value !== id)
+  }
+}
+
+async function toggleTaskReward(row: any) {
+  const id = Number(row.id)
+  const enabled = Number(row.taskRewardEnabled) === 1 ? 1 : 0
+  taskRewardSavingIds.value.push(id)
+  try {
+    await bizApi.setArchiveTaskRewardEnabled(id, enabled)
+    ElMessage.success(enabled ? '已启用该员工任务报酬' : '已停用该员工任务报酬')
+    if (detail.value?.id === id) detail.value.taskRewardEnabled = enabled
+    const listRow = list.value.find((item) => Number(item.id) === id)
+    if (listRow) listRow.taskRewardEnabled = enabled
+  } catch (e) {
+    row.taskRewardEnabled = enabled === 1 ? 0 : 1
+    throw e
+  } finally {
+    taskRewardSavingIds.value = taskRewardSavingIds.value.filter((value) => value !== id)
   }
 }
 
@@ -317,6 +342,17 @@ onMounted(async () => {
               :inactive-value="0"
               :loading="attendanceSavingIds.includes(Number(row.id))"
               @change="toggleAttendance(row)"
+            />
+          </div>
+          <div v-if="canEditArchive" class="attendance-field" @click.stop>
+            <span>启用任务报酬</span>
+            <el-switch
+              v-model="row.taskRewardEnabled"
+              :active-value="1"
+              :inactive-value="0"
+              :loading="taskRewardSavingIds.includes(Number(row.id))"
+              aria-label="启用任务报酬"
+              @change="toggleTaskReward(row)"
             />
           </div>
         </div>
@@ -402,6 +438,16 @@ onMounted(async () => {
           />
           <span class="attendance-tip attendance-tip--block">选择日期中的日号作为每月考勤周期，例如选择 20 日表示每月 20 日</span>
         </el-form-item>
+        <el-form-item v-if="canEditArchive && isEdit" label="启用任务报酬">
+          <el-switch
+            v-model="form.taskRewardEnabled"
+            :active-value="1"
+            :inactive-value="0"
+            :loading="taskRewardSavingIds.includes(Number(form.id))"
+            aria-label="启用任务报酬"
+          />
+          <span class="attendance-tip">开启后，管理员可以为该员工设置任务完成报酬</span>
+        </el-form-item>
         <el-form-item label="收款方式">
           <div class="pay-box">
             <div v-for="(m, index) in form.payMethods" :key="index" class="pay-row">
@@ -455,6 +501,16 @@ onMounted(async () => {
           </el-descriptions-item>
           <el-descriptions-item v-if="canManageAttendance && Number(detail.attendanceEnabled) === 1" label="考勤周期">
             每月 {{ detail.attendanceCycleDay }} 日
+          </el-descriptions-item>
+          <el-descriptions-item v-if="canEditArchive" label="启用任务报酬">
+            <el-switch
+              v-model="detail.taskRewardEnabled"
+              :active-value="1"
+              :inactive-value="0"
+              :loading="taskRewardSavingIds.includes(Number(detail.id))"
+              aria-label="启用任务报酬"
+              @change="toggleTaskReward(detail)"
+            />
           </el-descriptions-item>
           <el-descriptions-item label="收款方式">
             <div v-if="detail.payMethods?.length" class="pay-detail">

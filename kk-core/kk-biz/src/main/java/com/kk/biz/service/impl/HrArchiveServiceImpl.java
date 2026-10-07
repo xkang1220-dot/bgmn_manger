@@ -67,6 +67,7 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
         }
         archive.setAttendanceEnabled(0);
         archive.setAttendanceCycleDay(null);
+        archive.setTaskRewardEnabled(0);
         save(archive);
         walletService.getOrCreate(archive.getUserId());
         syncPayMethods(archive.getId(), archive.getPayMethods());
@@ -82,9 +83,10 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
         if (existing == null) {
             throw new BusinessException("档案不存在");
         }
-        // 普通档案编辑接口不得修改考勤开关，必须走考勤管理员专用接口。
+        // 普通档案编辑接口不得修改业务开关，必须走各自的专用接口。
         archive.setAttendanceEnabled(existing.getAttendanceEnabled());
         archive.setAttendanceCycleDay(existing.getAttendanceCycleDay());
+        archive.setTaskRewardEnabled(existing.getTaskRewardEnabled());
         updateById(archive);
         if (archive.getPayMethods() != null) {
             syncPayMethods(archive.getId(), archive.getPayMethods());
@@ -103,6 +105,16 @@ public class HrArchiveServiceImpl extends ServiceImpl<HrArchiveMapper, HrArchive
         lambdaUpdate().eq(HrArchive::getId, id)
                 .set(HrArchive::getAttendanceEnabled, attendanceEnabled ? 1 : 0)
                 .set(HrArchive::getAttendanceCycleDay, attendanceEnabled ? cycleDay : null)
+                .update();
+    }
+
+    @Override
+    public void setTaskRewardEnabled(Long id, Integer enabled) {
+        if (id == null || getById(id) == null) {
+            throw new BusinessException("档案不存在");
+        }
+        lambdaUpdate().eq(HrArchive::getId, id)
+                .set(HrArchive::getTaskRewardEnabled, Objects.equals(enabled, 1) ? 1 : 0)
                 .update();
     }
 

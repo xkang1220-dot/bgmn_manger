@@ -51,6 +51,25 @@ export const bizApi = {
   walletUserLedger(userId: number, params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: `/finance/wallet/${userId}/ledger`, method: 'get', params })
   },
+  adjustWallet(userId: number, data: {
+    direction: 'INCREASE' | 'DECREASE'
+    amount: number
+    reason: string
+    remark?: string
+    voucherFileIds?: number[]
+  }) {
+    return request<any>({ url: `/finance/wallet/${userId}/adjustment`, method: 'post', data })
+  },
+  uploadWalletAdjustmentVoucher(file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return request<any>({
+      url: '/finance/wallet/adjustment/voucher',
+      method: 'post',
+      data: form,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
   ledgerPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/finance/ledger/page', method: 'get', params })
   },
@@ -124,6 +143,9 @@ export const bizApi = {
   },
   setArchiveAttendanceEnabled(id: number, enabled: number, cycleDay?: number) {
     return request<void>({ url: `/hr/archive/${id}/attendance-enabled`, method: 'put', data: { enabled, cycleDay } })
+  },
+  setArchiveTaskRewardEnabled(id: number, enabled: number) {
+    return request<void>({ url: `/hr/archive/${id}/task-reward-enabled`, method: 'put', data: { enabled } })
   },
   faCategoryPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/fa/category/page', method: 'get', params })
@@ -214,6 +236,8 @@ export const bizApi = {
     priority?: number
     participantId?: number
     title?: string
+    periodFrom?: string
+    periodTo?: string
   }) {
     return request<any>({ url: '/task/management/summary', method: 'get', params: params || {} })
   },
@@ -315,23 +339,23 @@ export const bizApi = {
   saveSalarySchedule(data: any) {
     return request<void>({ url: '/hr/salary/schedule', method: 'put', data })
   },
-  salaryRuns(params: { companyId: number; yearMonth?: string }) {
+  salaryRuns(params: { yearMonth?: string } = {}) {
     return request<any[]>({ url: '/hr/salary/runs', method: 'get', params })
   },
   salaryRunLines(runId: number) {
     return request<any[]>({ url: `/hr/salary/runs/${runId}/lines`, method: 'get' })
   },
-  salaryPreview(data: { companyId: number; yearMonth?: string }) {
-    return request<any>({ url: '/hr/salary/preview', method: 'post', data })
+  voidSalaryRunLine(lineId: number, reason: string) {
+    return request<void>({ url: `/hr/salary/runs/lines/${lineId}/void`, method: 'post', data: { reason } })
   },
-  salaryPrepareDraft(params: { companyId: number; yearMonth?: string }) {
-    return request<any[]>({ url: '/hr/salary/prepare-draft', method: 'get', params })
+  previewSalaryBudget(data: { yearMonth: string; itemIds: number[]; taskRewardOverrides?: Record<number, number> }) {
+    return request<any>({ url: '/hr/salary/budget/preview', method: 'post', data })
   },
-  salaryPrepareConfirm(data: { companyId: number; yearMonth?: string; lines: any[] }) {
-    return request<any>({ url: '/hr/salary/prepare-confirm', method: 'post', data })
+  salaryBudgetItems() {
+    return request<any[]>({ url: '/hr/salary/budget/items', method: 'get' })
   },
-  salaryPay(data: { companyId: number; yearMonth?: string }) {
-    return request<any>({ url: '/hr/salary/pay', method: 'post', data })
+  saveSalaryBudget(data: { yearMonth: string; itemIds: number[]; taskRewardOverrides?: Record<number, number> }) {
+    return request<any>({ url: '/hr/salary/budget/save', method: 'post', data })
   },
   mySalaryConfirm(yearMonth?: string) {
     return request<any[]>({ url: '/hr/salary/my-confirm', method: 'get', params: { yearMonth } })

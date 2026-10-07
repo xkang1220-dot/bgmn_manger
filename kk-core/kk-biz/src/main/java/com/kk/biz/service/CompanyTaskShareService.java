@@ -26,6 +26,8 @@ import com.kk.system.service.SysDeptService;
 import com.kk.system.service.SysUserService;
 import com.kk.system.support.TaskQueryRateLimiter;
 import lombok.RequiredArgsConstructor;
+import org.jsoup.Jsoup;
+import org.jsoup.safety.Safelist;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -58,6 +60,10 @@ public class CompanyTaskShareService {
     private static final DateTimeFormatter DAY = DateTimeFormatter.ISO_LOCAL_DATE;
     private static final DateTimeFormatter COMMENT_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final Safelist TASK_HTML_SAFELIST = Safelist.basic()
+            .addTags("p", "div", "br", "ul", "ol", "li")
+            .addAttributes("a", "target", "rel")
+            .addProtocols("a", "href", "http", "https", "mailto");
     private static final Map<Integer, String> STATUS_LABEL = Map.of(
             0, "待办",
             1, "进行中",
@@ -277,7 +283,7 @@ public class CompanyTaskShareService {
         PublicCompanyTaskItem item = new PublicCompanyTaskItem();
         item.setId(task.getId());
         item.setTitle(task.getTitle());
-        item.setContent(task.getContent());
+        item.setContent(Jsoup.clean(task.getContent() == null ? "" : task.getContent(), TASK_HTML_SAFELIST));
         item.setStatus(task.getStatus());
         item.setStatusLabel(STATUS_LABEL.getOrDefault(task.getStatus() == null ? 0 : task.getStatus(), "—"));
         item.setPriority(task.getPriority());

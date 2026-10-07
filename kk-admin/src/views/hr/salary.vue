@@ -1,61 +1,76 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { CircleCheck, Coin, Plus, Search, UserFilled } from '@element-plus/icons-vue'
 import { bizApi } from '@/api/biz'
 import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 
 const users = ref<any[]>([]), projects = ref<any[]>([]), items = ref<any[]>([])
 const attendanceUserIds = ref(new Set<number>())
-const dialog = ref(false), isEdit = ref(false), saving = ref(false)
-const form = reactive<any>({})
-const selectedUserAttendanceEnabled = computed(() => attendanceUserIds.value.has(form.userId))
-const selectableUsers = computed(() => {
-  const configured = new Set(items.value.map((row: any) => Number(row.userId)))
-  return users.value.filter((u: any) => Number(u.id) === Number(form.userId) || !configured.has(Number(u.id)))
+const loading = ref(false), loadFailed = ref(false), dialog = ref(false), isEdit = ref(false), saving = ref(false)
+const formRef = ref<FormInstance>(), form = reactive<any>({})
+const filters = reactive({ keyword: '', payMode: '', enabled: '' })
+const selectedUserAttendanceEnabled = computed(() => attendanceUserIds.value.has(Number(form.userId)))
+const selectableUsers = computed(() => { const configured = new Set(items.value.map((r:any)=>Number(r.userId))); return users.value.filter((u:any)=>Number(u.id)===Number(form.userId)||!configured.has(Number(u.id))) })
+const filteredItems = computed(() => {
+  const q = filters.keyword.trim().toLowerCase()
+  return items.value.filter((r:any) => (!q || [r.userName,r.projectName,r.remark].some(v=>String(v||'').toLowerCase().includes(q))) && (!filters.payMode||r.payMode===filters.payMode) && (filters.enabled===''||Number(r.enabled)===Number(filters.enabled)))
 })
-const payModeLabel = (row: any) => row.payMode === 'DAILY' ? '按天计薪' : '固定月薪'
+const enabledCount = computed(()=>items.value.filter((r:any)=>r.enabled===1).length)
+const monthlyCount = computed(()=>items.value.filter((r:any)=>r.payMode!=='DAILY').length)
+const dailyCount = computed(()=>items.value.filter((r:any)=>r.payMode==='DAILY').length)
+const monthlyAverage = computed(()=>{ const rows=items.value.filter((r:any)=>r.payMode!=='DAILY'); return rows.length?rows.reduce((s:number,r:any)=>s+Number(r.amount||0),0)/rows.length:0 })
+const hasFilters = computed(()=>Boolean(filters.keyword||filters.payMode||filters.enabled!==''))
+const money = (v:unknown)=>new Intl.NumberFormat('zh-CN',{style:'currency',currency:'CNY',minimumFractionDigits:0,maximumFractionDigits:2}).format(Number(v||0))
+const rules:FormRules={userId:[{required:true,message:'请选择员工',trigger:'change'}],projectId:[{required:true,message:'请选择出款项目',trigger:'change'}],payMode:[{required:true,message:'请选择计薪方式',trigger:'change'}],payDay:[{required:true,message:'请设置发薪日',trigger:'change'}]}
 
-async function load() {
-  projects.value = await bizApi.projectList()
-  const attendanceUsers = await bizApi.attendanceUsers()
-  users.value = attendanceUsers || []
-  attendanceUserIds.value = new Set(users.value.map((u: any) => u.id))
-  items.value = await bizApi.salaryItems()
-}
-function defaults() { return { id: undefined, userId: undefined, projectId: undefined, cycleType: 'MONTHLY', payMode: 'MONTHLY', amount: 3000, payDay: 20, normalCoefficient: 1, restCoefficient: 0.3, normalDayRate: 0, restDayRate: 0, enabled: 1, remark: '' } }
-function open(row?: any) { isEdit.value = !!row; Object.assign(form, defaults(), row || {}); dialog.value = true }
-async function save() {
-  if (!form.userId || !form.projectId) return ElMessage.warning('请选择员工和出款项目')
-  if (form.payMode === 'MONTHLY' && (!form.amount || form.normalCoefficient == null || form.restCoefficient == null)) return ElMessage.warning('请填写月薪和工资系数')
-  saving.value = true
-  try { await bizApi.saveSalaryItem({ ...form, cycleType: 'MONTHLY' }, isEdit.value); ElMessage.success('工资配置已保存'); dialog.value = false; await load() } finally { saving.value = false }
-}
-async function remove(row: any) { await ElMessageBox.confirm(`删除「${row.userName} / ${row.projectName}」的工资配置？`, '确认'); await bizApi.deleteSalaryItem(row.id); ElMessage.success('已删除'); await load() }
+async function load(){ loading.value=true; loadFailed.value=false; try{ const [p,u,s]=await Promise.all([bizApi.projectList(),bizApi.attendanceUsers(),bizApi.salaryItems()]); projects.value=p||[];users.value=u||[];attendanceUserIds.value=new Set(users.value.map((x:any)=>Number(x.id)));items.value=s||[] }catch{loadFailed.value=true;ElMessage.error('工资配置加载失败，请稍后重试')}finally{loading.value=false} }
+function defaults(){return{id:undefined,userId:undefined,projectId:undefined,cycleType:'MONTHLY',payMode:'MONTHLY',amount:3000,payDay:20,normalCoefficient:.2,restCoefficient:.5,normalDayRate:0,restDayRate:0,enabled:1,remark:''}}
+function open(row?:any){isEdit.value=!!row;Object.assign(form,defaults(),row||{});dialog.value=true;requestAnimationFrame(()=>formRef.value?.clearValidate())}
+function clearFilters(){Object.assign(filters,{keyword:'',payMode:'',enabled:''})}
+function filterMode(mode:string){filters.payMode=filters.payMode===mode?'':mode}
+async function save(){const valid=await formRef.value?.validate().catch(()=>false);if(!valid)return;if(form.payMode==='MONTHLY'&&(!form.amount||form.normalCoefficient==null||form.restCoefficient==null))return ElMessage.warning('请完整填写月薪和计薪权重');if(form.payMode==='MONTHLY'&&Number(form.normalCoefficient)+Number(form.restCoefficient)<=0)return ElMessage.warning('常规日和休息日计薪权重不能同时为 0');saving.value=true;try{await bizApi.saveSalaryItem({...form,cycleType:'MONTHLY'},isEdit.value);ElMessage.success(isEdit.value?'工资配置已更新':'工资配置已创建');dialog.value=false;await load()}finally{saving.value=false}}
+async function remove(row:any){try{await ElMessageBox.confirm(`删除「${row.userName} / ${row.projectName}」的工资配置？删除后将不再参与后续工资计算。`,'删除工资配置',{confirmButtonText:'确认删除',cancelButtonText:'取消',type:'warning'});await bizApi.deleteSalaryItem(row.id);ElMessage.success('工资配置已删除');await load()}catch(e){if(e!=='cancel'&&e!=='close')ElMessage.error('删除失败，请稍后重试')}}
 onMounted(load)
 </script>
 
 <template>
-  <div class="page-card">
-    <div class="head"><div><h3>员工工资配置</h3><p>全局配置，无需关联公司；当前仅计算月薪。出款公司由所选项目自动确定。</p></div><el-button v-permission="'hr:salary:edit'" type="primary" @click="open()">新增配置</el-button></div>
-    <el-table :data="items" stripe>
-      <el-table-column prop="userName" label="员工" min-width="110" /><el-table-column prop="projectName" label="出款项目" min-width="150" />
-      <el-table-column label="计薪方式" width="110"><template #default="{ row }">{{ payModeLabel(row) }}</template></el-table-column><el-table-column label="发薪日" width="90"><template #default="{ row }">每月 {{ row.payDay || 20 }} 日</template></el-table-column>
-      <el-table-column label="薪资标准" min-width="180"><template #default="{ row }"><template v-if="row.payMode === 'DAILY'">平常 ¥{{ row.normalDayRate }}/天，周末/节假日 ¥{{ row.restDayRate }}/天</template><template v-else>¥{{ row.amount }}/月</template></template></el-table-column>
-      <el-table-column label="考勤计算" min-width="190"><template #default="{ row }"><span v-if="row.payMode === 'DAILY'">自动计算（按实际天数）</span><span v-else>平常 × {{ row.normalCoefficient }}，周末/节假日 × {{ row.restCoefficient }}</span></template></el-table-column>
-      <el-table-column label="状态" width="80"><template #default="{ row }">{{ row.enabled === 1 ? '启用' : '停用' }}</template></el-table-column><el-table-column prop="remark" label="备注" min-width="120" />
-      <el-table-column label="操作" width="140" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="open(row)">编辑</el-button><el-button link type="danger" @click="remove(row)">删除</el-button></template></el-table-column>
-    </el-table>
-    <el-dialog v-model="dialog" :title="isEdit ? '编辑工资配置' : '新增工资配置'" width="600px">
-      <el-form label-width="130px">
-        <el-form-item label="员工" required><el-select v-model="form.userId" filterable style="width:100%" no-data-text="暂无未配置工资的考勤员工"><el-option v-for="u in selectableUsers" :key="u.id" :label="u.name" :value="u.id" /></el-select></el-form-item>
-        <el-form-item label="出款项目" required><ProjectCascadeSelect v-model="form.projectId" :projects="projects" mode="pick" top-placeholder="重点或重大" child-placeholder="请选择小项目" top-width="100%" child-width="100%" :clearable="false" /></el-form-item>
-        <el-form-item label="计薪方式" required><el-radio-group v-model="form.payMode"><el-radio-button value="MONTHLY">固定月薪</el-radio-button><el-radio-button value="DAILY" :disabled="!selectedUserAttendanceEnabled">按天计薪</el-radio-button></el-radio-group><span v-if="!selectedUserAttendanceEnabled" class="hint">按天计薪仅适用于已启用考勤的员工</span></el-form-item>
-        <el-form-item label="发薪日" required><el-input-number v-model="form.payDay" :min="1" :max="28" :precision="0" /><span class="hint">考勤区间按上月该日至本月该日计算</span></el-form-item>
-        <template v-if="form.payMode === 'MONTHLY'"><el-form-item label="月薪" required><el-input-number v-model="form.amount" :min="0.01" :precision="2" style="width:100%" /></el-form-item><el-form-item label="平常上班系数"><el-input-number v-model="form.normalCoefficient" :min="0" :step="0.1" :precision="2" /></el-form-item><el-form-item label="周末节假日系数"><el-input-number v-model="form.restCoefficient" :min="0" :step="0.1" :precision="2" /></el-form-item><div class="formula">计算公式：月薪 ÷ 当月实际天数（28/29/30/31）×（平常出勤天数 × 平常系数 + 周末/节假日出勤天数 × 对应系数）</div></template>
-        <template v-else><el-form-item label="平常上班日薪" required><el-input-number v-model="form.normalDayRate" :min="0" :precision="2" style="width:100%" /></el-form-item><el-form-item label="周末节假日日薪" required><el-input-number v-model="form.restDayRate" :min="0" :precision="2" style="width:100%" /></el-form-item></template>
-        <el-alert title="值班日统一按平常上班计算，不再计入周末或节假日。" type="info" :closable="false" show-icon /><el-form-item label="启用" class="top-gap"><el-switch v-model="form.enabled" :active-value="1" :inactive-value="0" /></el-form-item><el-form-item label="备注"><el-input v-model="form.remark" /></el-form-item>
-      </el-form><template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" :loading="saving" @click="save">保存</el-button></template>
+  <div class="salary-page">
+    <section class="hero"><div><span>薪酬管理</span><h2>员工工资配置</h2><p>集中维护计薪标准与发薪规则，出款公司根据项目自动确定。</p></div><el-button v-permission="'hr:salary:edit'" type="primary" size="large" :icon="Plus" @click="open()">新增配置</el-button></section>
+    <section class="metrics" aria-label="工资配置概览">
+      <div class="metric"><i><el-icon><UserFilled/></el-icon></i><div><span>已配置员工</span><strong>{{items.length}}</strong><small>{{enabledCount}} 项正在启用</small></div></div>
+      <button class="metric" :class="{active:filters.payMode==='MONTHLY'}" @click="filterMode('MONTHLY')"><i><el-icon><Coin/></el-icon></i><div><span>固定月薪</span><strong>{{monthlyCount}}</strong><small>平均 {{money(monthlyAverage)}} / 月</small></div></button>
+      <button class="metric" :class="{active:filters.payMode==='DAILY'}" @click="filterMode('DAILY')"><i><el-icon><CircleCheck/></el-icon></i><div><span>按天计薪</span><strong>{{dailyCount}}</strong><small>按实际出勤天数计算</small></div></button>
+    </section>
+    <section class="page-card content" v-loading="loading">
+      <div class="toolbar"><div class="toolbar__left"><el-input v-model="filters.keyword" class="search" clearable :prefix-icon="Search" placeholder="搜索员工、项目或备注"/><el-select v-model="filters.payMode" clearable placeholder="全部计薪方式"><el-option label="固定月薪" value="MONTHLY"/><el-option label="按天计薪" value="DAILY"/></el-select><el-select v-model="filters.enabled" clearable placeholder="全部状态"><el-option label="启用" value="1"/><el-option label="停用" value="0"/></el-select></div><span class="count">{{hasFilters?`筛选到 ${filteredItems.length} 项`:`共 ${items.length} 项配置`}}</span></div>
+      <el-alert v-if="loadFailed" title="数据加载失败，请检查网络后重试" type="error" :closable="false" show-icon><el-button link type="danger" @click="load">重新加载</el-button></el-alert>
+      <el-table v-else class="desktop" :data="filteredItems" row-key="id">
+        <el-table-column label="员工 / 项目" min-width="210"><template #default="{row}"><div class="identity"><b>{{String(row.userName||'?').slice(0,1)}}</b><div><strong>{{row.userName}}</strong><small>{{row.projectName}}</small></div></div></template></el-table-column>
+        <el-table-column label="计薪方式" width="120"><template #default="{row}"><el-tag effect="plain" :type="row.payMode==='DAILY'?'warning':''">{{row.payMode==='DAILY'?'按天计薪':'固定月薪'}}</el-tag></template></el-table-column>
+        <el-table-column label="薪资标准" min-width="190"><template #default="{row}"><div class="salary"><strong>{{row.payMode==='DAILY'?money(row.normalDayRate):money(row.amount)}}<small>{{row.payMode==='DAILY'?' / 工作日':' / 月'}}</small></strong><span>{{row.payMode==='DAILY'?`休息日 ${money(row.restDayRate)}`:`常规权重 ${row.normalCoefficient} · 休息日权重 ${row.restCoefficient}`}}</span></div></template></el-table-column>
+        <el-table-column label="发薪日" width="105"><template #default="{row}">每月 {{row.payDay||20}} 日</template></el-table-column>
+        <el-table-column label="状态" width="90"><template #default="{row}"><span class="status" :class="row.enabled===1?'on':'off'"><i/>{{row.enabled===1?'启用':'停用'}}</span></template></el-table-column>
+        <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip><template #default="{row}">{{row.remark||'—'}}</template></el-table-column>
+        <el-table-column label="操作" width="132" fixed="right"><template #default="{row}"><el-button link type="primary" @click="open(row)">编辑</el-button><el-button link type="danger" @click="remove(row)">删除</el-button></template></el-table-column>
+        <template #empty><div class="empty"><el-icon><Coin/></el-icon><strong>{{hasFilters?'没有匹配的工资配置':'还没有工资配置'}}</strong><p>{{hasFilters?'尝试调整或清除筛选条件。':'新增第一项配置后，即可参与工资计算。'}}</p><el-button v-if="hasFilters" @click="clearFilters">清除筛选</el-button><el-button v-else v-permission="'hr:salary:edit'" type="primary" @click="open()">新增配置</el-button></div></template>
+      </el-table>
+      <div v-if="!loadFailed" class="mobile"><article v-for="row in filteredItems" :key="row.id"><div class="item-head"><div class="identity"><b>{{String(row.userName||'?').slice(0,1)}}</b><div><strong>{{row.userName}}</strong><small>{{row.projectName}}</small></div></div><span class="status" :class="row.enabled===1?'on':'off'"><i/>{{row.enabled===1?'启用':'停用'}}</span></div><div class="item-pay"><span>{{row.payMode==='DAILY'?'按天计薪':'固定月薪'}}</span><strong>{{row.payMode==='DAILY'?money(row.normalDayRate)+' / 工作日':money(row.amount)+' / 月'}}</strong></div><p>每月 {{row.payDay||20}} 日发薪 · {{row.payMode==='DAILY'?`休息日 ${money(row.restDayRate)}`:`常规 × ${row.normalCoefficient} · 休息日 × ${row.restCoefficient}`}}</p><footer><el-button @click="open(row)">编辑</el-button><el-button type="danger" plain @click="remove(row)">删除</el-button></footer></article><div v-if="!filteredItems.length" class="empty"><strong>{{hasFilters?'没有匹配的工资配置':'还没有工资配置'}}</strong><p>请调整筛选条件或新增配置。</p><el-button v-if="hasFilters" @click="clearFilters">清除筛选</el-button><el-button v-else type="primary" @click="open()">新增配置</el-button></div></div>
+    </section>
+    <el-dialog v-model="dialog" :title="isEdit?'编辑工资配置':'新增工资配置'" width="min(720px, calc(100vw - 32px))" destroy-on-close align-center>
+      <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="salary-form">
+        <section><header><b>1</b><div><strong>人员与出款</strong><small>确定工资归属人员及出款项目</small></div></header><div class="form-grid"><el-form-item label="员工" prop="userId"><el-select v-model="form.userId" filterable :disabled="isEdit" placeholder="选择员工" no-data-text="暂无未配置工资的考勤员工"><el-option v-for="u in selectableUsers" :key="u.id" :label="u.name" :value="u.id"/></el-select><small v-if="isEdit" class="help">员工创建后不可更换；如需调整，请新增对应员工的配置。</small></el-form-item><el-form-item label="出款项目" prop="projectId"><ProjectCascadeSelect v-model="form.projectId" :projects="projects" mode="pick" top-placeholder="重点或重大" child-placeholder="请选择小项目" top-width="100%" child-width="100%" :clearable="false"/></el-form-item></div></section>
+        <section><header><b>2</b><div><strong>计薪规则</strong><small>按员工实际薪资方案设置</small></div></header><el-form-item label="计薪方式" prop="payMode"><el-radio-group v-model="form.payMode"><el-radio-button value="MONTHLY">固定月薪</el-radio-button><el-radio-button value="DAILY" :disabled="!selectedUserAttendanceEnabled">按天计薪</el-radio-button></el-radio-group><small v-if="!selectedUserAttendanceEnabled" class="help">按天计薪仅适用于已启用考勤的员工</small></el-form-item><div v-if="form.payMode==='MONTHLY'" class="form-grid three"><el-form-item label="月薪（元）" required><el-input-number v-model="form.amount" :min=".01" :precision="2" controls-position="right"/></el-form-item><el-form-item label="常规日计薪权重"><el-input-number v-model="form.normalCoefficient" :min="0" :step=".1" :precision="2"/></el-form-item><el-form-item label="休息日计薪权重"><el-input-number v-model="form.restCoefficient" :min="0" :step=".1" :precision="2"/></el-form-item></div><div v-else class="form-grid"><el-form-item label="工作日日薪（元）" required><el-input-number v-model="form.normalDayRate" :min="0" :precision="2"/></el-form-item><el-form-item label="周末 / 节假日日薪（元）" required><el-input-number v-model="form.restDayRate" :min="0" :precision="2"/></el-form-item></div><div class="formula"><strong>计算说明</strong><span v-if="form.payMode==='MONTHLY'">月薪 × 实际出勤权重 ÷ 应计总权重；权重用于分配月薪，满勤仍发放完整月薪。</span><span v-else>工作日与休息日分别按对应日薪计算。</span><small>{{form.payMode==='MONTHLY'?'例如常规日 0.2、休息日 0.5，表示休息日权重是常规日的 2.5 倍。':'值班日统一按常规上班计算。'}}</small></div></section>
+        <section><header><b>3</b><div><strong>发放设置</strong><small>设置发薪时间与配置状态</small></div></header><div class="form-grid"><el-form-item label="每月发薪日" prop="payDay"><el-input-number v-model="form.payDay" :min="1" :max="28"/><small class="help">考勤区间按上月该日至本月该日计算</small></el-form-item><el-form-item label="配置状态"><el-switch v-model="form.enabled" :active-value="1" :inactive-value="0" inline-prompt active-text="启" inactive-text="停"/></el-form-item></div><el-form-item label="备注（选填）"><el-input v-model.trim="form.remark" maxlength="100" show-word-limit placeholder="补充特殊计薪约定"/></el-form-item></section>
+      </el-form><template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" :loading="saving" @click="save">{{isEdit?'保存修改':'创建配置'}}</el-button></template>
     </el-dialog>
   </div>
 </template>
-<style scoped>.head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;gap:16px}.head h3{margin:0 0 6px}.head p{margin:0;color:#64748b;font-size:13px}.hint{margin-left:10px;color:#94a3b8;font-size:13px}.unit{margin-left:8px}.top-gap{margin-top:18px}.formula{margin:-4px 0 16px 130px;color:#64748b;font-size:13px;line-height:1.6}</style>
+
+<style scoped>
+.salary-page{display:flex;flex-direction:column;gap:16px;min-width:0}.hero{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:24px 28px;border-radius:18px;background:linear-gradient(135deg,#18181b,#3f3f46);color:#fff;box-shadow:0 10px 28px #18181b24}.hero>div>span{color:#a1a1aa;font-size:12px;font-weight:700;letter-spacing:.16em}.hero h2{margin:7px 0 0;font-size:26px}.hero p{margin:8px 0 0;color:#d4d4d8;font-size:14px}.hero :deep(.el-button){--el-button-bg-color:#fff;--el-button-border-color:#fff;--el-button-text-color:#18181b}.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.metric{display:flex;align-items:center;gap:14px;min-width:0;padding:18px 20px;border:1px solid var(--kk-card-border);border-radius:14px;background:#ffffffc7;color:inherit;font:inherit;text-align:left}.metric:is(button){cursor:pointer;transition:.18s}.metric:is(button):hover,.metric.active{border-color:#18181b;box-shadow:0 6px 18px #18181b12}.metric:focus-visible{outline:3px solid #18181b38}.metric>i{display:grid;place-items:center;width:44px;height:44px;flex:none;border-radius:12px;background:#f4f4f5;font-size:20px}.metric div>span,.metric small{display:block;color:var(--kk-text-muted);font-size:12px}.metric strong{display:block;margin:3px 0;font-size:25px;font-variant-numeric:tabular-nums}.metric small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.content{padding:20px 22px}.search{width:260px}.toolbar .el-select{width:150px}.count{color:var(--kk-text-muted);font-size:13px}.identity{display:flex;align-items:center;gap:11px;min-width:0}.identity>b{display:grid;place-items:center;width:36px;height:36px;flex:none;border-radius:10px;background:#f0f0f1}.identity div{min-width:0}.identity strong,.identity small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.identity small,.salary span{margin-top:4px;color:var(--kk-text-muted);font-size:12px}.salary strong,.salary span{display:block}.salary strong{font-variant-numeric:tabular-nums}.salary strong small{color:var(--kk-text-muted);font-size:12px;font-weight:400}.status{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}.status i{width:7px;height:7px;border-radius:50%}.status.on{color:#067647}.status.on i{background:#12b76a}.status.off{color:#71717a}.status.off i{background:#a1a1aa}.empty{display:flex;min-height:240px;flex-direction:column;align-items:center;justify-content:center;padding:30px;color:var(--kk-text-muted);text-align:center}.empty>.el-icon{font-size:34px}.empty strong{margin-top:10px;color:var(--kk-text)}.empty p{margin:7px 0 16px;font-size:13px}.mobile{display:none}.salary-form{display:flex;flex-direction:column;gap:18px}.salary-form>section{padding:18px;border:1px solid #e4e4e7;border-radius:14px}.salary-form header{display:flex;align-items:center;gap:10px;margin-bottom:18px}.salary-form header>b{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;background:#18181b;color:#fff}.salary-form header strong,.salary-form header small{display:block}.salary-form header small,.help{margin-top:2px;color:#71717a;font-size:12px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px}.form-grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}.salary-form :deep(.el-select),.salary-form :deep(.el-input-number){width:100%}.help{display:block;margin-top:7px}.formula{display:flex;flex-direction:column;gap:5px;padding:12px 14px;border-left:3px solid #71717a;border-radius:0 9px 9px 0;background:#f4f4f5;color:#52525b;font-size:12px;line-height:1.55}.formula strong{color:#27272a}
+@media(max-width:900px){.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.form-grid.three{grid-template-columns:1fr 1fr}}
+@media(max-width:640px){.hero{align-items:flex-start;padding:20px;flex-direction:column}.hero .el-button{width:100%}.metrics{grid-template-columns:1fr}.metric:first-child{grid-column:auto}.content{padding:14px}.toolbar,.toolbar__left{align-items:stretch;flex-direction:column}.search,.toolbar .el-select{width:100%}.desktop{display:none}.mobile{display:flex;flex-direction:column;gap:10px}.mobile article{padding:16px;border:1px solid var(--kk-card-border);border-radius:14px;background:#fff}.item-head{display:flex;justify-content:space-between;gap:12px}.item-pay{margin:14px 0;padding:12px;border-radius:10px;background:#f6f6f7}.item-pay span,.item-pay strong{display:block}.item-pay span,.mobile article>p{color:var(--kk-text-muted);font-size:12px}.item-pay strong{margin-top:4px}.mobile footer{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding-top:12px;border-top:1px solid #eee}.form-grid,.form-grid.three{grid-template-columns:1fr}.salary-form>section{padding:15px}}
+@media(prefers-reduced-motion:reduce){.metric{transition:none!important}}
+</style>

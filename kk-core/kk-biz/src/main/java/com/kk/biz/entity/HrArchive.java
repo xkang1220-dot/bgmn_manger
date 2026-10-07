@@ -49,6 +49,9 @@ public class HrArchive extends BaseEntity {
     /** 考勤周期日（1-31，表示每月几号） */
     private Integer attendanceCycleDay;
 
+    /** 是否启用任务报酬（0否 1是） */
+    private Integer taskRewardEnabled;
+
     @TableField(exist = false)
     private String username;
 

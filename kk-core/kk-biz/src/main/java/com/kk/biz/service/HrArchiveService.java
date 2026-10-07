@@ -19,6 +19,8 @@ public interface HrArchiveService extends IService<HrArchive> {
 
     void setAttendanceEnabled(Long id, Integer enabled, Integer cycleDay);
 
+    void setTaskRewardEnabled(Long id, Integer enabled);
+
     void deleteArchive(Long id);
 
     HrArchive getByUserId(Long userId);

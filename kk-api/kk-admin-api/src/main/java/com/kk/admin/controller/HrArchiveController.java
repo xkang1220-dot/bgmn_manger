@@ -43,6 +43,7 @@ public class HrArchiveController {
         HrArchive archive = archiveService.getMine(StpUtil.getLoginIdAsLong());
         archive.setAttendanceEnabled(null);
         archive.setAttendanceCycleDay(null);
+        archive.setTaskRewardEnabled(null);
         return Result.ok(archive);
     }
 
@@ -82,6 +83,13 @@ public class HrArchiveController {
         return Result.ok();
     }
 
+    @PutMapping("/{id}/task-reward-enabled")
+    @SaCheckPermission("hr:archive:edit")
+    public Result<Void> setTaskRewardEnabled(@PathVariable Long id, @RequestBody TaskRewardEnabledBody body) {
+        archiveService.setTaskRewardEnabled(id, body.enabled());
+        return Result.ok();
+    }
+
     @DeleteMapping("/{id}")
     @SaCheckPermission("hr:archive:remove")
     public Result<Void> delete(@PathVariable Long id) {
@@ -94,7 +102,12 @@ public class HrArchiveController {
             archives.forEach(archive -> archive.setAttendanceEnabled(null));
             archives.forEach(archive -> archive.setAttendanceCycleDay(null));
         }
+        if (!StpUtil.hasPermission("hr:archive:edit")) {
+            archives.forEach(archive -> archive.setTaskRewardEnabled(null));
+        }
     }
 
     public record AttendanceEnabledBody(Integer enabled, Integer cycleDay) {}
+
+    public record TaskRewardEnabledBody(Integer enabled) {}
 }

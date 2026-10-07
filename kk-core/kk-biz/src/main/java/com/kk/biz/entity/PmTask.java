@@ -1,5 +1,6 @@
 package com.kk.biz.entity;
 
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
@@ -8,6 +9,7 @@ import com.kk.common.entity.BaseEntity;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -36,6 +38,10 @@ public class PmTask extends BaseEntity {
     private Integer priority;
 
     private Long assigneeId;
+
+    /** 任务报酬；仅任务管理员可设置，返回时由服务层按权限及人员开关脱敏 */
+    @TableField(updateStrategy = FieldStrategy.NEVER)
+    private BigDecimal taskReward;
 
     private LocalDate startDate;
 
