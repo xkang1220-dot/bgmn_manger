@@ -810,9 +810,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             }
             assertParticipantsEligible(existing.getProjectId(), task.getParticipantIds());
         }
-        if (Integer.valueOf(2).equals(task.getStatus())
-                && !StpUtil.hasPermission("project:task:confirm")) {
-            task.setStatus(4);
+        if (Integer.valueOf(2).equals(task.getStatus())) {
+            task.setStatus(completionTargetStatus(task.getTaskReward()));
         }
         validateDateRange(task);
         task.setContent(cleanTaskContent(task.getContent()));
@@ -883,8 +882,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 throw new BusinessException("关闭原因不能超过 500 字");
             }
         }
-        boolean completionManager = StpUtil.hasPermission("project:task:confirm");
-        int targetStatus = status == 2 && !completionManager ? 4 : status;
+        int targetStatus = status == 2 ? completionTargetStatus(existing.getTaskReward()) : status;
         PmTask update = new PmTask();
         update.setId(id);
         update.setStatus(targetStatus);
@@ -896,6 +894,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         String flowNote = targetStatus == 4 && !StringUtils.hasText(note) ? "提交完成，等待任务管理员确认" : note;
         recordFlow(id, targetStatus == 4 ? "COMPLETE_SUBMIT" : "STATUS", null, null,
                 oldStatus, targetStatus, flowNote, imageFileIds);
+    }
+
+    static int completionTargetStatus(BigDecimal taskReward) {
+        return taskReward != null && taskReward.signum() > 0 ? 4 : 2;
     }
 
     @Override

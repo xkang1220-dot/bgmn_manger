@@ -147,8 +147,9 @@ async function onDrop(e: DragEvent, status: number) {
   task.status = status
   try {
     await bizApi.updateTaskStatus(id, status)
-    ElMessage.success(status === 2 && !userStore.hasPermission('project:task:confirm') ? '已提交完成，等待任务管理员确认' : '状态已更新')
     await load()
+    const updatedStatus = Number(boardTasks.value.find((item) => item.id === id)?.status)
+    ElMessage.success(status === 2 && updatedStatus === 4 ? '已提交完成，等待任务管理员确认' : '状态已更新')
     emit('changed')
   } catch (err: any) {
     task.status = prev

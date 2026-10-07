@@ -871,7 +871,7 @@ function commentAttachmentUrl(file: any, preview = false) {
                 <el-radio-group v-model="form.status" class="option-cards">
                   <el-radio-button :value="0">待办</el-radio-button>
                   <el-radio-button :value="1">进行中</el-radio-button>
-                  <el-radio-button :value="2">{{ userStore.hasPermission('project:task:confirm') ? '已完成' : '提交完成' }}</el-radio-button>
+                  <el-radio-button :value="2">完成</el-radio-button>
                 </el-radio-group>
               </el-form-item>
             </div>
