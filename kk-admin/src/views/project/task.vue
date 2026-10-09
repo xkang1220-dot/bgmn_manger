@@ -86,6 +86,39 @@ const shareOpen = ref(false)
 const shareCompanies = ref<CompanyTaskShareOption[]>([])
 type TaskViewMode = 'timeline' | 'details'
 const taskViewMode = ref<TaskViewMode>('details')
+const taskOrder = ref<Array<number | string>>([])
+
+const taskOrderKey = computed(() => `bgmn:task-order:${userStore.user?.id || 'anonymous'}:${query.projectId || 'all'}`)
+const orderedList = computed(() => {
+  const ranks = new Map(taskOrder.value.map((id, index) => [String(id), index]))
+  return [...list.value].sort((a, b) => {
+    const aRank = ranks.get(String(a.id))
+    const bRank = ranks.get(String(b.id))
+    if (aRank == null && bRank == null) return 0
+    if (aRank == null) return 1
+    if (bRank == null) return -1
+    return aRank - bRank
+  })
+})
+
+function loadTaskOrder() {
+  try {
+    const value = JSON.parse(localStorage.getItem(taskOrderKey.value) || '[]')
+    taskOrder.value = Array.isArray(value) ? value : []
+  } catch {
+    taskOrder.value = []
+  }
+}
+
+function moveTask(taskId: number | string, direction: -1 | 1) {
+  const ids = orderedList.value.map((item) => item.id)
+  const index = ids.findIndex((id) => String(id) === String(taskId))
+  const target = index + direction
+  if (index < 0 || target < 0 || target >= ids.length) return
+  ;[ids[index], ids[target]] = [ids[target], ids[index]]
+  taskOrder.value = ids
+  localStorage.setItem(taskOrderKey.value, JSON.stringify(ids))
+}
 
 function taskContentPreview(content?: string) {
   if (!content) return ''
@@ -250,6 +283,7 @@ const healthMap: Record<string, { label: string; type: 'danger' | 'warning' | 's
 function selectProject(projectId?: number) {
   query.projectId = projectId
   query.page = 1
+  loadTaskOrder()
   load()
 }
 
@@ -379,6 +413,7 @@ onMounted(async () => {
     const num = Number(pid)
     if (!Number.isNaN(num)) query.projectId = num
   }
+  loadTaskOrder()
   await load()
   const tid = route.query.taskId
   if (tid) {
@@ -549,7 +584,7 @@ onMounted(async () => {
         aria-labelledby="task-view-tab-timeline"
         class="task-view-panel"
       >
-        <TaskTimeline :tasks="list" :loading="listLoading" @open="open" />
+        <TaskTimeline :tasks="orderedList" :loading="listLoading" @open="open" />
       </div>
 
       <div
@@ -562,7 +597,15 @@ onMounted(async () => {
         <div class="section-head task-section-head">
           <div><h3>{{ isTaskManager ? `${selectedProjectName} · 任务明细` : '我的任务明细' }}</h3><p>{{ isTaskManager ? '用于筛选、下钻和日常执行' : '仅包含我负责或直接参与的任务' }}</p></div>
         </div>
-        <el-table v-loading="listLoading" :data="list" row-key="id" stripe empty-text="暂无任务" class="task-table">
+        <el-table v-loading="listLoading" :data="orderedList" row-key="id" stripe empty-text="暂无任务" class="task-table">
+        <el-table-column label="顺序" width="92" align="center">
+          <template #default="{ row, $index }">
+            <div class="task-order-actions">
+              <button type="button" :disabled="$index === 0" :aria-label="`上移任务：${row.title}`" @click="moveTask(row.id, -1)">↑</button>
+              <button type="button" :disabled="$index === orderedList.length - 1" :aria-label="`下移任务：${row.title}`" @click="moveTask(row.id, 1)">↓</button>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="任务" min-width="320">
           <template #default="{ row }">
             <div class="task-title-cell">
@@ -727,6 +770,22 @@ onMounted(async () => {
 .task-table :deep(.el-table__row) { height: 66px; }
 .task-row-actions { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px 10px; }
 .task-row-actions :deep(.el-button + .el-button) { margin-left: 0; }
+.task-order-actions { display: inline-flex; align-items: center; gap: 4px; }
+.task-order-actions button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--kk-border, #dcdfe6);
+  border-radius: 7px;
+  color: var(--kk-text-secondary);
+  background: var(--kk-bg, #fff);
+  cursor: pointer;
+}
+.task-order-actions button:hover:not(:disabled) { color: var(--kk-primary); border-color: var(--kk-primary); }
+.task-order-actions button:focus-visible { outline: 2px solid var(--kk-primary); outline-offset: 2px; }
+.task-order-actions button:disabled { opacity: .35; cursor: not-allowed; }
 .task-title-cell { min-width: 0; line-height: 1.4; }
 .task-title-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .task-title-line .el-link { min-width: 0; max-width: 250px; font-weight: 600; }

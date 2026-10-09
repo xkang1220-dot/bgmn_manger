@@ -417,6 +417,17 @@ function formatMemberLabel(m: any) {
   return m.layer ? `${name}（${m.layer}）` : name
 }
 
+function durationDays(start?: string, end?: string) {
+  if (!start || !end) return null
+  const from = new Date(`${start}T00:00:00`)
+  const to = new Date(`${end}T00:00:00`)
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return null
+  return Math.max(1, Math.round((to.getTime() - from.getTime()) / 86400000) + 1)
+}
+
+const plannedDuration = computed(() => durationDays(detail.value?.startDate, detail.value?.endDate))
+const actualDuration = computed(() => durationDays(detail.value?.startDate, detail.value?.actualEndDate))
+
 async function save() {
   if (!form.name?.trim()) {
     ElMessage.warning('请填写项目名称')
@@ -938,12 +949,17 @@ onMounted(async () => {
                 <span class="info-value">{{ detail.ownerName || '—' }}</span>
               </div>
               <div class="info-item info-item--full">
-                <span class="info-label">项目参与人</span>
-                <span class="info-value">{{
-                  detail.members?.length
-                    ? detail.members.map((m: any) => formatMemberLabel(m)).join('、')
-                    : '无'
-                }}</span>
+                <span class="info-label">项目人员与职责</span>
+                <div v-if="detail.members?.length" class="member-responsibility-grid">
+                  <div v-for="member in detail.members" :key="member.id || member.userId" class="member-responsibility-card">
+                    <span class="member-avatar" aria-hidden="true">{{ String(member.nickname || member.userName || member.userId || '?').slice(0, 1) }}</span>
+                    <div>
+                      <b>{{ member.nickname || member.userName || member.userId }}</b>
+                      <span>{{ member.layer || member.responsibility || '项目成员' }}</span>
+                    </div>
+                  </div>
+                </div>
+                <span v-else class="info-value">无</span>
               </div>
               <div class="info-item">
                 <span class="info-label">状态</span>
@@ -955,11 +971,11 @@ onMounted(async () => {
               </div>
               <div class="info-item">
                 <span class="info-label">预计周期</span>
-                <span class="info-value">{{ detail.startDate || '—' }} ~ {{ detail.endDate || '—' }}</span>
+                <span class="info-value">{{ detail.startDate || '—' }} ~ {{ detail.endDate || '—' }}{{ plannedDuration ? ` · ${plannedDuration} 天` : '' }}</span>
               </div>
               <div class="info-item">
-                <span class="info-label">实际结束</span>
-                <span class="info-value">{{ detail.actualEndDate || '—' }}</span>
+                <span class="info-label">实际开发周期</span>
+                <span class="info-value">{{ detail.actualEndDate || '进行中' }}{{ actualDuration ? ` · ${actualDuration} 天` : '' }}</span>
               </div>
               <div class="info-item info-item--full">
                 <span class="info-label">说明</span>
@@ -1664,6 +1680,43 @@ onMounted(async () => {
   color: #0f172a;
   font-weight: 500;
 }
+
+.member-responsibility-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.member-responsibility-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--kk-border, #e5e7eb);
+  border-radius: 9px;
+  background: var(--kk-bg-muted, #f8fafc);
+}
+
+.member-avatar {
+  display: grid;
+  place-items: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: var(--kk-primary);
+  background: color-mix(in srgb, var(--kk-primary) 12%, #fff);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.member-responsibility-card > div { min-width: 0; }
+.member-responsibility-card b,
+.member-responsibility-card div > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-responsibility-card b { font-size: 13px; color: var(--kk-text); }
+.member-responsibility-card div > span { margin-top: 3px; font-size: 12px; color: var(--kk-text-muted); }
 
 .desc-text {
   white-space: pre-wrap;

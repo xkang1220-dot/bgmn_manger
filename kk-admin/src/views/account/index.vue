@@ -208,9 +208,19 @@ function dayKey(d: Date | string) {
 const selectedDay = computed(() => dayKey(calendarDate.value))
 const todayKey = computed(() => dayKey(new Date()))
 
-const dayTasks = computed(() =>
+const dayStartingTasks = computed(() =>
+  calendarTasks.value.filter((t) => String(t.startDate || '').startsWith(selectedDay.value)),
+)
+
+const dayDueTasks = computed(() =>
   calendarTasks.value.filter((t) => String(t.dueDate || '').startsWith(selectedDay.value)),
 )
+
+const dayTasks = computed(() => {
+  const rows = new Map<number | string, any>()
+  for (const task of [...dayStartingTasks.value, ...dayDueTasks.value]) rows.set(task.id, task)
+  return [...rows.values()]
+})
 
 const dayLeaves = computed(() =>
   myLeaves.value.filter((r) => String(r.leaveDate || '').startsWith(selectedDay.value)),
@@ -230,12 +240,21 @@ const monthLeaveCount = computed(() => {
 const tasksByDay = computed(() => {
   const map: Record<string, number> = {}
   for (const t of calendarTasks.value) {
-    const key = String(t.dueDate || '').slice(0, 10)
-    if (!key) continue
-    map[key] = (map[key] || 0) + 1
+    const keys = new Set([
+      String(t.startDate || '').slice(0, 10),
+      String(t.dueDate || '').slice(0, 10),
+    ].filter(Boolean))
+    for (const key of keys) map[key] = (map[key] || 0) + 1
   }
   return map
 })
+
+function taskDayLabel(task: any) {
+  const starts = String(task.startDate || '').startsWith(selectedDay.value)
+  const ends = String(task.dueDate || '').startsWith(selectedDay.value)
+  if (starts && ends) return '当日开始并截止'
+  return starts ? '当日开始' : '当日截止'
+}
 
 const leaveByDay = computed(() => {
   const map: Record<string, number> = {}
@@ -1593,7 +1612,7 @@ onUnmounted(() => {
           <div>
             <h3>任务与考勤日历</h3>
             <p class="sec-tip">
-              点日期查看当天任务
+              点日期查看当天开始和截止的任务
               <template v-if="canViewLeave">；橙色标记为已通过请假。本月请假 {{ monthLeaveCount }} 天（无记录视为全勤）</template>
             </p>
           </div>
@@ -1639,6 +1658,11 @@ onUnmounted(() => {
                 <em>已记考勤</em>
               </div>
             </template>
+            <div class="day-task-summary" aria-label="当日任务统计">
+              <span><b>{{ dayStartingTasks.length }}</b> 项开始</span>
+              <span><b>{{ dayDueTasks.length }}</b> 项截止</span>
+              <span v-if="canViewLeave"><b>{{ dayLeaves.length ? '请假' : '正常' }}</b> 考勤</span>
+            </div>
             <h5 class="day-sub">任务</h5>
             <div
               v-for="t in dayTasks"
@@ -1648,11 +1672,11 @@ onUnmounted(() => {
             >
               <div>
                 <b>{{ t.title }}</b>
-                <span>{{ t.projectName || '—' }} · {{ t.participantNames?.length ? `参与人 ${t.participantNames.join('、')}` : '无参与人' }}</span>
+                <span>{{ taskDayLabel(t) }} · {{ t.projectName || '—' }} · {{ t.participantNames?.length ? `参与人 ${t.participantNames.join('、')}` : '无参与人' }}</span>
               </div>
               <em :class="{ overdue: t.overdue }">{{ t.statusLabel || t.status || '—' }}</em>
             </div>
-            <div v-if="!dayTasks.length && !(canViewLeave && dayLeaves.length)" class="empty">这一天没有到期任务</div>
+            <div v-if="!dayTasks.length && !(canViewLeave && dayLeaves.length)" class="empty">这一天没有开始或截止任务</div>
           </div>
         </div>
       </section>
@@ -2966,6 +2990,30 @@ onUnmounted(() => {
   margin: 0 0 10px;
   font-size: 14px;
   font-weight: 600;
+  color: var(--kk-text);
+}
+
+.day-task-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0 14px;
+}
+
+.day-task-summary span {
+  padding: 9px 8px;
+  border: 1px solid var(--kk-border, #e5e7eb);
+  border-radius: 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--kk-text-muted);
+  background: var(--kk-bg-muted, #f8fafc);
+}
+
+.day-task-summary b {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 15px;
   color: var(--kk-text);
 }
 
