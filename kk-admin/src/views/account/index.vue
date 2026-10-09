@@ -36,6 +36,13 @@ const ledgerQuery = reactive({
 })
 
 const reimburseDialog = ref(false)
+const leaveDialog = ref(false)
+const leaveSubmitting = ref(false)
+const leaveForm = reactive({
+  companyId: undefined as number | undefined,
+  dateRange: [] as string[],
+  reason: '',
+})
 const withdrawDialog = ref(false)
 const balanceApplyDialog = ref(false)
 const reimburseForm = reactive({
@@ -254,6 +261,35 @@ function taskDayLabel(task: any) {
   const ends = String(task.dueDate || '').startsWith(selectedDay.value)
   if (starts && ends) return '当日开始并截止'
   return starts ? '当日开始' : '当日截止'
+}
+
+function openLeaveApply(day = selectedDay.value) {
+  leaveForm.companyId = companies.value.length === 1 ? Number(companies.value[0].id) : undefined
+  leaveForm.dateRange = [day, day]
+  leaveForm.reason = ''
+  leaveDialog.value = true
+}
+
+async function submitLeaveApply() {
+  if (!leaveForm.companyId) return void ElMessage.warning('请选择所属公司')
+  if (leaveForm.dateRange.length !== 2) return void ElMessage.warning('请选择请假日期')
+  if (!leaveForm.reason.trim()) return void ElMessage.warning('请填写请假事由')
+  leaveSubmitting.value = true
+  try {
+    await bizApi.submitLeave({
+      companyId: leaveForm.companyId,
+      startDate: leaveForm.dateRange[0],
+      endDate: leaveForm.dateRange[1],
+      reason: leaveForm.reason.trim(),
+    })
+    ElMessage.success('请假申请已提交')
+    leaveDialog.value = false
+    await loadLeaves()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '请假申请提交失败')
+  } finally {
+    leaveSubmitting.value = false
+  }
 }
 
 const leaveByDay = computed(() => {
@@ -1133,6 +1169,9 @@ onMounted(async () => {
   loading.value = true
   try {
     const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadPanelTasks(true), loadProjects(), loadLeaves()]
+    if (canViewLeave.value && !canSeeWallet.value) {
+      jobs.push(sysApi.myCompanies().then((rows) => { companies.value = rows || [] }).catch(() => { companies.value = [] }))
+    }
     if (canSeeWallet.value) {
       jobs.push(
         (async () => {
@@ -1617,6 +1656,7 @@ onUnmounted(() => {
             </p>
           </div>
           <div class="sec-head-actions">
+            <el-button v-if="canViewLeave" plain type="warning" @click="openLeaveApply()">申请请假</el-button>
             <el-radio-group
               v-if="showTaskScopeToggle"
               v-model="taskScope"
@@ -1681,6 +1721,27 @@ onUnmounted(() => {
         </div>
       </section>
     </div>
+
+    <el-dialog v-model="leaveDialog" title="请假申请" width="min(480px, calc(100vw - 24px))" :close-on-click-modal="false">
+      <el-form label-width="88px">
+        <el-form-item label="所属公司" required>
+          <el-select v-model="leaveForm.companyId" filterable placeholder="选择公司" style="width: 100%">
+            <el-option v-for="company in companies" :key="company.id" :label="company.name" :value="Number(company.id)" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="请假日期" required>
+          <el-date-picker v-model="leaveForm.dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至"
+            start-placeholder="开始日期" end-placeholder="结束日期" unlink-panels style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="请假事由" required>
+          <el-input v-model="leaveForm.reason" type="textarea" :rows="4" maxlength="300" show-word-limit placeholder="请填写请假事由" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="leaveDialog = false">取消</el-button>
+        <el-button type="primary" :loading="leaveSubmitting" @click="submitLeaveApply">提交审批</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="reimburseDialog" title="个人报销" width="480px" @closed="voucherFiles = []">
       <p class="sec-tip" style="margin: 0 0 12px">财务回执并由你确认到账后，只从公司总账扣款；个人钱包余额不变。收款方式用于线下打款。</p>

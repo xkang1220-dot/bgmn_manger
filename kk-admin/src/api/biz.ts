@@ -386,6 +386,9 @@ export const bizApi = {
   myLeave(params?: { companyId?: number; start?: string; end?: string }) {
     return request<any[]>({ url: '/hr/leave/mine', method: 'get', params })
   },
+  submitLeave(data: { companyId: number; startDate: string; endDate: string; reason: string }) {
+    return request<any>({ url: '/hr/leave/mine', method: 'post', data })
+  },
   attendance(params: { start?: string; end?: string }) {
     return request<any[]>({ url: '/hr/leave/attendance', method: 'get', params })
   },

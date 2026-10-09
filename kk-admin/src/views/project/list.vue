@@ -35,6 +35,7 @@ const taskSummary = ref<Record<string, number>>({})
 const tasks = ref<any[]>([])
 const taskTotal = ref(0)
 const projectFlows = ref<any[]>([])
+const projectAccount = ref<any>(null)
 const taskQuery = reactive({ page: 1, pageSize: 10, status: undefined as number | undefined })
 const loadingDetail = ref(false)
 const kanbanRef = ref<InstanceType<typeof TaskKanban> | null>(null)
@@ -56,6 +57,8 @@ const form = reactive<any>({
   startDate: '',
   endDate: '',
   actualEndDate: '',
+  websiteUrl: '',
+  repositoryUrl: '',
   description: '',
 })
 
@@ -219,6 +222,7 @@ async function loadDetail(id: number) {
   loadingDetail.value = true
   try {
     detail.value = await bizApi.projectDetail(id)
+    projectAccount.value = await bizApi.projectAccountDetail(id).catch(() => null)
     if (detail.value?.scale === 'MAJOR' && !detail.value?.parentId) {
       await loadChildren()
       if (detailTab.value === 'board' || detailTab.value === 'tasks') {
@@ -294,6 +298,8 @@ function open(row?: any) {
         startDate: d.startDate || '',
         endDate: d.endDate || '',
         actualEndDate: d.actualEndDate || '',
+        websiteUrl: d.websiteUrl || '',
+        repositoryUrl: d.repositoryUrl || '',
         description: d.description || '',
       })
       if (!form.participants.length) {
@@ -319,6 +325,8 @@ function open(row?: any) {
       startDate: '',
       endDate: '',
       actualEndDate: '',
+      websiteUrl: '',
+      repositoryUrl: '',
       description: '',
     })
     loadOwners(only)
@@ -345,6 +353,8 @@ function openCreateChild() {
     startDate: '',
     endDate: '',
     actualEndDate: '',
+    websiteUrl: '',
+    repositoryUrl: '',
     description: '',
   })
   loadOwners(detail.value.companyId)
@@ -427,6 +437,11 @@ function durationDays(start?: string, end?: string) {
 
 const plannedDuration = computed(() => durationDays(detail.value?.startDate, detail.value?.endDate))
 const actualDuration = computed(() => durationDays(detail.value?.startDate, detail.value?.actualEndDate))
+const personalDistributable = computed(() => {
+  const loginId = Number(userStore.user?.id)
+  const member = (detail.value?.members || []).find((row: any) => Number(row.userId) === loginId)
+  return Number(projectAccount.value?.sharePendingBalance || 0) * Number(member?.percent || 0) / 100
+})
 
 async function save() {
   if (!form.name?.trim()) {
@@ -794,6 +809,13 @@ onMounted(async () => {
             </div>
           </div>
 
+          <div v-if="!isMajorShell && projectAccount" class="fund-summary" aria-label="项目资金概览">
+            <div><span>项目资金总额</span><b>¥{{ Number(projectAccount.balance || 0).toFixed(2) }}</b></div>
+            <div><span>待分成</span><b>¥{{ Number(projectAccount.sharePendingBalance || 0).toFixed(2) }}</b></div>
+            <div><span>非分成</span><b>¥{{ Number(projectAccount.nonShareBalance || 0).toFixed(2) }}</b></div>
+            <div><span>我的预计可分</span><b>¥{{ personalDistributable.toFixed(2) }}</b></div>
+          </div>
+
           <div class="project-hero__ops">
             <el-button
               v-permission="'project:edit'"
@@ -977,6 +999,16 @@ onMounted(async () => {
                 <span class="info-label">实际开发周期</span>
                 <span class="info-value">{{ detail.actualEndDate || '进行中' }}{{ actualDuration ? ` · ${actualDuration} 天` : '' }}</span>
               </div>
+              <div class="info-item">
+                <span class="info-label">项目网站</span>
+                <el-link v-if="detail.websiteUrl" :href="detail.websiteUrl" target="_blank" type="primary">{{ detail.websiteUrl }}</el-link>
+                <span v-else class="info-value">—</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">代码仓库</span>
+                <el-link v-if="detail.repositoryUrl" :href="detail.repositoryUrl" target="_blank" type="primary">{{ detail.repositoryUrl }}</el-link>
+                <span v-else class="info-value">—</span>
+              </div>
               <div class="info-item info-item--full">
                 <span class="info-label">说明</span>
                 <span class="info-value desc-text">{{ detail.description || '暂无说明' }}</span>
@@ -1005,7 +1037,8 @@ onMounted(async () => {
             <el-empty v-else description="暂无操作记录" />
           </el-tab-pane>
 
-          <el-tab-pane label="项目备注" name="notes">
+          <el-tab-pane label="项目资料" name="notes">
+            <p class="form-tip project-resource-tip">在这里沉淀项目说明和附件，作为项目文件区使用。</p>
             <ProjectNotes
               v-if="activeProjectId && detailTab === 'notes'"
               :project-id="activeProjectId"
@@ -1094,6 +1127,12 @@ onMounted(async () => {
         </el-row>
         <el-form-item label="实际结束时间">
           <el-date-picker v-model="form.actualEndDate" value-format="YYYY-MM-DD" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="项目网站">
+          <el-input v-model="form.websiteUrl" placeholder="https://example.com" />
+        </el-form-item>
+        <el-form-item label="代码仓库">
+          <el-input v-model="form.repositoryUrl" placeholder="https://gitlab.com/group/project" />
         </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="form.status" style="width: 100%">
@@ -1681,6 +1720,18 @@ onMounted(async () => {
   font-weight: 500;
 }
 
+.fund-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.fund-summary > div { padding: 11px 14px; border: 1px solid rgba(255,255,255,.7); border-radius: 12px; background: rgba(255,255,255,.45); }
+.fund-summary span, .fund-summary b { display: block; }
+.fund-summary span { font-size: 12px; color: var(--kk-text-muted); }
+.fund-summary b { margin-top: 4px; font-size: 16px; color: var(--kk-text); font-variant-numeric: tabular-nums; }
+.project-resource-tip { margin: 0 0 12px; }
+
 .member-responsibility-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
@@ -1749,6 +1800,7 @@ onMounted(async () => {
   .info-grid {
     grid-template-columns: 1fr;
   }
+  .fund-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 640px) {
