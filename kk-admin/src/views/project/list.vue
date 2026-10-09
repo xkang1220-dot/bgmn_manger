@@ -112,7 +112,6 @@ const filteredEmpty = computed(
     (!!query.name.trim() || query.status !== undefined || query.companyId !== undefined),
 )
 
-const projectOrderStorageKey = computed(() => `bgmn:project-order:${userStore.user?.id || 'anonymous'}`)
 const projectOrder = ref<number[]>([])
 const draggingProjectId = ref<number | null>(null)
 
@@ -128,9 +127,9 @@ const displayedProjects = computed(() => {
   })
 })
 
-function readProjectOrder() {
+async function readProjectOrder() {
   try {
-    const saved = JSON.parse(localStorage.getItem(projectOrderStorageKey.value) || '[]')
+    const saved = await bizApi.projectOrder()
     projectOrder.value = Array.isArray(saved) ? saved.map(Number).filter(Number.isFinite) : []
   } catch {
     projectOrder.value = []
@@ -139,7 +138,7 @@ function readProjectOrder() {
 
 function persistProjectOrder(ids: number[]) {
   projectOrder.value = ids
-  localStorage.setItem(projectOrderStorageKey.value, JSON.stringify(ids))
+  void bizApi.saveProjectOrder(ids).catch(() => ElMessage.error('项目排序保存失败，请稍后重试'))
 }
 
 function moveProject(projectId: number, offset: -1 | 1) {
@@ -573,7 +572,7 @@ watch(detailTab, () => {
 })
 
 onMounted(async () => {
-  readProjectOrder()
+  await readProjectOrder()
   companies.value = await sysApi.myCompanies()
   users.value = await sysApi.userList()
   await load()

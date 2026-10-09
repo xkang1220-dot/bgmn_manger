@@ -5,10 +5,12 @@ import cn.dev33.satoken.annotation.SaCheckRole;
 import cn.dev33.satoken.annotation.SaMode;
 import cn.dev33.satoken.stp.StpUtil;
 import com.kk.biz.entity.PmTask;
+import com.kk.biz.dto.ItemOrderRequest;
 import com.kk.biz.entity.PmTaskComment;
 import com.kk.biz.entity.PmTaskFlow;
 import com.kk.biz.entity.SysFile;
 import com.kk.biz.service.PmTaskService;
+import com.kk.biz.service.UserItemOrderService;
 import com.kk.common.result.PageResult;
 import com.kk.common.result.Result;
 import lombok.Data;
@@ -25,6 +27,22 @@ import java.util.Map;
 public class TaskController {
 
     private final PmTaskService taskService;
+    private final UserItemOrderService userItemOrderService;
+
+    @GetMapping("/order")
+    @SaCheckPermission("project:task:list")
+    public Result<List<Long>> order(Long projectId) {
+        return Result.ok(userItemOrderService.getOrder(
+                StpUtil.getLoginIdAsLong(), UserItemOrderService.TASK, projectId));
+    }
+
+    @PutMapping("/order")
+    @SaCheckPermission("project:task:list")
+    public Result<Void> saveOrder(@RequestBody ItemOrderRequest request) {
+        userItemOrderService.saveOrder(
+                StpUtil.getLoginIdAsLong(), UserItemOrderService.TASK, request.getScopeId(), request.getItemIds());
+        return Result.ok();
+    }
 
     @GetMapping("/page")
     @SaCheckPermission("project:task:list")

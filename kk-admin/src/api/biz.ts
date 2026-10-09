@@ -184,6 +184,12 @@ export const bizApi = {
   projectPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/project/page', method: 'get', params })
   },
+  projectOrder() {
+    return request<number[]>({ url: '/project/order', method: 'get' })
+  },
+  saveProjectOrder(itemIds: number[]) {
+    return request<void>({ url: '/project/order', method: 'put', data: { itemIds } })
+  },
   projectList() {
     return request<any[]>({ url: '/project/list', method: 'get' })
   },
@@ -227,6 +233,12 @@ export const bizApi = {
   },
   taskPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/task/page', method: 'get', params })
+  },
+  taskOrder(projectId?: number) {
+    return request<number[]>({ url: '/task/order', method: 'get', params: { projectId } })
+  },
+  saveTaskOrder(projectId: number | undefined, itemIds: Array<number | string>) {
+    return request<void>({ url: '/task/order', method: 'put', data: { scopeId: projectId, itemIds } })
   },
   managementTaskPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/task/management/page', method: 'get', params })
