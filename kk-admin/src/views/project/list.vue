@@ -109,6 +109,63 @@ const filteredEmpty = computed(
     (!!query.name.trim() || query.status !== undefined || query.companyId !== undefined),
 )
 
+const projectOrderStorageKey = computed(() => `bgmn:project-order:${userStore.user?.id || 'anonymous'}`)
+const projectOrder = ref<number[]>([])
+const draggingProjectId = ref<number | null>(null)
+
+const displayedProjects = computed(() => {
+  const positions = new Map(projectOrder.value.map((id, index) => [Number(id), index]))
+  return [...list.value].sort((a, b) => {
+    const aPosition = positions.get(Number(a.id))
+    const bPosition = positions.get(Number(b.id))
+    if (aPosition == null && bPosition == null) return 0
+    if (aPosition == null) return 1
+    if (bPosition == null) return -1
+    return aPosition - bPosition
+  })
+})
+
+function readProjectOrder() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(projectOrderStorageKey.value) || '[]')
+    projectOrder.value = Array.isArray(saved) ? saved.map(Number).filter(Number.isFinite) : []
+  } catch {
+    projectOrder.value = []
+  }
+}
+
+function persistProjectOrder(ids: number[]) {
+  projectOrder.value = ids
+  localStorage.setItem(projectOrderStorageKey.value, JSON.stringify(ids))
+}
+
+function moveProject(projectId: number, offset: -1 | 1) {
+  const ids = displayedProjects.value.map((project) => Number(project.id))
+  const index = ids.indexOf(Number(projectId))
+  const target = index + offset
+  if (index < 0 || target < 0 || target >= ids.length) return
+  ;[ids[index], ids[target]] = [ids[target], ids[index]]
+  persistProjectOrder(ids)
+}
+
+function onProjectDragStart(event: DragEvent, projectId: number) {
+  draggingProjectId.value = Number(projectId)
+  event.dataTransfer?.setData('text/plain', String(projectId))
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+}
+
+function onProjectDrop(targetId: number) {
+  const sourceId = draggingProjectId.value
+  draggingProjectId.value = null
+  if (sourceId == null || sourceId === Number(targetId)) return
+  const ids = displayedProjects.value.map((project) => Number(project.id))
+  const sourceIndex = ids.indexOf(sourceId)
+  const targetIndex = ids.indexOf(Number(targetId))
+  if (sourceIndex < 0 || targetIndex < 0) return
+  ids.splice(targetIndex, 0, ids.splice(sourceIndex, 1)[0])
+  persistProjectOrder(ids)
+}
+
 const statusKey = computed({
   get: () => (query.status === undefined ? 'all' : String(query.status)),
   set: (v: string) => {
@@ -490,6 +547,7 @@ watch(detailTab, () => {
 })
 
 onMounted(async () => {
+  readProjectOrder()
   companies.value = await sysApi.myCompanies()
   users.value = await sysApi.userList()
   await load()
@@ -553,14 +611,19 @@ onMounted(async () => {
 
       <div v-if="list.length" class="project-grid">
         <article
-          v-for="row in list"
+          v-for="(row, projectIndex) in displayedProjects"
           :key="row.id"
           class="project-card"
-          :class="'project-card--' + statusTone(row.status)"
+          :class="['project-card--' + statusTone(row.status), { 'is-dragging': draggingProjectId === Number(row.id) }]"
           role="button"
           tabindex="0"
+          draggable="true"
           @click="enterProject(row)"
           @keyup.enter="enterProject(row)"
+          @dragstart="onProjectDragStart($event, row.id)"
+          @dragend="draggingProjectId = null"
+          @dragover.prevent
+          @drop.prevent="onProjectDrop(row.id)"
         >
           <div class="project-card__head">
             <div class="project-card__tags">
@@ -584,6 +647,24 @@ onMounted(async () => {
             <el-icon class="project-card__icon" :size="40"><FolderOpened /></el-icon>
           </div>
           <div class="project-card__actions" @click.stop>
+            <div class="project-order-actions" aria-label="调整项目顺序">
+              <el-button
+                text
+                class="icon-btn"
+                :disabled="projectIndex === 0"
+                aria-label="上移项目"
+                title="上移项目"
+                @click="moveProject(row.id, -1)"
+              >上移</el-button>
+              <el-button
+                text
+                class="icon-btn"
+                :disabled="projectIndex === displayedProjects.length - 1"
+                aria-label="下移项目"
+                title="下移项目"
+                @click="moveProject(row.id, 1)"
+              >下移</el-button>
+            </div>
             <el-button
               v-permission="'project:edit'"
               class="icon-btn"
@@ -1108,6 +1189,7 @@ onMounted(async () => {
 .project-card--slate .project-card__icon { color: #64748b; }
 
 .project-card:hover { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08); }
+.project-card.is-dragging { opacity: .52; box-shadow: none; }
 .project-card:focus-visible {
   outline: 2px solid var(--kk-primary);
   outline-offset: 2px;
@@ -1179,6 +1261,26 @@ onMounted(async () => {
   height: 32px;
   padding: 0;
   color: var(--kk-text-secondary);
+}
+
+.project-order-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 6px;
+  margin-right: 4px;
+  border-right: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.project-card__actions .project-order-actions .icon-btn {
+  width: auto;
+  min-width: 44px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-card { transition: none; }
 }
 
 .project-card__actions .icon-btn:hover {

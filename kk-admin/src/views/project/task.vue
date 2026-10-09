@@ -370,7 +370,7 @@ async function review(row: any, approved: boolean) {
 }
 
 onMounted(async () => {
-  projects.value = []
+  projects.value = await bizApi.myProjects().catch(() => [])
   shareCompanies.value = userStore.hasPermission('project:task:share')
     ? await companyTaskShareApi.options().catch(() => [])
     : []
@@ -483,11 +483,11 @@ onMounted(async () => {
     </div>
 
     <div class="task-workspace" :class="{ 'task-workspace--personal': !isTaskManager }">
-      <aside v-if="isTaskManager" class="page-card project-tree-panel">
+      <aside class="page-card project-tree-panel">
         <div class="project-tree-head">
           <div>
             <h3>项目导航</h3>
-            <p>选择项目查看对应任务</p>
+            <p>选择我参与的项目查看对应任务</p>
           </div>
           <span>{{ projects.filter((project) => !project.parentId && ![2, 3].includes(Number(project.status))).length }}</span>
         </div>
@@ -756,7 +756,7 @@ onMounted(async () => {
   align-items: stretch;
 }
 .stat-grid--personal { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-.task-workspace--personal { grid-template-columns: minmax(0, 1fr); }
+.task-workspace--personal { grid-template-columns: 260px minmax(0, 1fr); }
 .task-workspace-main {
   display: flex;
   flex-direction: column;
