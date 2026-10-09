@@ -824,6 +824,8 @@ public class WfApprovalServiceImpl extends ServiceImpl<WfApprovalMapper, WfAppro
         project.setStartDate(parsePayloadLocalDate(payload, "startDate"));
         project.setEndDate(parsePayloadLocalDate(payload, "endDate"));
         project.setActualEndDate(parsePayloadLocalDate(payload, "actualEndDate"));
+        project.setWebsiteUrl(payload.getStr("websiteUrl"));
+        project.setRepositoryUrl(payload.getStr("repositoryUrl"));
         // 创建人记申请人，而不是最后点通过的审批人
         project.setCreateBy(approval.getApplicantId());
         project.setUpdateBy(approval.getApplicantId());

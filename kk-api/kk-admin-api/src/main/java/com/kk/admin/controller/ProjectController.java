@@ -169,6 +169,8 @@ public class ProjectController {
         payload.put("startDate", project.getStartDate() == null ? null : project.getStartDate().toString());
         payload.put("endDate", project.getEndDate() == null ? null : project.getEndDate().toString());
         payload.put("actualEndDate", project.getActualEndDate() == null ? null : project.getActualEndDate().toString());
+        payload.put("websiteUrl", project.getWebsiteUrl());
+        payload.put("repositoryUrl", project.getRepositoryUrl());
         if (project.getMembers() != null) {
             payload.put("members", project.getMembers());
         }

@@ -9,6 +9,7 @@ import lombok.Data;
 import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
@@ -34,4 +35,10 @@ public class PmProjectMember extends BaseEntity {
 
     @TableField(exist = false)
     private String nickname;
+
+    @TableField(exist = false)
+    private Integer taskCount;
+
+    @TableField(exist = false)
+    private List<String> taskTitles;
 }

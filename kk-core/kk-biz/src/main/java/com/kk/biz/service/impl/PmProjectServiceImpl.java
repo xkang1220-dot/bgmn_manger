@@ -215,7 +215,7 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         assertCanView(project, StpUtil.getLoginIdAsLong());
         fillExtras(List.of(project));
         maskFinanceFields(project);
-        project.setMembers(loadMembers(id));
+        project.setMembers(loadMembersWithTasks(id));
         return project;
     }
 
@@ -817,6 +817,40 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
                 .eq(PmProjectMember::getProjectId, projectId)
                 .orderByAsc(PmProjectMember::getId));
         fillMembers(members);
+        return members;
+    }
+
+    private List<PmProjectMember> loadMembersWithTasks(Long projectId) {
+        List<PmProjectMember> members = loadMembers(projectId);
+        if (members.isEmpty()) {
+            return members;
+        }
+        List<PmTask> tasks = taskMapper.selectList(new LambdaQueryWrapper<PmTask>()
+                .eq(PmTask::getProjectId, projectId)
+                .select(PmTask::getId, PmTask::getTitle, PmTask::getAssigneeId));
+        Set<Long> taskIds = tasks.stream().map(PmTask::getId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<Long, Set<Long>> usersByTask = new HashMap<>();
+        for (PmTask task : tasks) {
+            Set<Long> users = usersByTask.computeIfAbsent(task.getId(), key -> new HashSet<>());
+            if (task.getAssigneeId() != null) users.add(task.getAssigneeId());
+        }
+        if (!taskIds.isEmpty()) {
+            for (PmTaskMember row : taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
+                    .in(PmTaskMember::getTaskId, taskIds))) {
+                if (row.getTaskId() != null && row.getUserId() != null) {
+                    usersByTask.computeIfAbsent(row.getTaskId(), key -> new HashSet<>()).add(row.getUserId());
+                }
+            }
+        }
+        for (PmProjectMember member : members) {
+            List<String> titles = tasks.stream()
+                    .filter(task -> usersByTask.getOrDefault(task.getId(), Set.of()).contains(member.getUserId()))
+                    .map(PmTask::getTitle)
+                    .filter(StringUtils::hasText)
+                    .toList();
+            member.setTaskTitles(titles);
+            member.setTaskCount(titles.size());
+        }
         return members;
     }
 

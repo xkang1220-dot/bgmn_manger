@@ -87,6 +87,7 @@ const shareCompanies = ref<CompanyTaskShareOption[]>([])
 type TaskViewMode = 'timeline' | 'details'
 const taskViewMode = ref<TaskViewMode>('details')
 const taskOrder = ref<Array<number | string>>([])
+const draggingTaskId = ref<number | string | null>(null)
 
 const taskOrderKey = computed(() => `bgmn:task-order:${userStore.user?.id || 'anonymous'}:${query.projectId || 'all'}`)
 const orderedList = computed(() => {
@@ -116,6 +117,28 @@ function moveTask(taskId: number | string, direction: -1 | 1) {
   const target = index + direction
   if (index < 0 || target < 0 || target >= ids.length) return
   ;[ids[index], ids[target]] = [ids[target], ids[index]]
+  taskOrder.value = ids
+  localStorage.setItem(taskOrderKey.value, JSON.stringify(ids))
+}
+
+function onTaskDragStart(event: DragEvent, taskId: number | string) {
+  draggingTaskId.value = taskId
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(taskId))
+  }
+}
+
+function onTaskDrop(targetId: number | string) {
+  const sourceId = draggingTaskId.value
+  draggingTaskId.value = null
+  if (sourceId == null || String(sourceId) === String(targetId)) return
+  const ids = orderedList.value.map((item) => item.id)
+  const sourceIndex = ids.findIndex((id) => String(id) === String(sourceId))
+  const targetIndex = ids.findIndex((id) => String(id) === String(targetId))
+  if (sourceIndex < 0 || targetIndex < 0) return
+  const [moved] = ids.splice(sourceIndex, 1)
+  ids.splice(targetIndex, 0, moved)
   taskOrder.value = ids
   localStorage.setItem(taskOrderKey.value, JSON.stringify(ids))
 }
@@ -597,6 +620,13 @@ onMounted(async () => {
         <div class="section-head task-section-head">
           <div><h3>{{ isTaskManager ? `${selectedProjectName} · 任务明细` : '我的任务明细' }}</h3><p>{{ isTaskManager ? '用于筛选、下钻和日常执行' : '仅包含我负责或直接参与的任务' }}</p></div>
         </div>
+        <nav class="delivery-tabs" aria-label="任务交付状态">
+          <button type="button" :class="{ 'is-active': query.status === 0 && !query.overdue }" @click="filterByStatus(0)">我的待办</button>
+          <button type="button" :class="{ 'is-active': query.status === 1 && !query.overdue }" @click="filterByStatus(1)">进行中</button>
+          <button type="button" :class="{ 'is-active': query.overdue }" @click="filterOverdue">已逾期</button>
+          <button type="button" :class="{ 'is-active': query.status === 4 && !query.overdue }" @click="filterByStatus(4)">待确认完成</button>
+          <button type="button" :class="{ 'is-active': query.status === 2 && !query.overdue }" @click="filterByStatus(2)">已完成</button>
+        </nav>
         <el-table v-loading="listLoading" :data="orderedList" row-key="id" stripe empty-text="暂无任务" class="task-table">
         <el-table-column label="顺序" width="92" align="center">
           <template #default="{ row, $index }">
@@ -608,9 +638,18 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="任务" min-width="320">
           <template #default="{ row }">
-            <div class="task-title-cell">
+            <div
+              class="task-title-cell"
+              :class="{ 'is-dragging': String(draggingTaskId) === String(row.id) }"
+              draggable="true"
+              @dragstart="onTaskDragStart($event, row.id)"
+              @dragend="draggingTaskId = null"
+              @dragover.prevent
+              @drop.prevent="onTaskDrop(row.id)"
+            >
               <div class="task-title-line">
                 <el-link type="primary" :underline="false" @click="open(row)">{{ row.title }}</el-link>
+                <el-tag v-if="row.parentTaskId" type="info" size="small" effect="plain">子任务</el-tag>
                 <el-tag v-if="row.overdue" type="danger" size="small" effect="light">逾期</el-tag>
                 <el-tag v-else-if="!row.dueDate && [0, 1].includes(row.status)" type="info" size="small" effect="plain">无日期</el-tag>
                 <el-tag :type="priorityType[row.priority] || 'info'" size="small" effect="plain">
@@ -786,6 +825,14 @@ onMounted(async () => {
 .task-order-actions button:hover:not(:disabled) { color: var(--kk-primary); border-color: var(--kk-primary); }
 .task-order-actions button:focus-visible { outline: 2px solid var(--kk-primary); outline-offset: 2px; }
 .task-order-actions button:disabled { opacity: .35; cursor: not-allowed; }
+.delivery-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.delivery-tabs button { min-height: 38px; padding: 0 14px; border: 1px solid var(--kk-border, #dcdfe6); border-radius: 9px; background: var(--kk-card-bg, #fff); color: var(--kk-text-secondary); font: inherit; cursor: pointer; }
+.delivery-tabs button:hover { border-color: var(--kk-primary); color: var(--kk-primary); }
+.delivery-tabs button.is-active { border-color: #18181b; background: #18181b; color: #fff; }
+.delivery-tabs button:focus-visible { outline: 2px solid var(--kk-primary); outline-offset: 2px; }
+.task-title-cell[draggable="true"] { cursor: grab; }
+.task-title-cell[draggable="true"]:active { cursor: grabbing; }
+.task-title-cell.is-dragging { opacity: .48; }
 .task-title-cell { min-width: 0; line-height: 1.4; }
 .task-title-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .task-title-line .el-link { min-width: 0; max-width: 250px; font-weight: 600; }

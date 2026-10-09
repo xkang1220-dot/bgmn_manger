@@ -236,6 +236,17 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         fillExtras(List.of(task));
         task.setContent(cleanTaskContent(task.getContent()));
         task.setImages(fileService.listByBiz(TASK_IMAGE_BIZ, id));
+        if (task.getParentTaskId() != null) {
+            PmTask parent = getById(task.getParentTaskId());
+            task.setParentTaskTitle(parent == null ? null : parent.getTitle());
+        }
+        List<PmTask> children = list(new LambdaQueryWrapper<PmTask>()
+                .eq(PmTask::getParentTaskId, id)
+                .orderByAsc(PmTask::getPriority)
+                .orderByAsc(PmTask::getDueDate)
+                .orderByAsc(PmTask::getId));
+        fillExtras(children);
+        task.setChildren(children);
         return task;
     }
 
@@ -714,6 +725,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (ProjectScales.isMajorShell(project)) {
             throw new BusinessException("重大项目外壳不可挂任务，请在小项目上创建");
         }
+        validateParentTask(task.getParentTaskId(), project.getId(), null);
         assertCanAccessProject(project);
         long loginId = StpUtil.getLoginIdAsLong();
         boolean taskManager = StpUtil.hasPermission("project:task:add");
@@ -770,6 +782,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (existing == null) {
             throw new BusinessException("任务不存在");
         }
+        Long requestedParentId = task.getParentTaskId() == null ? existing.getParentTaskId() : task.getParentTaskId();
+        validateParentTask(requestedParentId, existing.getProjectId(), existing.getId());
+        task.setParentTaskId(requestedParentId);
+        task.setProjectId(existing.getProjectId());
         assertCanAccessTask(existing);
         assertTaskNotClosed(existing);
         assertCanWriteTask(existing);
@@ -1123,11 +1139,38 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             throw new BusinessException("任务不存在");
         }
         assertCanAccessTask(task);
+        Long rootId = task.getParentTaskId() == null ? task.getId() : task.getParentTaskId();
+        List<PmTask> family = list(new LambdaQueryWrapper<PmTask>()
+                .and(w -> w.eq(PmTask::getId, rootId).or().eq(PmTask::getParentTaskId, rootId))
+                .select(PmTask::getId, PmTask::getProjectId, PmTask::getAssigneeId, PmTask::getTitle))
+                .stream().filter(this::canAccessTask).toList();
+        Set<Long> familyIds = family.stream().map(PmTask::getId).collect(Collectors.toSet());
+        Map<Long, String> taskTitles = family.stream().collect(Collectors.toMap(PmTask::getId, PmTask::getTitle));
         List<PmTaskFlow> list = flowMapper.selectList(new LambdaQueryWrapper<PmTaskFlow>()
-                .eq(PmTaskFlow::getTaskId, taskId)
+                .in(PmTaskFlow::getTaskId, familyIds)
                 .orderByDesc(PmTaskFlow::getId));
+        list.forEach(flow -> flow.setTaskTitle(taskTitles.get(flow.getTaskId())));
         fillFlows(list);
         return list;
+    }
+
+    private void validateParentTask(Long parentTaskId, Long projectId, Long currentTaskId) {
+        if (parentTaskId == null) {
+            return;
+        }
+        if (Objects.equals(parentTaskId, currentTaskId)) {
+            throw new BusinessException("任务不能设为自己的子任务");
+        }
+        PmTask parent = getById(parentTaskId);
+        if (parent == null) {
+            throw new BusinessException("父任务不存在");
+        }
+        if (!Objects.equals(parent.getProjectId(), projectId)) {
+            throw new BusinessException("子任务必须与父任务属于同一项目");
+        }
+        if (parent.getParentTaskId() != null) {
+            throw new BusinessException("当前仅支持一级子任务");
+        }
     }
 
     private void recordFlow(Long taskId, String action, Long fromUserId, Long toUserId,
@@ -1357,22 +1400,29 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
 
     /** 可读：任务管理员 / admin / 本人主责或参与 / 项目负责人。 */
     private void assertCanAccessTask(PmTask task) {
+        if (canAccessTask(task)) {
+            return;
+        }
+        throw new BusinessException("无权操作该任务");
+    }
+
+    private boolean canAccessTask(PmTask task) {
         long loginId = StpUtil.getLoginIdAsLong();
         if (dataScopeService.isGlobalAdmin(loginId)
                 || StpUtil.hasPermission("project:task:confirm")) {
-            return;
+            return true;
         }
         if (Objects.equals(task.getAssigneeId(), loginId)
                 || isTaskParticipant(task.getId(), loginId)) {
-            return;
+            return true;
         }
         if (task.getProjectId() != null) {
             PmProject project = projectMapper.selectById(task.getProjectId());
             if (project != null && Objects.equals(project.getOwnerId(), loginId)) {
-                return;
+                return true;
             }
         }
-        throw new BusinessException("无权操作该任务");
+        return false;
     }
 
     /** 可写：admin / 公司 control / 项目负责人 / 任务参与人（含创建人若在参与人中；创建人也放行） */
@@ -1544,6 +1594,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         Set<Long> projectIds = new HashSet<>();
         Set<Long> userIds = new HashSet<>();
+        Set<Long> parentTaskIds = new HashSet<>();
         List<Long> taskIds = new ArrayList<>(tasks.size());
         for (PmTask task : tasks) {
             taskIds.add(task.getId());
@@ -1551,6 +1602,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             if (task.getProjectId() != null) {
                 projectIds.add(task.getProjectId());
             }
+            if (task.getParentTaskId() != null) parentTaskIds.add(task.getParentTaskId());
         }
 
         Map<Long, List<PmTaskMember>> membersByTask = new HashMap<>();
@@ -1569,6 +1621,11 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         Map<Long, PmProject> projectMap = projectIds.isEmpty() ? Map.of()
                 : projectMapper.selectList(new LambdaQueryWrapper<PmProject>().in(PmProject::getId, projectIds)).stream()
                 .collect(Collectors.toMap(PmProject::getId, p -> p, (a, b) -> a));
+        Map<Long, String> parentTaskTitles = parentTaskIds.isEmpty() ? Map.of()
+                : list(new LambdaQueryWrapper<PmTask>()
+                        .in(PmTask::getId, parentTaskIds)
+                        .select(PmTask::getId, PmTask::getTitle)).stream()
+                .collect(Collectors.toMap(PmTask::getId, PmTask::getTitle, (a, b) -> a));
         Map<Long, SysUser> userMap = loadUserMap(userIds);
         long loginId = StpUtil.getLoginIdAsLong();
         HrArchive loginArchive = archiveMapper.selectOne(new LambdaQueryWrapper<HrArchive>()
@@ -1584,6 +1641,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             if (project != null) {
                 task.setProjectName(project.getName());
             }
+            task.setParentTaskTitle(task.getParentTaskId() == null
+                    ? null
+                    : parentTaskTitles.get(task.getParentTaskId()));
             SysUser owner = userMap.get(task.getAssigneeId());
             task.setAssigneeName(owner == null ? null : userName(owner));
             task.setCanEdit(canWriteTask(task, project));

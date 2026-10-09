@@ -978,6 +978,9 @@ onMounted(async () => {
                     <div>
                       <b>{{ member.nickname || member.userName || member.userId }}</b>
                       <span>{{ member.layer || member.responsibility || '项目成员' }}</span>
+                      <small>
+                        参与 {{ member.taskCount || 0 }} 项任务<span v-if="member.taskTitles?.length"> · {{ member.taskTitles.slice(0, 3).join('、') }}{{ member.taskTitles.length > 3 ? ' 等' : '' }}</span>
+                      </small>
                     </div>
                   </div>
                 </div>
@@ -1768,6 +1771,7 @@ onMounted(async () => {
 .member-responsibility-card div > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .member-responsibility-card b { font-size: 13px; color: var(--kk-text); }
 .member-responsibility-card div > span { margin-top: 3px; font-size: 12px; color: var(--kk-text-muted); }
+.member-responsibility-card small { display: -webkit-box; overflow: hidden; margin-top: 4px; color: var(--kk-text-secondary); font-size: 11px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 
 .desc-text {
   white-space: pre-wrap;

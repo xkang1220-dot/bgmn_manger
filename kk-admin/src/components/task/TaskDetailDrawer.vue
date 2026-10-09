@@ -71,12 +71,14 @@ const transferForm = reactive({
 const transferImages = ref<any[]>([])
 const transferUploading = ref(false)
 const detailPane = ref('comments')
+const subtaskParentTitle = ref('')
 const pendingAction = ref<'view' | 'edit' | 'transfer' | 'close'>('view')
 
 const form = reactive<any>({
   id: undefined,
   title: '',
   projectId: undefined,
+  parentTaskId: undefined,
   assigneeId: undefined,
   participantIds: [] as number[],
   status: 0,
@@ -105,6 +107,7 @@ function emptyForm() {
     id: undefined,
     title: '',
     projectId: props.defaultProjectId != null ? Number(props.defaultProjectId) : undefined,
+    parentTaskId: undefined,
     assigneeId: selfId,
     participantIds: selfId != null ? [selfId] : ([] as number[]),
     status: 0,
@@ -208,6 +211,7 @@ async function loadDetail(id: number) {
 }
 
 async function openCreate() {
+  subtaskParentTitle.value = ''
   detail.value = null
   Object.assign(form, emptyForm())
   imageFileList.value = []
@@ -321,6 +325,25 @@ async function ensureOptions() {
   await loadProjectCandidates(form.projectId)
 }
 
+async function startSubtask() {
+  if (!detail.value?.id) return
+  const parent = detail.value.parentTaskId
+    ? { id: detail.value.parentTaskId, title: detail.value.parentTaskTitle, projectId: detail.value.projectId }
+    : detail.value
+  Object.assign(form, emptyForm(), {
+    projectId: parent.projectId,
+    parentTaskId: parent.id,
+  })
+  subtaskParentTitle.value = parent.title || `任务 ${parent.id}`
+  detail.value = null
+  comments.value = []
+  flows.value = []
+  imageFileList.value = []
+  editing.value = true
+  isNew.value = true
+  await loadProjectCandidates(parent.projectId)
+}
+
 watch(
   () => form.projectId,
   async (pid) => {
@@ -401,6 +424,8 @@ async function save() {
     delete payload.canEdit
     delete payload.participantNames
     delete payload.projectName
+    delete payload.parentTaskTitle
+    delete payload.children
     delete payload.overdue
     delete payload.images
     if (!isTaskManager.value) delete payload.taskReward
@@ -692,6 +717,7 @@ function commentAttachmentUrl(file: any, preview = false) {
 
         <el-descriptions :column="1" border class="detail-desc">
           <el-descriptions-item label="项目">{{ detail.projectName || '—' }}</el-descriptions-item>
+          <el-descriptions-item v-if="detail.parentTaskId" label="父任务">{{ detail.parentTaskTitle || `任务 ${detail.parentTaskId}` }}</el-descriptions-item>
           <el-descriptions-item label="负责人">{{ detail.assigneeName || '未指定' }}</el-descriptions-item>
           <el-descriptions-item label="参与人员">
             {{ detail.participantNames?.length ? detail.participantNames.join('、') : '无' }}
@@ -710,6 +736,20 @@ function commentAttachmentUrl(file: any, preview = false) {
             <div v-else class="content-text content-text--empty">暂无描述</div>
           </el-descriptions-item>
         </el-descriptions>
+
+        <div v-if="detail.children?.length" class="section child-task-section">
+          <div class="section-title">子任务（{{ detail.children.length }}）</div>
+          <button
+            v-for="child in detail.children"
+            :key="child.id"
+            type="button"
+            class="child-task-row"
+            @click="loadDetail(Number(child.id))"
+          >
+            <span><b>{{ child.title }}</b><small>{{ child.assigneeName || '未指定负责人' }} · 截止 {{ child.dueDate || '未设' }}</small></span>
+            <el-tag :type="statusType[child.status]" size="small">{{ statusMap[child.status] }}</el-tag>
+          </button>
+        </div>
 
         <div v-if="detail.images?.length" class="section">
           <div class="section-title">附件</div>
@@ -734,6 +774,7 @@ function commentAttachmentUrl(file: any, preview = false) {
         </div>
 
         <div class="detail-actions">
+          <el-button v-if="!detail.parentTaskId && detail.status !== 3" plain type="primary" @click="startSubtask">新建子任务</el-button>
           <template v-if="userStore.hasPermission('project:task:confirm') && detail.status === 4">
             <el-button type="success" :loading="reviewing" @click="reviewCompletion(true)">确认完成</el-button>
             <el-button type="danger" plain :disabled="reviewing" @click="reviewCompletion(false)">驳回</el-button>
@@ -797,6 +838,7 @@ function commentAttachmentUrl(file: any, preview = false) {
                       <time class="flow-time" :datetime="f.createTime">{{ fmtTime(f.createTime) }}</time>
                     </header>
                     <div class="flow-summary">{{ f.summary }}</div>
+                    <div v-if="f.taskTitle && f.taskId !== detail.id" class="flow-task-name">关联任务：{{ f.taskTitle }}</div>
                     <div v-if="f.remark" class="flow-remark">
                       <span class="flow-remark-label">说明</span>
                       <span>{{ f.remark }}</span>
@@ -826,6 +868,10 @@ function commentAttachmentUrl(file: any, preview = false) {
             </div>
             <el-form-item label="任务标题" required class="title-field">
               <el-input v-model="form.title" size="large" placeholder="例如：完成十月运营数据复盘" maxlength="128" show-word-limit />
+            </el-form-item>
+            <el-form-item v-if="form.parentTaskId" label="父任务">
+              <el-input :model-value="subtaskParentTitle" disabled />
+              <span class="field-help">子任务会继承父任务所属项目，并与父任务共享完整流转时间线。</span>
             </el-form-item>
             <el-form-item label="所属项目" required>
               <ProjectCascadeSelect
@@ -1617,6 +1663,15 @@ function commentAttachmentUrl(file: any, preview = false) {
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
+
+.flow-task-name { margin-top: 6px; color: var(--kk-text-muted); font-size: 12px; }
+.child-task-section { display: grid; gap: 8px; }
+.child-task-row { width: 100%; min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border: 1px solid var(--kk-border, #e5e7eb); border-radius: 9px; background: var(--kk-card-bg, #fff); color: inherit; text-align: left; cursor: pointer; }
+.child-task-row:hover { border-color: var(--kk-primary); background: var(--kk-fill); }
+.child-task-row:focus-visible { outline: 2px solid var(--kk-primary); outline-offset: 2px; }
+.child-task-row span { min-width: 0; display: grid; gap: 3px; }
+.child-task-row b,.child-task-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.child-task-row small { color: var(--kk-text-muted); font-size: 12px; font-weight: 400; }
 
 .flow-remark {
   display: flex;

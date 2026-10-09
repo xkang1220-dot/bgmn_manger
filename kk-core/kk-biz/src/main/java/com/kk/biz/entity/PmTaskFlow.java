@@ -20,6 +20,10 @@ public class PmTaskFlow extends BaseEntity {
 
     private Long taskId;
 
+    /** 父子任务统一时间线中的任务标题。 */
+    @TableField(exist = false)
+    private String taskTitle;
+
     /** CREATE / ASSIGN / STATUS / TRANSFER */
     private String action;
 

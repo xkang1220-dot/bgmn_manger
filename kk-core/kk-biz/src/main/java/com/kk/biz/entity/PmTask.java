@@ -27,6 +27,9 @@ public class PmTask extends BaseEntity {
 
     private Long projectId;
 
+    /** 父任务 ID；为空表示项目内的顶层任务。 */
+    private Long parentTaskId;
+
     private String title;
 
     private String content;
@@ -55,6 +58,12 @@ public class PmTask extends BaseEntity {
 
     /** NORMAL / WARNING / DANGER */
     private String riskLevel;
+
+    @TableField(exist = false)
+    private String parentTaskTitle;
+
+    @TableField(exist = false)
+    private List<PmTask> children;
 
     @TableField(exist = false)
     private String projectName;

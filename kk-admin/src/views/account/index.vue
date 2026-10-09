@@ -7,7 +7,6 @@ import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
 import { approvalFlowTip } from '@/utils/approvalTip'
 import { useUserStore } from '@/stores/user'
-import WalletBoardCharts from '@/components/wallet/WalletBoardCharts.vue'
 import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 
 const router = useRouter()
@@ -22,6 +21,7 @@ const companies = ref<any[]>([])
 const projects = ref<any[]>([])
 const walletBoard = ref<any>(null)
 const boardPeriod = ref<'daily' | 'monthly'>('daily')
+const accountTab = ref<'workbench' | 'ledger'>('workbench')
 const freezeDrawer = ref(false)
 const ledgerQuery = reactive({
   page: 1,
@@ -546,11 +546,6 @@ async function openFreezeDetail() {
 function openFreezeItem(row: any) {
   freezeDrawer.value = false
   if (row?.link) router.push(row.link)
-}
-
-async function onBoardPeriod(period: 'daily' | 'monthly') {
-  boardPeriod.value = period
-  await loadBoard()
 }
 
 async function loadLedger() {
@@ -1168,7 +1163,7 @@ onMounted(async () => {
 
   loading.value = true
   try {
-    const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadPanelTasks(true), loadProjects(), loadLeaves()]
+    const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadProjects(), loadLeaves()]
     if (canViewLeave.value && !canSeeWallet.value) {
       jobs.push(sysApi.myCompanies().then((rows) => { companies.value = rows || [] }).catch(() => { companies.value = [] }))
     }
@@ -1193,7 +1188,6 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
-  bindPanelListObserver()
 })
 
 watch(taskPanelTab, () => {
@@ -1246,9 +1240,25 @@ onUnmounted(() => {
     <section class="page-card hub-panel">
       <div class="sec-head hub-panel__head">
         <div>
-          <h3>工作台</h3>
+          <div class="hub-panel__tabs" role="tablist" aria-label="个人中心内容">
+            <button
+              type="button"
+              role="tab"
+              :aria-selected="accountTab === 'workbench'"
+              :class="{ 'is-active': accountTab === 'workbench' }"
+              @click="accountTab = 'workbench'"
+            >工作台</button>
+            <button
+              v-if="canSeeWallet"
+              type="button"
+              role="tab"
+              :aria-selected="accountTab === 'ledger'"
+              :class="{ 'is-active': accountTab === 'ledger' }"
+              @click="accountTab = 'ledger'"
+            >流水明细</button>
+          </div>
         </div>
-        <div class="hub-panel__shortcuts">
+        <div v-show="accountTab === 'workbench'" class="hub-panel__shortcuts">
           <div class="hub-panel__group">
             <span class="hub-panel__group-label">业务</span>
             <div class="hub-panel__actions">
@@ -1299,7 +1309,7 @@ onUnmounted(() => {
       </div>
 
       <template v-if="canSeeWallet">
-        <div v-if="walletBoard" class="hub-panel__board">
+        <div v-show="accountTab === 'workbench'" v-if="walletBoard" class="hub-panel__board">
           <div class="hub-panel__metrics">
             <div class="hub-metric hub-metric--indigo">
               <div class="hub-metric__body">
@@ -1352,21 +1362,9 @@ onUnmounted(() => {
               <el-icon class="hub-metric__glyph" :size="40"><Warning /></el-icon>
             </div>
           </div>
-          <div class="hub-panel__charts">
-            <WalletBoardCharts
-              :period="boardPeriod"
-              :balance="walletBoard.balance"
-              :frozen="walletBoard.frozen"
-              :available="walletBoard.available"
-              :trend="walletBoard.trend"
-              :source-breakdown="walletBoard.sourceBreakdown"
-              :biz-label="bizLabel"
-              @update:period="onBoardPeriod"
-            />
-          </div>
         </div>
 
-        <div class="hub-panel__ledger-block">
+        <div v-show="accountTab === 'ledger'" class="hub-panel__ledger-block">
           <div class="hub-panel__ledger-head">
             <h4>流水明细</h4>
             <p>按时间、金额或摘要核对到账与扣款</p>
@@ -1500,7 +1498,7 @@ onUnmounted(() => {
     </section>
 
     <div class="task-cal-row">
-      <div class="task-panel-slot">
+      <div v-if="false" class="task-panel-slot" aria-hidden="true">
       <section class="page-card task-panel">
         <div class="sec-head">
           <div>
@@ -2041,6 +2039,39 @@ onUnmounted(() => {
   min-width: 0;
 }
 
+.hub-panel__tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--kk-card-border);
+  border-radius: 10px;
+  background: var(--kk-fill);
+}
+
+.hub-panel__tabs button {
+  min-height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--kk-text-secondary);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.hub-panel__tabs button.is-active {
+  background: var(--kk-card-bg);
+  color: var(--kk-text);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, .08);
+}
+
+.hub-panel__tabs button:focus-visible {
+  outline: 2px solid var(--kk-primary);
+  outline-offset: 2px;
+}
+
 .hub-panel__group {
   display: flex;
   align-items: center;
@@ -2326,7 +2357,7 @@ onUnmounted(() => {
 
 .task-cal-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
 }
