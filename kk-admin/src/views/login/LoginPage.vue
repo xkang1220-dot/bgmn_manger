@@ -102,7 +102,15 @@ async function onLogin() {
       totpCode: totpRequired.value ? totpCode.value : undefined,
     })
     ElMessage.success('登录成功')
-    await router.push('/account')
+    try {
+      await router.push('/account')
+    } catch (navigationError) {
+      // A deployment can replace hashed lazy chunks while an older login page
+      // is still open. Reload against the latest index instead of leaving the
+      // user on a successfully authenticated login screen.
+      console.warn('登录后路由跳转失败，正在刷新页面', navigationError)
+      window.location.replace('/account')
+    }
   } catch {
     if (totpRequired.value) {
       resetTotpInput()

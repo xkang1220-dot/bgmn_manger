@@ -39,13 +39,12 @@ const isTaskManager = computed(() => userStore.hasPermission('project:task:add')
 const projects = ref<any[]>([])
 const creatableProjects = computed(() => {
   if (!isNew.value) return projects.value
-  const selfId = Number(userStore.user?.id)
-  const taskManager = userStore.hasPermission('project:task:add')
+  // /project/task-options 已按“负责人或参与人”收敛了可创建任务的项目。
+  // 前端只排除不能直接挂任务的重大项目外壳，避免把参与人可用的小项目
+  // 再次过滤掉，导致默认选中值只能显示为项目 ID。
   return projects.value.filter((project) => {
     const scale = String(project.scale || 'NORMAL').toUpperCase()
-    if (scale === 'MAJOR' && !project.parentId) return false
-    if (scale === 'NORMAL') return true
-    return taskManager || Number(project.ownerId) === selfId
+    return !(scale === 'MAJOR' && !project.parentId)
   })
 })
 const candidateUsers = ref<any[]>([])
@@ -176,7 +175,7 @@ async function loadDetail(id: number) {
   syncingDetail.value = true
   try {
     if (!projects.value.length) {
-      projects.value = (await bizApi.projectList()) || []
+      projects.value = (await bizApi.taskManagementProjects()) || []
     }
     const [full, commentList, flowList] = await Promise.all([
       bizApi.taskDetail(id),
@@ -318,7 +317,7 @@ function upsertProjectOption(d: any) {
 
 async function ensureOptions() {
   // 每次打开都刷新，避免新建项目后抽屉仍用旧列表导致默认项目空白
-  projects.value = (await bizApi.projectList()) || []
+  projects.value = (await bizApi.taskManagementProjects()) || []
   await loadProjectCandidates(form.projectId)
 }
 
