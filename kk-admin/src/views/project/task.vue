@@ -89,7 +89,6 @@ const taskViewMode = ref<TaskViewMode>('details')
 const taskOrder = ref<Array<number | string>>([])
 const draggingTaskId = ref<number | string | null>(null)
 
-const taskOrderKey = computed(() => `bgmn:task-order:${userStore.user?.id || 'anonymous'}:${query.projectId || 'all'}`)
 const orderedList = computed(() => {
   const ranks = new Map(taskOrder.value.map((id, index) => [String(id), index]))
   return [...list.value].sort((a, b) => {
@@ -102,9 +101,9 @@ const orderedList = computed(() => {
   })
 })
 
-function loadTaskOrder() {
+async function loadTaskOrder() {
   try {
-    const value = JSON.parse(localStorage.getItem(taskOrderKey.value) || '[]')
+    const value = await bizApi.taskOrder(query.projectId)
     taskOrder.value = Array.isArray(value) ? value : []
   } catch {
     taskOrder.value = []
@@ -118,7 +117,7 @@ function moveTask(taskId: number | string, direction: -1 | 1) {
   if (index < 0 || target < 0 || target >= ids.length) return
   ;[ids[index], ids[target]] = [ids[target], ids[index]]
   taskOrder.value = ids
-  localStorage.setItem(taskOrderKey.value, JSON.stringify(ids))
+  void bizApi.saveTaskOrder(query.projectId, ids).catch(() => ElMessage.error('任务排序保存失败，请稍后重试'))
 }
 
 function onTaskDragStart(event: DragEvent, taskId: number | string) {
@@ -140,7 +139,7 @@ function onTaskDrop(targetId: number | string) {
   const [moved] = ids.splice(sourceIndex, 1)
   ids.splice(targetIndex, 0, moved)
   taskOrder.value = ids
-  localStorage.setItem(taskOrderKey.value, JSON.stringify(ids))
+  void bizApi.saveTaskOrder(query.projectId, ids).catch(() => ElMessage.error('任务排序保存失败，请稍后重试'))
 }
 
 function taskContentPreview(content?: string) {
@@ -303,11 +302,11 @@ const healthMap: Record<string, { label: string; type: 'danger' | 'warning' | 's
   HEALTHY: { label: '健康', type: 'success' },
 }
 
-function selectProject(projectId?: number) {
+async function selectProject(projectId?: number) {
   query.projectId = projectId
   query.page = 1
-  loadTaskOrder()
-  load()
+  await loadTaskOrder()
+  await load()
 }
 
 function onProjectNodeClick(node: ProjectTreeNode) {
@@ -436,7 +435,7 @@ onMounted(async () => {
     const num = Number(pid)
     if (!Number.isNaN(num)) query.projectId = num
   }
-  loadTaskOrder()
+  await loadTaskOrder()
   await load()
   const tid = route.query.taskId
   if (tid) {
