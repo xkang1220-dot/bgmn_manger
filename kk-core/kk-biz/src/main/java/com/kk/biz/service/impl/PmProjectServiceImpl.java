@@ -557,6 +557,12 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
             case "MEMBER" -> "变更成员";
             case "STATUS" -> "变更状态";
             case "SCALE" -> "变更规模";
+            case "TASK_CREATE" -> "新建任务";
+            case "TASK_UPDATE" -> "修改任务";
+            case "TASK_COMPLETE" -> "完成任务";
+            case "RESOURCE_CREATE" -> "新增项目资料";
+            case "RESOURCE_UPDATE" -> "编辑项目资料";
+            case "RESOURCE_DELETE" -> "删除项目资料";
             default -> action;
         };
     }

@@ -18,7 +18,7 @@ public class PmProjectFlow extends BaseEntity {
 
     private Long projectId;
 
-    /** CREATE / UPDATE / DELETE / MEMBER / STATUS / SCALE */
+    /** 项目、任务及项目资料相关的审计动作 */
     private String action;
 
     private String fromValue;

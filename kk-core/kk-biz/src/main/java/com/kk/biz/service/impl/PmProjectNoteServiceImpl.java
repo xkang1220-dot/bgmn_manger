@@ -74,6 +74,9 @@ public class PmProjectNoteServiceImpl implements PmProjectNoteService {
         note.setContent(safeHtml);
         noteMapper.insert(note);
         bindAttachments(fileIds, note.getId());
+        String summary = StringUtils.hasText(plainText) ? plainText : "附件资料";
+        projectService.recordFlow(projectId, "RESOURCE_CREATE", null, null, null,
+                "新增项目资料备注：" + (summary.length() > 80 ? summary.substring(0, 79) + "…" : summary));
         fillAuthors(List.of(note));
         fillAttachments(List.of(note));
         return note;

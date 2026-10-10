@@ -13,31 +13,17 @@ import { bizApi } from '@/api/biz'
 import RichTextEditor from '@/components/common/RichTextEditor.vue'
 
 interface LinkItem {
-  id: string
+  id: number
   title: string
   url: string
   remark?: string
 }
 
-interface LocalFileItem {
-  id: string
-  name: string
-  size: number
-  createTime: string
-  objectUrl?: string
-  dataUrl?: string
-  mimeType?: string
-}
-
-const MAX_LOCAL_DATA_URL_BYTES = 2 * 1024 * 1024
-
 interface ResourceStore {
   repos: LinkItem[]
   websites: LinkItem[]
-  files: LocalFileItem[]
-  hiddenFileIds: number[]
-  descriptionDraft?: string
-  seeded?: boolean
+  files: any[]
+  taskFiles: any[]
 }
 
 type FileRow = {
@@ -45,7 +31,7 @@ type FileRow = {
   id: string | number
   name: string
   format: string
-  source: 'note' | 'local'
+  source: 'note' | 'resource' | 'task'
   sourceLabel: string
   authorName: string
   createTime: string
@@ -53,6 +39,8 @@ type FileRow = {
   href?: string
   previewHref?: string
   noteId?: number
+  taskId?: number
+  taskTitle?: string
 }
 
 const props = defineProps<{
@@ -81,8 +69,7 @@ const store = reactive<ResourceStore>({
   repos: [],
   websites: [],
   files: [],
-  hiddenFileIds: [],
-  seeded: false,
+  taskFiles: [],
 })
 
 const fileKeyword = ref('')
@@ -91,12 +78,8 @@ const fileSort = ref<'desc' | 'asc'>('desc')
 
 const linkDialog = ref(false)
 const linkKind = ref<'repos' | 'websites'>('repos')
-const linkEditingId = ref<string | null>(null)
+const linkEditingId = ref<number | null>(null)
 const linkForm = reactive({ title: '', url: '', remark: '' })
-
-function storageKey(projectId: number) {
-  return `bgmn:project-resources:${projectId}`
-}
 
 function fmtTime(t?: string) {
   if (!t) return ''
@@ -130,93 +113,15 @@ function isHttpUrl(url: string) {
   }
 }
 
-function uid(prefix: string) {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-}
-
-function readStore(projectId: number): ResourceStore {
-  try {
-    const raw = JSON.parse(localStorage.getItem(storageKey(projectId)) || 'null')
-    if (!raw || typeof raw !== 'object') {
-      return { repos: [], websites: [], files: [], hiddenFileIds: [], seeded: false }
-    }
-    return {
-      repos: Array.isArray(raw.repos) ? raw.repos : [],
-      websites: Array.isArray(raw.websites) ? raw.websites : [],
-      files: Array.isArray(raw.files) ? raw.files : [],
-      hiddenFileIds: Array.isArray(raw.hiddenFileIds) ? raw.hiddenFileIds.map(Number) : [],
-      descriptionDraft: typeof raw.descriptionDraft === 'string' ? raw.descriptionDraft : undefined,
-      seeded: !!raw.seeded,
-    }
-  } catch {
-    return { repos: [], websites: [], files: [], hiddenFileIds: [], seeded: false }
-  }
-}
-
-function persistStore() {
-  if (!props.projectId) return
-  const payload: ResourceStore = {
-    repos: store.repos,
-    websites: store.websites,
-    files: store.files.map(({ id, name, size, createTime, mimeType, dataUrl }) => ({
-      id, name, size, createTime, mimeType, dataUrl,
-    })),
-    hiddenFileIds: store.hiddenFileIds,
-    descriptionDraft: store.descriptionDraft,
-    seeded: store.seeded,
-  }
-  localStorage.setItem(storageKey(props.projectId), JSON.stringify(payload))
-}
-
-function readFileAsDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(reader.error || new Error('读取文件失败'))
-    reader.readAsDataURL(file)
-  })
-}
-
-function applyStore(data: ResourceStore) {
-  store.repos = data.repos
-  store.websites = data.websites
-  store.files = data.files
-  store.hiddenFileIds = data.hiddenFileIds
-  store.descriptionDraft = data.descriptionDraft
-  store.seeded = data.seeded
-}
-
-function seedLinksFromProps() {
-  if (store.seeded) return
-  if (!store.repos.length && props.repositoryUrl?.trim()) {
-    store.repos = [{
-      id: uid('repo'),
-      title: '代码仓库',
-      url: props.repositoryUrl.trim(),
-      remark: '',
-    }]
-  }
-  if (!store.websites.length && props.websiteUrl?.trim()) {
-    store.websites = [{
-      id: uid('web'),
-      title: '项目网站',
-      url: props.websiteUrl.trim(),
-      remark: '',
-    }]
-  }
-  store.seeded = true
-  persistStore()
-}
-
 function plainText(html?: string) {
   return String(html || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim()
 }
 
-const displayDescription = computed(() => store.descriptionDraft ?? props.description ?? '')
+const displayDescription = computed(() => props.description ?? '')
 const hasDescription = computed(() => !!plainText(displayDescription.value))
 
 function syncDescription() {
-  descriptionText.value = store.descriptionDraft ?? props.description ?? ''
+  descriptionText.value = props.description ?? ''
 }
 
 function openDescEditor() {
@@ -230,11 +135,9 @@ function cancelDescEditor() {
 }
 
 const fileRows = computed<FileRow[]>(() => {
-  const hidden = new Set(store.hiddenFileIds)
   const fromNotes: FileRow[] = []
   for (const note of notes.value) {
     for (const file of note.attachments || []) {
-      if (hidden.has(Number(file.id))) continue
       const name = file.originalName || `附件 ${file.id}`
       fromNotes.push({
         key: `note-${file.id}`,
@@ -252,23 +155,41 @@ const fileRows = computed<FileRow[]>(() => {
       })
     }
   }
-  const fromLocal: FileRow[] = store.files.map((file) => {
-    const href = file.objectUrl || file.dataUrl
+  const fromResources: FileRow[] = store.files.map((file) => {
+    const href = attachmentUrl(file)
     return {
-      key: `local-${file.id}`,
+      key: `resource-${file.id}`,
       id: file.id,
-      name: file.name,
-      format: fileFormat(file.name),
-      source: 'local' as const,
-      sourceLabel: '本地演示',
-      authorName: '本机',
+      name: file.originalName,
+      format: fileFormat(file.originalName),
+      source: 'resource' as const,
+      sourceLabel: '项目文件',
+      authorName: file.uploaderName || '用户',
       createTime: file.createTime,
       size: file.size,
       href,
-      previewHref: href,
+      previewHref: attachmentUrl(file, true),
     }
   })
-  return [...fromNotes, ...fromLocal]
+  const fromTasks: FileRow[] = store.taskFiles.map((file) => {
+    const name = file.originalName || `附件 ${file.id}`
+    return {
+      key: `task-${file.id}`,
+      id: file.id,
+      name,
+      format: fileFormat(name),
+      source: 'task' as const,
+      sourceLabel: file.sourceLabel || '任务附件',
+      authorName: file.uploaderName || '用户',
+      createTime: file.createTime,
+      size: file.size,
+      href: attachmentUrl(file),
+      previewHref: attachmentUrl(file, true),
+      taskId: file.taskId,
+      taskTitle: file.taskTitle,
+    }
+  })
+  return [...fromNotes, ...fromResources, ...fromTasks]
 })
 
 const filteredFiles = computed(() => {
@@ -280,7 +201,8 @@ const filteredFiles = computed(() => {
     if (keyword && !row.name.toLowerCase().includes(keyword)
       && !row.format.toLowerCase().includes(keyword)
       && !row.authorName.toLowerCase().includes(keyword)
-      && !row.sourceLabel.toLowerCase().includes(keyword)) {
+      && !row.sourceLabel.toLowerCase().includes(keyword)
+      && !String(row.taskTitle || '').toLowerCase().includes(keyword)) {
       return false
     }
     if (fromTs != null || toTs != null) {
@@ -310,16 +232,18 @@ async function loadNotes() {
   if (!props.projectId) return
   loading.value = true
   try {
-    notes.value = (await bizApi.projectNotes(props.projectId)) || []
+    const [noteRows, resources] = await Promise.all([
+      bizApi.projectNotes(props.projectId),
+      bizApi.projectResources(props.projectId),
+    ])
+    notes.value = noteRows || []
+    store.repos = resources?.repositories || []
+    store.websites = resources?.websites || []
+    store.files = resources?.files || []
+    store.taskFiles = resources?.taskFiles || []
   } finally {
     loading.value = false
   }
-}
-
-function loadResources() {
-  applyStore(readStore(props.projectId))
-  seedLinksFromProps()
-  syncDescription()
 }
 
 async function saveDescription() {
@@ -327,10 +251,7 @@ async function saveDescription() {
   savingDesc.value = true
   try {
     emit('save-description', value)
-    store.descriptionDraft = value
-    persistStore()
     editingDesc.value = false
-    ElMessage.success('项目说明已保存（接口不全时已同步到本地）')
   } finally {
     savingDesc.value = false
   }
@@ -355,7 +276,7 @@ function openLinkDialog(kind: 'repos' | 'websites', item?: LinkItem) {
   linkDialog.value = true
 }
 
-function saveLink() {
+async function saveLink() {
   const title = linkForm.title.trim()
   const url = linkForm.url.trim()
   const remark = linkForm.remark.trim()
@@ -367,30 +288,24 @@ function saveLink() {
     ElMessage.warning('请填写有效的 http(s) 地址')
     return
   }
-  const list = store[linkKind.value]
-  if (linkEditingId.value) {
-    const target = list.find((item) => item.id === linkEditingId.value)
-    if (target) {
-      target.title = title
-      target.url = url
-      target.remark = remark
-    }
-  } else {
-    list.push({ id: uid(linkKind.value === 'repos' ? 'repo' : 'web'), title, url, remark })
-  }
-  persistStore()
+  await bizApi.saveProjectLink(props.projectId, {
+    id: linkEditingId.value,
+    type: linkKind.value === 'repos' ? 'REPOSITORY' : 'WEBSITE',
+    title, url, remark,
+  })
+  await loadNotes()
   linkDialog.value = false
-  ElMessage.success('已保存到本地演示数据')
+  ElMessage.success('链接已保存')
 }
 
-async function removeLink(kind: 'repos' | 'websites', id: string) {
+async function removeLink(_kind: 'repos' | 'websites', id: number) {
   try {
     await ElMessageBox.confirm('确认删除该链接？', '提示', { type: 'warning' })
   } catch {
     return
   }
-  store[kind] = store[kind].filter((item) => item.id !== id)
-  persistStore()
+  await bizApi.deleteProjectLink(props.projectId, id)
+  await loadNotes()
 }
 
 function openUrl(url: string) {
@@ -404,25 +319,10 @@ async function uploadLocalFile(options: any) {
     return
   }
   try {
-    const item: LocalFileItem = {
-      id: uid('file'),
-      name: file.name,
-      size: file.size,
-      createTime: new Date().toISOString().slice(0, 19).replace('T', ' '),
-      objectUrl: URL.createObjectURL(file),
-      mimeType: file.type,
-    }
-    if (file.size <= MAX_LOCAL_DATA_URL_BYTES) {
-      item.dataUrl = await readFileAsDataUrl(file)
-    }
+    const item = await bizApi.uploadProjectResource(props.projectId, file)
     store.files.unshift(item)
-    persistStore()
     options.onSuccess?.(item)
-    ElMessage.success(
-      file.size <= MAX_LOCAL_DATA_URL_BYTES
-        ? '已添加到本地文件库（演示）'
-        : '已添加（超过 2MB，刷新后仅保留文件名，需重新上传才能打开）',
-    )
+    ElMessage.success('文件已上传')
   } catch (e: any) {
     options.onError?.(e)
   }
@@ -431,25 +331,17 @@ async function uploadLocalFile(options: any) {
 async function removeFile(row: FileRow) {
   try {
     await ElMessageBox.confirm(
-      row.source === 'note'
-        ? '后端暂不支持删除已绑定附件，将在本机隐藏该文件。'
-        : '确认从本地文件库删除？',
+      row.source === 'note' ? '备注附件需在备注中管理。' : '确认删除该项目文件？',
       '提示',
       { type: 'warning' },
     )
   } catch {
     return
   }
-  if (row.source === 'local') {
-    const target = store.files.find((item) => item.id === row.id)
-    if (target?.objectUrl) URL.revokeObjectURL(target.objectUrl)
-    store.files = store.files.filter((item) => item.id !== row.id)
-  } else {
-    const id = Number(row.id)
-    if (!store.hiddenFileIds.includes(id)) store.hiddenFileIds.push(id)
-  }
-  persistStore()
-  ElMessage.success('已更新')
+  if (row.source === 'note') return
+  await bizApi.deleteProjectResource(props.projectId, Number(row.id))
+  store.files = store.files.filter((item) => Number(item.id) !== Number(row.id))
+  ElMessage.success('文件已删除')
 }
 
 async function publish() {
@@ -508,7 +400,7 @@ watch(
     fileKeyword.value = ''
     fileRange.value = null
     fileSort.value = 'desc'
-    loadResources()
+    syncDescription()
     void loadNotes()
   },
   { immediate: true },
@@ -537,10 +429,6 @@ defineExpose({ load: loadNotes })
         <b>{{ stats.notes }}</b>
       </div>
     </div>
-
-    <p class="resource-tip">
-      多地址与独立文件库因后端接口不全，当前用本机演示数据保存（刷新不丢，不同步到其他设备）。
-    </p>
 
     <section class="glass-panel resource-section resource-section--full">
       <div class="section-head section-head--compact">
@@ -663,7 +551,13 @@ defineExpose({ load: loadNotes })
                   tag="a"
                   target="_blank"
                 >打开</el-button>
-                <el-button link type="danger" size="small" @click="removeFile(row)">删除</el-button>
+                <el-button
+                  v-if="row.source === 'resource'"
+                  link
+                  type="danger"
+                  size="small"
+                  @click="removeFile(row)"
+                >删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -774,13 +668,6 @@ defineExpose({ load: loadNotes })
   font-size: 16px;
   color: var(--kk-text);
   font-variant-numeric: tabular-nums;
-}
-
-.resource-tip {
-  margin: 0;
-  font-size: 12px;
-  color: var(--kk-text-muted);
-  line-height: 1.45;
 }
 
 .resource-row {

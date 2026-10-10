@@ -99,10 +99,10 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
             throw new BusinessException("项目不存在");
         }
         String scale = project.getScale() == null ? ProjectScales.NORMAL : project.getScale();
-        if (!ProjectScales.isFinanceVisible(scale)) {
-            throw new BusinessException("常规项目不涉及财务账款");
-        }
         assertProjectVisible(project);
+        if (!ProjectScales.isFinanceVisible(scale)) {
+            return null;
+        }
         FinProjectAccount account = getOrCreate(projectId);
         fillExtra(List.of(account), Map.of(project.getId(), project));
         applyMajorShellAggregation(List.of(account), Map.of(project.getId(), project));

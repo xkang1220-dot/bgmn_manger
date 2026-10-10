@@ -20,6 +20,7 @@ import com.kk.biz.mapper.PmTaskFlowMapper;
 import com.kk.biz.mapper.PmTaskMapper;
 import com.kk.biz.mapper.PmTaskMemberMapper;
 import com.kk.biz.service.PmTaskService;
+import com.kk.biz.service.PmProjectService;
 import com.kk.biz.service.SysFileService;
 import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
@@ -74,6 +75,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     private final SysFileService fileService;
     private final DataScopeService dataScopeService;
     private final SysNotificationService notificationService;
+    private final PmProjectService projectService;
 
     private static final Map<Integer, String> STATUS_LABEL = Map.of(
             0, "待办",
@@ -370,12 +372,14 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                     item.put("memberId", id);
                     item.put("memberName", member == null ? "用户" + id : userName(member));
                     item.put("total", 0L);
+                    item.put("todo", 0L);
                     item.put("done", 0L);
                     item.put("doing", 0L);
                     item.put("overdue", 0L);
                     return item;
                 });
                 increment(stats, "total");
+                if (status == 0) increment(stats, "todo");
                 if (status == 2) increment(stats, "done");
                 if (status == 1) increment(stats, "doing");
                 if (rowOverdue) increment(stats, "overdue");
@@ -770,6 +774,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         syncParticipants(task.getId(), task.getParticipantIds());
         syncTaskImages(task.getId(), task.getImageFileIds());
         recordFlow(task.getId(), "CREATE", null, null, null, task.getStatus(), "创建任务");
+        projectService.recordFlow(task.getProjectId(), "TASK_CREATE", null, null, null,
+                "新建任务「" + task.getTitle() + "」");
     }
 
     @Override
@@ -846,6 +852,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (task.getStatus() != null && !task.getStatus().equals(oldStatus)) {
             recordFlow(task.getId(), "STATUS", null, null, oldStatus, task.getStatus(), "编辑时变更状态");
         }
+        projectService.recordFlow(existing.getProjectId(), "TASK_UPDATE", null, null, null,
+                "编辑任务「" + (StringUtils.hasText(task.getTitle()) ? task.getTitle() : existing.getTitle()) + "」");
     }
 
     private String cleanTaskContent(String content) {
@@ -910,6 +918,13 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         String flowNote = targetStatus == 4 && !StringUtils.hasText(note) ? "提交完成，等待任务管理员确认" : note;
         recordFlow(id, targetStatus == 4 ? "COMPLETE_SUBMIT" : "STATUS", null, null,
                 oldStatus, targetStatus, flowNote, imageFileIds);
+        String projectAction = targetStatus == 2 ? "TASK_COMPLETE" : "TASK_UPDATE";
+        String projectSummary = targetStatus == 2
+                ? "完成任务「" + existing.getTitle() + "」"
+                : "变更任务「" + existing.getTitle() + "」状态："
+                    + STATUS_LABEL.getOrDefault(oldStatus, "—") + " → "
+                    + STATUS_LABEL.getOrDefault(targetStatus, "—");
+        projectService.recordFlow(existing.getProjectId(), projectAction, null, null, null, projectSummary);
     }
 
     static int completionTargetStatus(BigDecimal taskReward) {
@@ -941,6 +956,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         updateById(update);
         recordFlow(id, approved ? "COMPLETE_APPROVE" : "COMPLETE_REJECT", null, null,
                 4, approved ? 2 : 1, note);
+        projectService.recordFlow(existing.getProjectId(), approved ? "TASK_COMPLETE" : "TASK_UPDATE",
+                null, null, null, approved
+                        ? "确认完成任务「" + existing.getTitle() + "」"
+                        : "驳回任务「" + existing.getTitle() + "」的完成申请");
     }
 
     @Override
