@@ -105,6 +105,8 @@ const memberChartRows = computed(() => filteredMemberTaskStats.value.map((item: 
   overdue: Number(item.overdue || 0),
   completionRate: Number(item.total || 0) ? Math.round(Number(item.done || 0) / Number(item.total) * 100) : 0,
 })))
+const memberChartMax = computed(() => Math.max(1, ...memberChartRows.value.flatMap((item: any) => [item.done, item.doing, item.overdue])))
+const memberChartMinWidth = computed(() => Math.max(720, memberChartRows.value.length * 128))
 function memberInitial(name: string) {
   return (name || '?').trim().slice(0, 1).toUpperCase()
 }
@@ -360,28 +362,54 @@ onBeforeUnmount(() => {
     <section class="page-card member-stats-panel">
       <div class="section-head">
         <div><h3>成员任务统计</h3><p>合并展示任务状态与当前负载；同一成员在同一任务中只计一次</p></div>
-        <div class="member-summary" aria-label="成员任务概览">
+        <div v-if="filters.participantId == null" class="member-summary" aria-label="成员任务概览">
           <span><b>{{ memberStatsSummary.members }}</b> 位成员</span>
           <span><b>{{ memberStatsSummary.total }}</b> 项任务</span>
           <span><b>{{ memberStatsSummary.doneRate }}%</b> 完成率</span>
           <span :class="{ danger: memberStatsSummary.overdue > 0 }"><b>{{ memberStatsSummary.overdue }}</b> 项延期</span>
         </div>
       </div>
-      <div v-if="memberChartRows.length" class="member-card-grid" aria-label="成员任务统计">
-        <button v-for="item in memberChartRows" :key="item.memberId" type="button" class="member-card"
-          :aria-label="`${item.memberName}：共${item.total}项，已完成${item.done}项，进行中${item.doing}项，逾期${item.overdue}项`" @click="showMemberTasks(item)">
-          <span class="member-card-head">
-            <strong :title="item.memberName">{{ item.memberName }}</strong>
-            <span><b>{{ item.completionRate }}%</b><small>完成率</small></span>
-          </span>
-          <span class="member-card-progress" aria-hidden="true"><i :style="{ width: `${item.completionRate}%` }" /></span>
-          <span class="member-card-stats">
-            <span><b>{{ item.total }}</b><small>总任务</small></span>
-            <span><b>{{ item.doing }}</b><small>进行中</small></span>
-            <span :class="{ danger: item.overdue > 0 }"><b>{{ item.overdue }}</b><small>逾期</small></span>
-          </span>
-        </button>
+      <div v-if="memberChartRows.length && filters.participantId == null" class="member-chart-shell">
+        <div class="member-chart-legend" aria-label="图例">
+          <span><i class="done" />已完成</span><span><i class="doing" />进行中</span><span><i class="overdue" />已逾期</span>
+        </div>
+        <div class="member-chart-scroll">
+          <div class="member-chart" :style="{ minWidth: `${memberChartMinWidth}px` }" role="img" aria-label="成员任务数量柱状图">
+            <div class="member-grid-lines" aria-hidden="true"><i /><i /><i /><i /><i /></div>
+            <div class="member-chart-groups" :style="{ gridTemplateColumns: `repeat(${memberChartRows.length}, minmax(128px, 1fr))` }">
+              <button v-for="item in memberChartRows" :key="item.memberId" type="button" class="member-chart-group"
+                :aria-label="`${item.memberName}：已完成${item.done}项，进行中${item.doing}项，逾期${item.overdue}项，完成率${item.completionRate}%`" @click="showMemberTasks(item)">
+                <span class="member-bars">
+                  <el-tooltip :content="`已完成 ${item.done} 项`" placement="top"><i class="done" :style="{ height: `${Math.max(3, item.done / memberChartMax * 100)}%` }"><b>{{ item.done }}</b></i></el-tooltip>
+                  <el-tooltip :content="`进行中 ${item.doing} 项`" placement="top"><i class="doing" :style="{ height: `${Math.max(3, item.doing / memberChartMax * 100)}%` }"><b>{{ item.doing }}</b></i></el-tooltip>
+                  <el-tooltip :content="`已逾期 ${item.overdue} 项`" placement="top"><i class="overdue" :style="{ height: `${Math.max(3, item.overdue / memberChartMax * 100)}%` }"><b>{{ item.overdue }}</b></i></el-tooltip>
+                </span>
+                <strong :title="item.memberName">{{ item.memberName }}</strong>
+                <small>共 {{ item.total }} 项 · {{ item.completionRate }}%</small>
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
+      <button v-else-if="memberChartRows.length" type="button" class="member-focus"
+        :aria-label="`${memberChartRows[0].memberName}：共${memberChartRows[0].total}项，已完成${memberChartRows[0].done}项，进行中${memberChartRows[0].doing}项，逾期${memberChartRows[0].overdue}项`"
+        @click="showMemberTasks(memberChartRows[0])">
+        <span class="member-focus-person">
+          <i aria-hidden="true">{{ memberInitial(memberChartRows[0].memberName) }}</i>
+          <span><strong>{{ memberChartRows[0].memberName }}</strong><small>当前筛选成员</small></span>
+        </span>
+        <span class="member-focus-progress">
+          <span><b>完成进度</b><strong>{{ memberChartRows[0].completionRate }}%</strong></span>
+          <i aria-hidden="true"><b :style="{ width: `${memberChartRows[0].completionRate}%` }" /></i>
+        </span>
+        <span class="member-focus-stats">
+          <span><b>{{ memberChartRows[0].total }}</b><small>总任务</small></span>
+          <span><b>{{ memberChartRows[0].done }}</b><small>已完成</small></span>
+          <span><b>{{ memberChartRows[0].doing }}</b><small>进行中</small></span>
+          <span :class="{ danger: memberChartRows[0].overdue > 0 }"><b>{{ memberChartRows[0].overdue }}</b><small>逾期</small></span>
+        </span>
+        <span class="member-focus-action" aria-hidden="true">查看任务 <b>›</b></span>
+      </button>
       <el-empty v-else description="暂无成员任务数据" :image-size="64" />
     </section>
 
@@ -464,14 +492,24 @@ onBeforeUnmount(() => {
 .member-summary { display: flex; overflow: hidden; border: 1px solid var(--kk-card-border); border-radius: 10px; background: var(--kk-fill); }
 .member-summary span { padding: 8px 13px; border-right: 1px solid var(--kk-card-border); color: var(--kk-text-muted); font-size: 11px; white-space: nowrap; }
 .member-summary span:last-child { border-right: 0; }.member-summary b { margin-right: 3px; color: var(--kk-text); font-size: 13px; font-variant-numeric: tabular-nums; }.member-summary .danger b { color: var(--kk-danger); }
-.member-card-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
-.member-card { min-width: 0; padding: 15px 16px 14px; border: 1px solid var(--kk-card-border); border-radius: 10px; background: color-mix(in srgb, var(--kk-card-bg) 86%, var(--kk-fill)); color: inherit; text-align: left; cursor: pointer; transition: border-color 150ms ease-out, background-color 150ms ease-out, transform 150ms ease-out; }
-.member-card:hover { border-color: color-mix(in srgb, var(--cockpit-blue) 25%, var(--kk-card-border)); background: var(--kk-card-bg); transform: translateY(-1px); }.member-card:focus-visible { outline: 2px solid var(--cockpit-blue); outline-offset: 2px; }
-.member-card-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }.member-card-head>strong { min-width: 0; overflow: hidden; color: var(--kk-text); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }.member-card-head>span { display: flex; flex: none; align-items: baseline; gap: 4px; }.member-card-head b { color: var(--kk-text); font-size: 15px; font-variant-numeric: tabular-nums; }.member-card-head small { color: var(--kk-text-muted); font-size: 9px; }
-.member-card-progress { height: 5px; display: block; overflow: hidden; margin: 13px 0 12px; border-radius: 6px; background: var(--kk-fill); }.member-card-progress i { height: 100%; display: block; min-width: 2px; border-radius: inherit; background: var(--cockpit-blue); }
-.member-card-stats { display: grid; grid-template-columns: repeat(3,1fr); }.member-card-stats>span { display: flex; align-items: baseline; gap: 5px; border-right: 1px solid var(--kk-card-border); }.member-card-stats>span:nth-child(2) { justify-content: center; }.member-card-stats>span:last-child { justify-content: flex-end; border-right: 0; }.member-card-stats b { color: var(--kk-text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }.member-card-stats small { color: var(--kk-text-muted); font-size: 9px; white-space: nowrap; }.member-card-stats .danger b,.member-card-stats .danger small { color: var(--cockpit-danger); }
-@media(max-width:1100px){.member-card-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:640px){.member-card-grid{grid-template-columns:1fr}.member-card{padding:14px}}
+.member-chart-shell { position: relative; padding-top: 2px; }
+.member-chart-legend { display: flex; align-items: center; justify-content: flex-end; gap: 16px; margin: 0 0 10px; color: var(--kk-text-muted); font-size: 10px; }
+.member-chart-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }.member-chart-legend i { width: 9px; height: 9px; display: inline-block; border-radius: 2px; }.member-chart-legend i.done { background: #34c98f; }.member-chart-legend i.doing { background: #5b7cfa; }.member-chart-legend i.overdue { background: #ff6b6b; }
+.member-chart-scroll { overflow-x: auto; padding-bottom: 5px; scrollbar-width: thin; }
+.member-chart { position: relative; width: 100%; height: 304px; }
+.member-grid-lines { position: absolute; inset: 18px 0 66px; display: flex; flex-direction: column; justify-content: space-between; pointer-events: none; }.member-grid-lines i { display: block; border-top: 1px dashed rgba(100,116,139,.16); }
+.member-chart-groups { position: absolute; inset: 0; display: grid; }
+.member-chart-group { min-width: 0; display: grid; grid-template-rows: 238px auto auto; padding: 0 16px; border: 0; background: transparent; color: inherit; cursor: pointer; text-align: center; }.member-chart-group:hover { background: linear-gradient(to bottom, rgba(24,24,27,.025), transparent); }.member-chart-group:focus-visible { outline: 2px solid var(--cockpit-blue); outline-offset: -2px; }
+.member-bars { height: 220px; display: flex; align-self: end; align-items: flex-end; justify-content: center; gap: 6px; }.member-bars i { position: relative; width: 20px; min-height: 3px; display: block; border-radius: 4px 4px 1px 1px; transition: filter 140ms ease-out; }.member-chart-group:hover .member-bars i { filter: saturate(1.14) brightness(.96); }.member-bars i.done { background: #34c98f; }.member-bars i.doing { background: #5b7cfa; }.member-bars i.overdue { background: #ff6b6b; }.member-bars b { position: absolute; bottom: calc(100% + 3px); left: 50%; color: var(--kk-text-secondary); font-size: 9px; font-style: normal; font-weight: 600; font-variant-numeric: tabular-nums; transform: translateX(-50%); }
+.member-chart-group>strong { min-width: 0; overflow: hidden; margin-top: 9px; color: var(--kk-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.member-chart-group>small { margin-top: 3px; color: var(--kk-text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.member-focus { width: 100%; min-height: 96px; display: grid; grid-template-columns: minmax(150px,.75fr) minmax(240px,1.4fr) minmax(330px,1.3fr) auto; align-items: center; gap: 32px; padding: 18px 20px; border: 1px solid var(--kk-card-border); border-radius: 10px; background: color-mix(in srgb, var(--kk-card-bg) 88%, var(--kk-fill)); color: inherit; text-align: left; cursor: pointer; transition: border-color 150ms ease-out, background-color 150ms ease-out; }
+.member-focus:hover { border-color: color-mix(in srgb, var(--cockpit-blue) 25%, var(--kk-card-border)); background: var(--kk-card-bg); }.member-focus:focus-visible { outline: 2px solid var(--cockpit-blue); outline-offset: 2px; }
+.member-focus-person { min-width: 0; display: flex; align-items: center; gap: 11px; }.member-focus-person>i { width: 38px; height: 38px; display: grid; flex: none; place-items: center; border-radius: 50%; background: var(--cockpit-blue-soft); color: var(--cockpit-blue); font-size: 13px; font-style: normal; font-weight: 700; }.member-focus-person strong,.member-focus-person small { display: block; }.member-focus-person strong { overflow: hidden; color: var(--kk-text); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }.member-focus-person small { margin-top: 4px; color: var(--kk-text-muted); font-size: 10px; }
+.member-focus-progress>span { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 9px; }.member-focus-progress>span b { color: var(--kk-text-secondary); font-size: 10px; }.member-focus-progress>span strong { color: var(--kk-text); font-size: 18px; font-variant-numeric: tabular-nums; }.member-focus-progress>i { height: 7px; display: block; overflow: hidden; border-radius: 8px; background: var(--kk-fill); }.member-focus-progress>i b { height: 100%; display: block; min-width: 2px; border-radius: inherit; background: var(--cockpit-blue); }
+.member-focus-stats { display: grid; grid-template-columns: repeat(4,1fr); }.member-focus-stats>span { display: grid; justify-items: center; gap: 4px; border-right: 1px solid var(--kk-card-border); }.member-focus-stats>span:last-child { border-right: 0; }.member-focus-stats b { color: var(--kk-text); font-size: 17px; font-variant-numeric: tabular-nums; }.member-focus-stats small { color: var(--kk-text-muted); font-size: 9px; }.member-focus-stats .danger b,.member-focus-stats .danger small { color: var(--cockpit-danger); }
+.member-focus-action { color: var(--cockpit-blue); font-size: 10px; font-weight: 650; white-space: nowrap; opacity: .72; }.member-focus-action b { margin-left: 3px; font-size: 17px; font-weight: 400; vertical-align: -1px; }.member-focus:hover .member-focus-action { opacity: 1; }
+@media(max-width:1000px){.member-focus{grid-template-columns:1fr 1.5fr;gap:20px}.member-focus-stats{grid-column:1 / -1}.member-focus-action{display:none}}
+@media(max-width:640px){.member-focus{grid-template-columns:1fr;padding:15px}.member-focus-progress,.member-focus-stats{grid-column:auto}.member-focus-stats>span{justify-items:start}.member-focus-person>i{width:34px;height:34px}}
 @media(max-width:900px){.period-filter{width:100%;margin-left:0}.period-filter :deep(.el-form-item__content){flex-wrap:wrap}.insight-grid{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}.metric-grid button:nth-child(3){border-right:1px solid var(--kk-card-border)}.metric-grid button:nth-child(even){border-right:0}.metric-grid button:nth-child(-n+2){border-bottom:1px solid var(--kk-card-border)}.decision-strip{grid-template-columns:1fr 1fr}.decision-strip button:nth-child(2){border-right:0}.decision-strip button:nth-child(-n+2){border-bottom:1px solid var(--kk-card-border)}.load-panel{margin-top:20px}}
 @media(max-width:560px){.cockpit{gap:16px}.metric-grid{grid-template-columns:1fr 1fr}.metric-grid button{padding:15px}.metric-grid strong{font-size:24px}.metric-grid small{white-space:normal}.decision-strip button{align-items:center;justify-content:flex-start;padding:12px}.decision-strip span{line-height:1.35}.page-card{padding:16px}.drill-list>button{display:block}.drill-list aside{margin-top:8px}}
 @media(max-width:900px){.member-stats-panel>.section-head{display:block}.member-summary{width:max-content;margin-top:12px}}
