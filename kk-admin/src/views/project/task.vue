@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import type { TableInstance } from 'element-plus'
+import { ArrowRight, Expand, Fold, Rank } from '@element-plus/icons-vue'
 import { bizApi } from '@/api/biz'
 import { useUserStore } from '@/stores/user'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
@@ -14,15 +16,12 @@ const userStore = useUserStore()
 // 任务管理始终是个人工作台；管理视角已拆分到独立的“任务驾驶舱”。
 const isTaskManager = false
 
-/** “待办与进行中”快捷筛选包含待确认完成 */
-const OPEN_STATUSES = [0, 1, 4]
-
 const query = reactive({
   page: 1,
   pageSize: 10,
   title: '',
   projectId: undefined as number | undefined,
-  status: undefined as number | undefined,
+  status: 0 as number | undefined,
   statuses: undefined as number[] | undefined,
   priority: undefined as number | undefined,
   overdue: undefined as boolean | undefined,
@@ -75,31 +74,144 @@ function resolvePeriod(): { periodFrom?: string; periodTo?: string } {
 
 const list = ref<any[]>([])
 const total = ref(0)
-const summary = ref<any>({})
 const projects = ref<any[]>([])
 const taskDrawer = ref(false)
 const activeTaskId = ref<number | null>(null)
-type TaskDrawerAction = 'view' | 'edit' | 'transfer' | 'close'
+type TaskDrawerAction = 'view' | 'edit' | 'transfer' | 'close' | 'subtask'
 const taskDrawerAction = ref<TaskDrawerAction>('view')
 const listLoading = ref(false)
 const shareOpen = ref(false)
 const shareCompanies = ref<CompanyTaskShareOption[]>([])
 type TaskViewMode = 'timeline' | 'details'
 const taskViewMode = ref<TaskViewMode>('details')
+const projectNavCollapsed = ref(false)
 const taskOrder = ref<Array<number | string>>([])
 const draggingTaskId = ref<number | string | null>(null)
+const hoveredTaskId = ref<number | string | null>(null)
+const hoverTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function shiftDate(base: string | null | undefined, days: number) {
+  const match = String(base || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/)
+  const anchor = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : new Date()
+  anchor.setHours(0, 0, 0, 0)
+  anchor.setDate(anchor.getDate() + days)
+  const y = anchor.getFullYear()
+  const m = String(anchor.getMonth() + 1).padStart(2, '0')
+  const d = String(anchor.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+/** 列表暂无真实子任务接口时，给前几条父任务挂演示子任务，便于验收层级与时间重叠。 */
+function createMockSubtasks(parent: any) {
+  const base = parent.startDate || parent.dueDate
+  const shared = {
+    projectId: parent.projectId,
+    projectName: parent.projectName,
+    parentTaskId: parent.id,
+    assigneeName: parent.assigneeName || '未指定',
+    participantNames: parent.participantNames || [],
+    canEdit: false,
+    canTransfer: false,
+    isMock: true,
+  }
+  return [
+    {
+      ...shared,
+      id: -Number(`${parent.id}01`),
+      title: `${parent.title} · 资料准备`,
+      status: parent.status === 2 ? 2 : 1,
+      priority: parent.priority ?? 2,
+      startDate: shiftDate(base, 0),
+      dueDate: shiftDate(base, 6),
+      content: '<p>整理并对齐本任务所需资料（演示子任务）</p>',
+      overdue: false,
+      startedAt: parent.startedAt,
+      completedAt: parent.status === 2 ? parent.completedAt : undefined,
+    },
+    {
+      ...shared,
+      id: -Number(`${parent.id}02`),
+      title: `${parent.title} · 结果确认`,
+      status: parent.status === 2 ? 2 : 0,
+      priority: 3,
+      startDate: shiftDate(base, 4),
+      dueDate: shiftDate(base, 10),
+      content: '',
+      overdue: !!parent.overdue && parent.status !== 2,
+      startedAt: undefined,
+      completedAt: parent.status === 2 ? parent.completedAt : undefined,
+    },
+  ]
+}
+
+function withMockSubtasks(tasks: any[]) {
+  let attached = 0
+  return (tasks || []).map((task) => {
+    if (task.parentTaskId || (Array.isArray(task.children) && task.children.length) || attached >= 3) {
+      return { ...task, children: Array.isArray(task.children) ? task.children : [] }
+    }
+    attached += 1
+    return { ...task, children: createMockSubtasks(task) }
+  })
+}
 
 const orderedList = computed(() => {
   const ranks = new Map(taskOrder.value.map((id, index) => [String(id), index]))
-  return [...list.value].sort((a, b) => {
-    const aRank = ranks.get(String(a.id))
-    const bRank = ranks.get(String(b.id))
-    if (aRank == null && bRank == null) return 0
-    if (aRank == null) return 1
-    if (bRank == null) return -1
-    return aRank - bRank
-  })
+  return [...list.value]
+    .filter((item) => !item.parentTaskId)
+    .sort((a, b) => {
+      const aRank = ranks.get(String(a.id))
+      const bRank = ranks.get(String(b.id))
+      if (aRank == null && bRank == null) return 0
+      if (aRank == null) return 1
+      if (bRank == null) return -1
+      return aRank - bRank
+    })
 })
+
+const detailTreeList = computed(() => orderedList.value)
+const taskTableRef = ref<TableInstance>()
+const expandedTaskIds = ref<Set<string>>(new Set())
+
+function taskRowClassName({ row }: { row: any }) {
+  return row.parentTaskId ? 'is-subtask' : ''
+}
+
+function isSubtaskRow(row: any) {
+  return !!row?.parentTaskId
+}
+
+function hasSubtasks(row: any) {
+  return Array.isArray(row?.children) && row.children.length > 0
+}
+
+function isTaskExpanded(row: any) {
+  return expandedTaskIds.value.has(String(row.id))
+}
+
+function toggleTaskExpand(row: any) {
+  if (!hasSubtasks(row)) return
+  const key = String(row.id)
+  const next = !expandedTaskIds.value.has(key)
+  taskTableRef.value?.toggleRowExpansion(row, next)
+  const ids = new Set(expandedTaskIds.value)
+  if (next) ids.add(key)
+  else ids.delete(key)
+  expandedTaskIds.value = ids
+}
+
+async function expandTasksWithChildren() {
+  await nextTick()
+  const ids = new Set<string>()
+  for (const row of detailTreeList.value) {
+    if (!hasSubtasks(row)) continue
+    ids.add(String(row.id))
+    taskTableRef.value?.toggleRowExpansion(row, true)
+  }
+  expandedTaskIds.value = ids
+}
 
 async function loadTaskOrder() {
   try {
@@ -110,27 +222,49 @@ async function loadTaskOrder() {
   }
 }
 
-function moveTask(taskId: number | string, direction: -1 | 1) {
-  const ids = orderedList.value.map((item) => item.id)
-  const index = ids.findIndex((id) => String(id) === String(taskId))
-  const target = index + direction
-  if (index < 0 || target < 0 || target >= ids.length) return
-  ;[ids[index], ids[target]] = [ids[target], ids[index]]
-  taskOrder.value = ids
-  void bizApi.saveTaskOrder(query.projectId, ids).catch(() => ElMessage.error('任务排序保存失败，请稍后重试'))
+function clearTaskHoverTimer(taskId: number | string) {
+  const key = String(taskId)
+  const timer = hoverTimers.get(key)
+  if (timer) {
+    clearTimeout(timer)
+    hoverTimers.delete(key)
+  }
+}
+
+function onTaskMouseEnter(taskId: number | string) {
+  clearTaskHoverTimer(taskId)
+  const timer = setTimeout(() => {
+    hoveredTaskId.value = taskId
+  }, 2000)
+  hoverTimers.set(String(taskId), timer)
+}
+
+function onTaskMouseLeave(taskId: number | string) {
+  clearTaskHoverTimer(taskId)
+  if (String(hoveredTaskId.value) === String(taskId)) {
+    hoveredTaskId.value = null
+  }
 }
 
 function onTaskDragStart(event: DragEvent, taskId: number | string) {
   draggingTaskId.value = taskId
+  hoveredTaskId.value = null
+  clearTaskHoverTimer(taskId)
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = 'move'
     event.dataTransfer.setData('text/plain', String(taskId))
   }
 }
 
+function onTaskDragOver(event: DragEvent, row: any) {
+  if (isSubtaskRow(row)) return
+  event.preventDefault()
+}
+
 function onTaskDrop(targetId: number | string) {
   const sourceId = draggingTaskId.value
   draggingTaskId.value = null
+  hoveredTaskId.value = null
   if (sourceId == null || String(sourceId) === String(targetId)) return
   const ids = orderedList.value.map((item) => item.id)
   const sourceIndex = ids.findIndex((id) => String(id) === String(sourceId))
@@ -140,6 +274,11 @@ function onTaskDrop(targetId: number | string) {
   ids.splice(targetIndex, 0, moved)
   taskOrder.value = ids
   void bizApi.saveTaskOrder(query.projectId, ids).catch(() => ElMessage.error('任务排序保存失败，请稍后重试'))
+}
+
+function fmtTaskTime(value?: string) {
+  if (!value) return '未设置'
+  return String(value).replace('T', ' ').slice(0, 16)
 }
 
 function taskContentPreview(content?: string) {
@@ -160,15 +299,16 @@ function onTaskViewKeydown(event: KeyboardEvent) {
   selectTaskView(mode, true)
 }
 
-type ProjectTreeNode = {
-  id: number | string
+type ProjectNavItem = {
+  id: number
   label: string
   scale?: string
-  children?: ProjectTreeNode[]
 }
 
-const projectTree = computed<ProjectTreeNode[]>(() => {
-  const visible = projects.value.filter((project) => ![2, 3].includes(Number(project.status)))
+const visibleProjects = computed(() => projects.value.filter((project) => ![2, 3].includes(Number(project.status))))
+
+const projectNavItems = computed<ProjectNavItem[]>(() => {
+  const visible = visibleProjects.value
   const childrenByParent = new Map<number, any[]>()
   visible.forEach((project) => {
     if (!project.parentId) return
@@ -176,29 +316,17 @@ const projectTree = computed<ProjectTreeNode[]>(() => {
     childrenByParent.set(parentId, [...(childrenByParent.get(parentId) || []), project])
   })
 
-  const topProjects = visible
-    .filter((project) => !project.parentId)
-    .map((project) => {
-      const children = (childrenByParent.get(Number(project.id)) || []).map((child) => ({
-        id: Number(child.id),
-        label: child.name,
-        scale: child.scale,
-      }))
-      return {
-        id: Number(project.id),
-        label: project.name,
-        scale: project.scale,
-        ...(children.length ? { children } : {}),
-      }
-    })
-
-  return [{ id: 'all', label: '全部项目', children: topProjects }]
+  const items: ProjectNavItem[] = []
+  visible.filter((project) => !project.parentId).forEach((project) => {
+    items.push({ id: Number(project.id), label: project.name, scale: project.scale })
+    for (const child of childrenByParent.get(Number(project.id)) || []) {
+      items.push({ id: Number(child.id), label: child.name, scale: child.scale })
+    }
+  })
+  return items
 })
 
-const selectedProjectName = computed(() => {
-  if (query.projectId == null) return '全部项目'
-  return projects.value.find((project) => Number(project.id) === Number(query.projectId))?.name || '当前项目'
-})
+const projectNavCount = computed(() => projectNavItems.value.length)
 
 const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭', 4: '待确认完成' }
 const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
@@ -215,93 +343,6 @@ const priorityType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger
   3: 'info',
 }
 
-const statusFilterOptions = [
-  { value: 'open', label: '待办与进行中' },
-  { value: '0', label: '待办' },
-  { value: '1', label: '进行中' },
-  { value: '2', label: '已完成' },
-  { value: '4', label: '待确认完成' },
-  { value: '3', label: '已关闭' },
-]
-
-const statusFilterKey = computed({
-  get: (): string | undefined => {
-    if (query.overdue) return undefined
-    if (query.statuses?.length === OPEN_STATUSES.length && OPEN_STATUSES.every((status) => query.statuses?.includes(status)) && query.status == null) {
-      return 'open'
-    }
-    if (query.status !== undefined && query.status !== null) return String(query.status)
-    return undefined
-  },
-  set: (v: string | undefined | null) => {
-    query.overdue = undefined
-    if (v === 'open') {
-      query.status = undefined
-      query.statuses = [...OPEN_STATUSES]
-    } else if (v === '' || v == null) {
-      query.status = undefined
-      query.statuses = undefined
-    } else {
-      const n = Number(v)
-      if (Number.isNaN(n)) {
-        query.status = undefined
-        query.statuses = [...OPEN_STATUSES]
-      } else {
-        query.status = n
-        query.statuses = undefined
-      }
-    }
-    query.page = 1
-    load()
-  },
-})
-
-const managerStatCards = [
-  { key: 'riskProjects', label: '风险项目', hint: '需要负责人介入', icon: 'DataAnalysis', tone: 'rose' },
-  { key: 'overdue', label: '已逾期', hint: '必须立即处理', icon: 'Warning', tone: 'rose' },
-  { key: 'dueSoon', label: '7天内到期', hint: '提前确认交付', icon: 'Timer', tone: 'amber' },
-  { key: 'pending', label: '待确认完成', hint: '等待管理确认', icon: 'CircleCheck', tone: 'cyan' },
-]
-
-const employeeStatCards = [
-  { key: 'todo', label: '我的待办', hint: '尚未开始处理', icon: 'List', tone: 'slate' },
-  { key: 'doing', label: '进行中', hint: '当前正在推进', icon: 'Loading', tone: 'cyan' },
-  { key: 'overdue', label: '已逾期', hint: '需要优先处理', icon: 'Warning', tone: 'rose' },
-  { key: 'pending', label: '待确认完成', hint: '已提交，等待确认', icon: 'CircleCheck', tone: 'amber' },
-  { key: 'done', label: '完成任务量', hint: '已确认完成', icon: 'Finished', tone: 'emerald' },
-]
-
-const statCards = computed(() => employeeStatCards)
-
-function isStatActive(key: string) {
-  if (key === 'overdue') return !!query.overdue
-  if (key === 'pending') return query.status === 4 && !query.overdue
-  if (key === 'todo') return query.status === 0 && !query.overdue
-  if (key === 'doing') return query.status === 1 && !query.overdue
-  if (key === 'done') return query.status === 2 && !query.overdue
-  return false
-}
-
-function onStatClick(key: string) {
-  if (key === 'overdue') {
-    filterOverdue()
-    return
-  }
-  if (key === 'todo') return filterByStatus(0)
-  if (key === 'doing') return filterByStatus(1)
-  if (key === 'pending') filterByStatus(4)
-  if (key === 'done') filterByStatus(2)
-}
-
-const maxTrend = computed(() => Math.max(1, ...(summary.value.trend || []).flatMap((item: any) => [item.created || 0, item.completed || 0])))
-const maxOwnerLoad = computed(() => Math.max(1, ...(summary.value.ownerLoad || []).map((item: any) => item.open || 0)))
-
-const healthMap: Record<string, { label: string; type: 'danger' | 'warning' | 'success' }> = {
-  DANGER: { label: '危险', type: 'danger' },
-  WARNING: { label: '预警', type: 'warning' },
-  HEALTHY: { label: '健康', type: 'success' },
-}
-
 async function selectProject(projectId?: number) {
   query.projectId = projectId
   query.page = 1
@@ -309,24 +350,8 @@ async function selectProject(projectId?: number) {
   await load()
 }
 
-function onProjectNodeClick(node: ProjectTreeNode) {
-  selectProject(node.id === 'all' ? undefined : Number(node.id))
-}
-
-async function loadSummary() {
-  // 统计随筛选变：项目/标题/优先级；状态与逾期由卡片本身表达，不传入
-  const params: {
-    projectId?: number
-    priority?: number
-    title?: string
-    periodFrom?: string
-    periodTo?: string
-  } = {}
-  if (query.projectId != null) params.projectId = query.projectId
-  if (query.priority != null) params.priority = query.priority
-  if (query.title.trim()) params.title = query.title.trim()
-  Object.assign(params, resolvePeriod())
-  summary.value = await bizApi.managementTaskSummary(params)
+function onProjectNavClick(projectId?: number) {
+  selectProject(projectId)
 }
 
 async function load() {
@@ -348,9 +373,10 @@ async function load() {
       params.status = query.status
     }
     const res = await bizApi.managementTaskPage(params)
-    list.value = res.list
+    // TODO: 子任务接口就绪后改为直接使用后端 children / parentTaskId
+    list.value = withMockSubtasks(res.list)
     total.value = res.total
-    await loadSummary()
+    await expandTasksWithChildren()
   } finally {
     listLoading.value = false
   }
@@ -371,7 +397,7 @@ function resetQuery() {
     page: 1,
     title: '',
     projectId: undefined,
-    status: undefined,
+    status: 0,
     statuses: undefined,
     priority: undefined,
     overdue: undefined,
@@ -398,9 +424,51 @@ function filterOverdue() {
 }
 
 function open(row?: any, action: TaskDrawerAction = 'view') {
+  if (row?.isMock) {
+    ElMessage.info('子任务为演示数据，详情接口尚未接入')
+    return
+  }
   activeTaskId.value = row?.id ?? null
   taskDrawerAction.value = action
   taskDrawer.value = true
+}
+
+function canCreateSubtask(row: any) {
+  // 仅父任务可新建子任务；子任务行不展示该入口
+  return !row?.isMock && !isSubtaskRow(row) && row.status !== 3 && userStore.hasPermission('project:task:add')
+}
+
+function canEditTask(row: any) {
+  if (row?.isMock) return isSubtaskRow(row)
+  return userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3
+}
+
+function canTransferTask(row: any) {
+  if (row?.isMock) return isSubtaskRow(row)
+  return userStore.hasPermission('project:task:add') && row.canTransfer && row.status !== 3
+}
+
+function canCloseTask(row: any) {
+  if (row?.isMock) return isSubtaskRow(row)
+  return userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3
+}
+
+function canReviewTask(row: any) {
+  if (row?.isMock) return false
+  return isTaskManager && row.status === 4
+}
+
+function hasTaskActions(row: any) {
+  return canCreateSubtask(row) || canEditTask(row) || canTransferTask(row) || canCloseTask(row) || canReviewTask(row)
+}
+
+function onTaskAction(row: any, command: string) {
+  if (command === 'subtask') open(row, 'subtask')
+  else if (command === 'edit') open(row, 'edit')
+  else if (command === 'transfer') open(row, 'transfer')
+  else if (command === 'close') open(row, 'close')
+  else if (command === 'review-pass') void review(row, true)
+  else if (command === 'review-reject') void review(row, false)
 }
 
 async function review(row: any, approved: boolean) {
@@ -443,168 +511,104 @@ onMounted(async () => {
     if (!Number.isNaN(num)) open({ id: num })
   }
 })
+
+onUnmounted(() => {
+  for (const timer of hoverTimers.values()) clearTimeout(timer)
+  hoverTimers.clear()
+})
 </script>
 
 <template>
-  <div class="page-stack">
-    <div class="page-top">
-      <div class="page-top__main">
-        <h2 class="page-title">{{ isTaskManager ? '交付管理驾驶舱' : '我的任务工作台' }}</h2>
-        <p class="page-desc">
-          {{ isTaskManager ? '先处理风险和待确认事项，再下钻项目与具体任务。' : '只展示我负责或参与的任务，优先处理逾期和临期事项。' }}
-        </p>
-      </div>
-      <div class="page-actions">
-        <el-button v-if="shareCompanies.length" v-permission="'project:task:share'" @click="shareOpen = true">今日工作外链</el-button>
-        <el-button type="primary" @click="open()">新建任务</el-button>
-      </div>
-    </div>
-
-    <el-form class="filter-bar task-filter-bar" @submit.prevent="onFilter">
-      <el-form-item label="标题">
-        <el-input v-model="query.title" clearable placeholder="任务标题" class="filter-keyword--wide" @keyup.enter="onFilter" @change="onFilter" />
-      </el-form-item>
-      <el-form-item label="状态">
-        <el-select v-model="statusFilterKey" clearable placeholder="全部" class="filter-select--wide">
-          <el-option v-for="item in statusFilterOptions" :key="item.value" :label="item.label" :value="item.value" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="优先级">
-        <el-select v-model="query.priority" clearable placeholder="全部" class="filter-select" @change="onFilter">
-          <el-option v-for="(label, value) in priorityMap" :key="value" :label="label" :value="Number(value)" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="时间周期">
-        <el-select v-model="periodKey" class="period-select" aria-label="按任务创建时间筛选" @change="onPeriodChange">
-          <el-option v-for="item in periodOptions" :key="item.value" :label="item.label" :value="item.value" />
-        </el-select>
-      </el-form-item>
-      <el-form-item v-if="periodKey === 'custom'" label="自定义日期">
-        <el-date-picker v-model="customPeriod" type="daterange" value-format="YYYY-MM-DD" range-separator="至"
-          start-placeholder="开始日期" end-placeholder="结束日期" unlink-panels @change="onPeriodChange" />
-      </el-form-item>
-      <el-form-item class="filter-actions">
-        <el-button @click="resetQuery">重置</el-button>
-      </el-form-item>
-    </el-form>
-
-    <div class="stat-grid" :class="{ 'stat-grid--personal': !isTaskManager }">
-      <button
-        v-for="card in statCards"
-        :key="card.key"
-        type="button"
-        class="stat-card"
-        :class="[`stat-card--${card.tone}`, { 'is-active': isStatActive(card.key) }]"
-        @click="onStatClick(card.key)"
-      >
-        <div class="stat-body">
-          <div class="stat-label">{{ card.label }}</div>
-          <div class="stat-value">{{ summary[card.key] ?? 0 }}</div>
-          <div class="stat-hint">{{ card.hint }}</div>
-        </div>
-        <el-icon class="stat-glyph" :size="44"><component :is="card.icon" /></el-icon>
-      </button>
-    </div>
-
-    <div v-if="isTaskManager" class="insight-grid">
-      <section class="page-card performance-panel">
-        <div class="section-head">
-          <div><h3>交付效率</h3><p>按实际开始和完成时间计算</p></div>
-        </div>
-        <div class="performance-metrics">
-          <div><span>按期完成率</span><strong>{{ summary.onTimeRate == null ? '—' : `${summary.onTimeRate}%` }}</strong></div>
-          <div><span>平均交付周期</span><strong>{{ summary.avgCycleDays == null ? '—' : `${summary.avgCycleDays}天` }}</strong></div>
-        </div>
-        <div class="trend-legend"><span class="created-dot" />新增任务 <span class="completed-dot" />完成任务</div>
-        <div class="trend-chart">
-          <div v-for="item in summary.trend || []" :key="item.label" class="trend-column">
-            <div class="trend-bars">
-              <i class="created" :style="{ height: `${Math.max(3, item.created / maxTrend * 72)}px` }" :title="`新增 ${item.created}`" />
-              <i class="completed" :style="{ height: `${Math.max(3, item.completed / maxTrend * 72)}px` }" :title="`完成 ${item.completed}`" />
-            </div>
-            <span>{{ item.label }}</span>
-          </div>
-        </div>
-      </section>
-
-      <section class="page-card owner-panel">
-        <div class="section-head"><div><h3>任务负载</h3><p>按任务负责人和参与人统计，单个任务不重复计算</p></div></div>
-        <div v-if="summary.ownerLoad?.length" class="owner-list">
-          <div v-for="item in summary.ownerLoad" :key="item.ownerId" class="owner-row">
-            <div class="owner-line"><strong>{{ item.ownerName }}</strong><span>{{ item.open }}项 · 逾期{{ item.overdue }}</span></div>
-            <div class="owner-bar"><i :style="{ width: `${item.open / maxOwnerLoad * 100}%` }" /></div>
-          </div>
-        </div>
-        <el-empty v-else description="暂无任务负载数据" :image-size="56" />
-      </section>
-    </div>
-
-    <div class="task-workspace" :class="{ 'task-workspace--personal': !isTaskManager }">
-      <aside class="page-card project-tree-panel">
-        <div class="project-tree-head">
-          <div>
-            <h3>项目导航</h3>
-            <p>选择我参与的项目查看对应任务</p>
-          </div>
-          <span>{{ projects.filter((project) => !project.parentId && ![2, 3].includes(Number(project.status))).length }}</span>
-        </div>
-        <el-tree
-          :data="projectTree"
-          node-key="id"
-          :current-node-key="query.projectId ?? 'all'"
-          default-expand-all
-          :expand-on-click-node="false"
-          highlight-current
-          class="project-tree"
-          @node-click="onProjectNodeClick"
+  <div class="page-stack task-page">
+    <div class="page-card task-workspace" :class="{ 'is-nav-collapsed': projectNavCollapsed }">
+      <div class="project-panel-head">
+        <h3 v-show="!projectNavCollapsed">项目列表</h3>
+        <button
+          type="button"
+          class="project-collapse-btn"
+          :aria-label="projectNavCollapsed ? '展开项目列表' : '折叠项目列表'"
+          :title="projectNavCollapsed ? '展开项目列表' : '折叠项目列表'"
+          @click="projectNavCollapsed = !projectNavCollapsed"
         >
-          <template #default="{ data }">
-            <div class="project-tree-node">
-              <el-icon><FolderOpened v-if="data.children?.length" /><Document v-else /></el-icon>
-              <span :title="data.label">{{ data.label }}</span>
-              <i v-if="data.scale && data.id !== 'all'">{{ data.scale === 'MAJOR' ? '重大' : data.scale === 'KEY' ? '重点' : '常规' }}</i>
-            </div>
-          </template>
-        </el-tree>
+          <el-icon :size="16">
+            <Expand v-if="projectNavCollapsed" />
+            <Fold v-else />
+          </el-icon>
+        </button>
+      </div>
+
+      <div class="task-view-toolbar">
+        <div class="task-view-switcher" role="tablist" aria-label="任务展示方式">
+          <button
+            id="task-view-tab-details"
+            type="button"
+            role="tab"
+            :aria-selected="taskViewMode === 'details'"
+            aria-controls="task-view-panel-details"
+            :tabindex="taskViewMode === 'details' ? 0 : -1"
+            :class="{ 'is-active': taskViewMode === 'details' }"
+            @click="selectTaskView('details')"
+            @keydown="onTaskViewKeydown"
+          >
+            我的任务明细
+          </button>
+          <button
+            id="task-view-tab-timeline"
+            type="button"
+            role="tab"
+            :aria-selected="taskViewMode === 'timeline'"
+            aria-controls="task-view-panel-timeline"
+            :tabindex="taskViewMode === 'timeline' ? 0 : -1"
+            :class="{ 'is-active': taskViewMode === 'timeline' }"
+            @click="selectTaskView('timeline')"
+            @keydown="onTaskViewKeydown"
+          >
+            任务时间轴
+          </button>
+        </div>
+        <div class="page-actions">
+          <el-button v-if="shareCompanies.length" v-permission="'project:task:share'" @click="shareOpen = true">今日工作外链</el-button>
+          <el-button type="primary" @click="open()">新建任务</el-button>
+        </div>
+      </div>
+
+      <aside v-show="!projectNavCollapsed" class="project-tree-panel">
+        <nav class="project-nav" aria-label="项目列表">
+          <button
+            type="button"
+            class="project-nav-item"
+            :class="{ 'is-active': query.projectId == null }"
+            @click="onProjectNavClick(undefined)"
+          >
+            <span>全部项目</span>
+            <i>{{ projectNavCount }}</i>
+          </button>
+          <button
+            v-for="item in projectNavItems"
+            :key="item.id"
+            type="button"
+            class="project-nav-item"
+            :class="{ 'is-active': Number(query.projectId) === item.id }"
+            :title="item.label"
+            @click="onProjectNavClick(item.id)"
+          >
+            <span>{{ item.label }}</span>
+            <em
+              v-if="item.scale"
+              class="project-scale-tag"
+              :class="`is-${String(item.scale).toLowerCase()}`"
+            >{{ item.scale === 'MAJOR' ? '重大' : item.scale === 'KEY' ? '重点' : '常规' }}</em>
+          </button>
+        </nav>
       </aside>
 
       <div class="task-workspace-main">
-    <div class="page-card task-view-card">
-      <div class="task-view-switcher" role="tablist" aria-label="任务展示方式">
-        <button
-          id="task-view-tab-details"
-          type="button"
-          role="tab"
-          :aria-selected="taskViewMode === 'details'"
-          aria-controls="task-view-panel-details"
-          :tabindex="taskViewMode === 'details' ? 0 : -1"
-          :class="{ 'is-active': taskViewMode === 'details' }"
-          @click="selectTaskView('details')"
-          @keydown="onTaskViewKeydown"
-        >
-          我的任务明细
-        </button>
-        <button
-          id="task-view-tab-timeline"
-          type="button"
-          role="tab"
-          :aria-selected="taskViewMode === 'timeline'"
-          aria-controls="task-view-panel-timeline"
-          :tabindex="taskViewMode === 'timeline' ? 0 : -1"
-          :class="{ 'is-active': taskViewMode === 'timeline' }"
-          @click="selectTaskView('timeline')"
-          @keydown="onTaskViewKeydown"
-        >
-          任务时间轴
-        </button>
-      </div>
-
       <div
         v-show="taskViewMode === 'timeline'"
         id="task-view-panel-timeline"
         role="tabpanel"
         aria-labelledby="task-view-tab-timeline"
-        class="task-view-panel"
+        class="task-view-panel task-view-panel--timeline"
       >
         <TaskTimeline :tasks="orderedList" :loading="listLoading" @open="open" />
       </div>
@@ -614,52 +618,127 @@ onMounted(async () => {
         id="task-view-panel-details"
         role="tabpanel"
         aria-labelledby="task-view-tab-details"
-        class="task-view-panel"
+        class="task-view-panel task-view-panel--details"
       >
-        <div class="section-head task-section-head">
-          <div><h3>{{ isTaskManager ? `${selectedProjectName} · 任务明细` : '我的任务明细' }}</h3><p>{{ isTaskManager ? '用于筛选、下钻和日常执行' : '仅包含我负责或直接参与的任务' }}</p></div>
+        <div class="details-toolbar">
+          <nav class="delivery-tabs" aria-label="任务交付状态">
+            <button type="button" :class="{ 'is-active': query.status === 0 && !query.overdue }" @click="filterByStatus(0)">我的待办</button>
+            <button type="button" :class="{ 'is-active': query.status === 1 && !query.overdue }" @click="filterByStatus(1)">进行中</button>
+            <button type="button" :class="{ 'is-active': query.overdue }" @click="filterOverdue">已逾期</button>
+            <button type="button" :class="{ 'is-active': query.status === 4 && !query.overdue }" @click="filterByStatus(4)">待确认完成</button>
+            <button type="button" :class="{ 'is-active': query.status === 2 && !query.overdue }" @click="filterByStatus(2)">已完成</button>
+          </nav>
+          <el-form class="filter-bar task-filter-bar" @submit.prevent="onFilter">
+            <el-form-item label="标题">
+              <el-input v-model="query.title" clearable placeholder="任务标题" class="filter-keyword--wide" @keyup.enter="onFilter" @change="onFilter" />
+            </el-form-item>
+            <el-form-item label="优先级">
+              <el-select v-model="query.priority" clearable placeholder="全部" class="filter-select" @change="onFilter">
+                <el-option v-for="(label, value) in priorityMap" :key="value" :label="label" :value="Number(value)" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="时间周期">
+              <el-select v-model="periodKey" class="period-select" aria-label="按任务创建时间筛选" @change="onPeriodChange">
+                <el-option v-for="item in periodOptions" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="periodKey === 'custom'" label="自定义日期">
+              <el-date-picker v-model="customPeriod" type="daterange" value-format="YYYY-MM-DD" range-separator="至"
+                start-placeholder="开始日期" end-placeholder="结束日期" unlink-panels @change="onPeriodChange" />
+            </el-form-item>
+            <el-form-item class="filter-actions">
+              <el-button @click="resetQuery">重置</el-button>
+            </el-form-item>
+          </el-form>
         </div>
-        <nav class="delivery-tabs" aria-label="任务交付状态">
-          <button type="button" :class="{ 'is-active': query.status === 0 && !query.overdue }" @click="filterByStatus(0)">我的待办</button>
-          <button type="button" :class="{ 'is-active': query.status === 1 && !query.overdue }" @click="filterByStatus(1)">进行中</button>
-          <button type="button" :class="{ 'is-active': query.overdue }" @click="filterOverdue">已逾期</button>
-          <button type="button" :class="{ 'is-active': query.status === 4 && !query.overdue }" @click="filterByStatus(4)">待确认完成</button>
-          <button type="button" :class="{ 'is-active': query.status === 2 && !query.overdue }" @click="filterByStatus(2)">已完成</button>
-        </nav>
-        <el-table v-loading="listLoading" :data="orderedList" row-key="id" stripe empty-text="暂无任务" class="task-table">
-        <el-table-column label="顺序" width="92" align="center">
-          <template #default="{ row, $index }">
-            <div class="task-order-actions">
-              <button type="button" :disabled="$index === 0" :aria-label="`上移任务：${row.title}`" @click="moveTask(row.id, -1)">↑</button>
-              <button type="button" :disabled="$index === orderedList.length - 1" :aria-label="`下移任务：${row.title}`" @click="moveTask(row.id, 1)">↓</button>
-            </div>
+        <div class="task-table-scroll">
+        <el-table
+          ref="taskTableRef"
+          v-loading="listLoading"
+          :data="detailTreeList"
+          row-key="id"
+          height="100%"
+          stripe
+          :tree-props="{ children: 'children' }"
+          :row-class-name="taskRowClassName"
+          empty-text="暂无任务"
+          class="task-table"
+        >
+        <el-table-column
+          label=""
+          width="48"
+          align="center"
+          class-name="task-expand-col"
+          label-class-name="task-expand-col"
+        >
+          <template #default="{ row }">
+            <button
+              v-if="hasSubtasks(row)"
+              type="button"
+              class="task-expand-btn"
+              :class="{ 'is-expanded': isTaskExpanded(row) }"
+              :aria-expanded="isTaskExpanded(row)"
+              :aria-label="isTaskExpanded(row) ? '收起子任务' : '展开子任务'"
+              :title="isTaskExpanded(row) ? '收起子任务' : '展开子任务'"
+              @click.stop="toggleTaskExpand(row)"
+            >
+              <el-icon :size="14"><ArrowRight /></el-icon>
+            </button>
           </template>
         </el-table-column>
-        <el-table-column label="任务" min-width="320">
+        <el-table-column label="任务" min-width="360">
           <template #default="{ row }">
             <div
               class="task-title-cell"
-              :class="{ 'is-dragging': String(draggingTaskId) === String(row.id) }"
-              draggable="true"
-              @dragstart="onTaskDragStart($event, row.id)"
+              :class="{
+                'is-subtask': isSubtaskRow(row),
+                'is-dragging': String(draggingTaskId) === String(row.id),
+                'show-drag-hint': !isSubtaskRow(row) && String(hoveredTaskId) === String(row.id),
+              }"
+              :draggable="!isSubtaskRow(row)"
+              @mouseenter="!isSubtaskRow(row) && onTaskMouseEnter(row.id)"
+              @mouseleave="!isSubtaskRow(row) && onTaskMouseLeave(row.id)"
+              @dragstart="!isSubtaskRow(row) && onTaskDragStart($event, row.id)"
               @dragend="draggingTaskId = null"
-              @dragover.prevent
-              @drop.prevent="onTaskDrop(row.id)"
+              @dragover="onTaskDragOver($event, row)"
+              @drop.prevent="!isSubtaskRow(row) && onTaskDrop(row.id)"
             >
-              <div class="task-title-line">
-                <el-link type="primary" :underline="false" @click="open(row)">{{ row.title }}</el-link>
-                <el-tag v-if="row.parentTaskId" type="info" size="small" effect="plain">子任务</el-tag>
-                <el-tag v-if="row.overdue" type="danger" size="small" effect="light">逾期</el-tag>
-                <el-tag v-else-if="!row.dueDate && [0, 1].includes(row.status)" type="info" size="small" effect="plain">无日期</el-tag>
-                <el-tag :type="priorityType[row.priority] || 'info'" size="small" effect="plain">
-                  {{ priorityMap[row.priority] || '中' }}优先级
-                </el-tag>
+              <el-icon
+                v-show="!isSubtaskRow(row) && String(hoveredTaskId) === String(row.id)"
+                class="task-drag-hint"
+                :size="16"
+                title="按住拖动可调整顺序"
+              >
+                <Rank />
+              </el-icon>
+              <span v-if="isSubtaskRow(row)" class="task-level-branch" aria-hidden="true" />
+              <div class="task-title-body">
+                <div class="task-title-line">
+                  <span v-if="isSubtaskRow(row)" class="task-level-badge is-child" title="子任务">子</span>
+                  <span class="task-title-wrap" :class="{ 'has-count': !isSubtaskRow(row) && row.children?.length }">
+                    <el-link type="primary" :underline="false" @click="open(row)">{{ row.title }}</el-link>
+                    <i
+                      v-if="!isSubtaskRow(row) && row.children?.length"
+                      class="task-child-count"
+                      :title="`${row.children.length} 个子任务`"
+                    >{{ row.children.length }}</i>
+                  </span>
+                  <el-tag v-if="row.overdue" type="danger" size="small" effect="light">逾期</el-tag>
+                  <el-tag v-else-if="!row.dueDate && [0, 1].includes(row.status)" type="info" size="small" effect="plain">无日期</el-tag>
+                  <el-tag :type="priorityType[row.priority] || 'info'" size="small" effect="plain">
+                    {{ priorityMap[row.priority] || '中' }}优先级
+                  </el-tag>
+                </div>
+                <div v-if="taskContentPreview(row.content)" class="task-content-preview">{{ taskContentPreview(row.content) }}</div>
               </div>
-              <div v-if="taskContentPreview(row.content)" class="task-content-preview">{{ taskContentPreview(row.content) }}</div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="projectName" label="所属项目" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="projectName" label="所属项目" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="task-project-name">{{ row.projectName || '—' }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="负责人" min-width="190">
           <template #default="{ row }">
             <div class="task-owner-cell">
@@ -689,21 +768,41 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="220" fixed="right" align="center">
+        <el-table-column label="实际时间" min-width="190">
+          <template #default="{ row }">
+            <div class="task-date-range">
+              <span><i>开始</i>{{ fmtTaskTime(row.startedAt) }}</span>
+              <span><i>结束</i>{{ fmtTaskTime(row.completedAt) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="128" fixed="right" align="center">
           <template #default="{ row }">
             <div class="task-row-actions">
-              <el-button link type="primary" @click="open(row)">详情</el-button>
-              <el-button v-if="userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3" link type="primary" @click="open(row, 'edit')">编辑</el-button>
-              <el-button v-if="userStore.hasPermission('project:task:add') && row.canTransfer && row.status !== 3" link type="primary" @click="open(row, 'transfer')">移交</el-button>
-              <el-button v-if="userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3" link type="danger" @click="open(row, 'close')">关闭</el-button>
-              <template v-if="isTaskManager && row.status === 4">
-                <el-button link type="success" @click="review(row, true)">确认完成</el-button>
-                <el-button link type="danger" @click="review(row, false)">驳回</el-button>
-              </template>
+              <button type="button" class="task-action-btn is-detail" @click="open(row)">详情</button>
+              <el-dropdown
+                v-if="hasTaskActions(row)"
+                trigger="hover"
+                popper-class="task-action-dropdown"
+                @command="(command) => onTaskAction(row, String(command))"
+              >
+                <button type="button" class="task-action-btn is-more">更多</button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-if="canCreateSubtask(row)" command="subtask">子任务</el-dropdown-item>
+                    <el-dropdown-item v-if="canEditTask(row)" command="edit">编辑</el-dropdown-item>
+                    <el-dropdown-item v-if="canTransferTask(row)" command="transfer">移交</el-dropdown-item>
+                    <el-dropdown-item v-if="canCloseTask(row)" command="close" divided>关闭</el-dropdown-item>
+                    <el-dropdown-item v-if="canReviewTask(row)" command="review-pass" divided>确认完成</el-dropdown-item>
+                    <el-dropdown-item v-if="canReviewTask(row)" command="review-reject">驳回</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </div>
           </template>
         </el-table-column>
         </el-table>
+        </div>
         <div class="page-footer">
           <el-pagination
             v-model:current-page="query.page"
@@ -716,7 +815,6 @@ onMounted(async () => {
           />
         </div>
       </div>
-    </div>
       </div>
     </div>
 
@@ -733,107 +831,269 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.page-title { margin: 0 0 5px; font-size: 20px; color: var(--kk-text); }
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
-}
-.stat-card {
-  position: relative;
-  overflow: hidden;
+.task-page {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 92px;
-  padding: 16px 14px 16px 18px;
-  cursor: pointer;
-  text-align: left;
-  background: var(--kk-glass-bg);
-  border: 1px solid var(--kk-glass-border);
-  border-radius: var(--kk-radius);
-  box-shadow: var(--kk-glass-shadow);
-  backdrop-filter: var(--kk-glass-blur);
-  -webkit-backdrop-filter: var(--kk-glass-blur);
-  transition: box-shadow 0.15s var(--kk-ease);
+  flex-direction: column;
+  height: calc(100vh - 108px);
+  max-height: calc(100vh - 108px);
+  min-height: 0;
+  overflow: hidden;
 }
-.stat-card::before {
-  content: "";
-  position: absolute;
-  right: -24px;
-  top: 50%;
-  width: 96px;
-  height: 96px;
-  border-radius: 50%;
-  transform: translateY(-50%);
-  filter: blur(28px);
-  opacity: 0.22;
-  pointer-events: none;
+.task-page > .task-workspace {
+  flex: 1 1 auto !important;
+  min-height: 0;
+  max-height: 100%;
 }
-.stat-card--slate::before { background: #e2e8f0; }
-.stat-card--amber::before { background: #fde68a; }
-.stat-card--cyan::before { background: #a5f3fc; }
-.stat-card--rose::before { background: #fecaca; }
-.stat-card--emerald::before { background: #a7f3d0; }
-.stat-card--indigo::before { background: #d4d4d8; }
-.stat-card--slate .stat-glyph { color: #64748b; }
-.stat-card--amber .stat-glyph { color: #d97706; }
-.stat-card--cyan .stat-glyph { color: #0891b2; }
-.stat-card--rose .stat-glyph { color: #dc2626; }
-.stat-card--emerald .stat-glyph { color: #059669; }
-.stat-card--indigo .stat-glyph { color: var(--kk-primary); }
-.stat-card:hover { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08); }
-.stat-card.is-active {
-  box-shadow: 0 0 0 2px var(--kk-primary);
-}
-.stat-card:focus-visible {
-  outline: 2px solid var(--kk-primary);
-  outline-offset: 2px;
-}
-.stat-body { position: relative; z-index: 1; min-width: 0; }
-.stat-glyph { position: relative; z-index: 1; flex-shrink: 0; }
-.stat-label { font-size: 13px; font-weight: 500; color: var(--kk-text-secondary); }
-.stat-value {
-  margin-top: 6px;
-  font-size: 24px;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  font-variant-numeric: tabular-nums;
-  color: var(--kk-text);
-}
-
 .task-table :deep(.el-table__cell) { padding: 13px 0; }
 .task-table :deep(.el-table__header .el-table__cell) { padding: 11px 0; }
 .task-table :deep(.el-table__row) { height: 66px; }
-.task-row-actions { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px 10px; }
-.task-row-actions :deep(.el-button + .el-button) { margin-left: 0; }
-.task-order-actions { display: inline-flex; align-items: center; gap: 4px; }
-.task-order-actions button {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
+.task-table :deep(.el-table__row:not(.is-subtask) .task-title-line .el-link) {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--kk-text);
+}
+.task-table :deep(.el-table__row.is-subtask > td.el-table__cell) {
+  padding-top: 9px;
+  padding-bottom: 9px;
+  background-color: rgba(37, 99, 235, 0.04) !important;
+}
+.task-table :deep(.el-table__row.is-subtask:hover > td.el-table__cell) {
+  background-color: rgba(37, 99, 235, 0.07) !important;
+}
+.task-table :deep(.el-table__row.is-subtask .el-table__cell.task-expand-col) {
+  box-shadow: inset 3px 0 0 rgba(37, 99, 235, 0.55);
+}
+.task-table :deep(.el-table__row.is-subtask .task-title-line .el-link) {
+  max-width: 220px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--kk-text-secondary);
+}
+.task-table :deep(.el-table__row.is-subtask .task-content-preview),
+.task-table :deep(.el-table__row.is-subtask .task-owner-cell strong),
+.task-table :deep(.el-table__row.is-subtask .task-date-range) {
+  color: var(--kk-text-muted);
+}
+/* 隐藏表格自带树形展开，改用独立列按钮 */
+.task-table :deep(.el-table__expand-icon),
+.task-table :deep(.el-table__indent),
+.task-table :deep(.el-table__placeholder) {
+  display: none !important;
+}
+.task-table :deep(.el-table__cell.task-expand-col) {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.task-table :deep(.el-table__cell.task-expand-col .cell) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 0;
-  border: 1px solid var(--kk-border, #dcdfe6);
+}
+.task-expand-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid rgba(24, 24, 27, 0.1);
   border-radius: 7px;
   color: var(--kk-text-secondary);
-  background: var(--kk-bg, #fff);
+  background: rgba(255, 255, 255, 0.72);
   cursor: pointer;
+  transition: color .15s var(--kk-ease), background-color .15s var(--kk-ease), border-color .15s var(--kk-ease), transform .15s var(--kk-ease);
 }
-.task-order-actions button:hover:not(:disabled) { color: var(--kk-primary); border-color: var(--kk-primary); }
-.task-order-actions button:focus-visible { outline: 2px solid var(--kk-primary); outline-offset: 2px; }
-.task-order-actions button:disabled { opacity: .35; cursor: not-allowed; }
-.delivery-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
-.delivery-tabs button { min-height: 38px; padding: 0 14px; border: 1px solid var(--kk-border, #dcdfe6); border-radius: 9px; background: var(--kk-card-bg, #fff); color: var(--kk-text-secondary); font: inherit; cursor: pointer; }
-.delivery-tabs button:hover { border-color: var(--kk-primary); color: var(--kk-primary); }
-.delivery-tabs button.is-active { border-color: #18181b; background: #18181b; color: #fff; }
+.task-expand-btn:hover {
+  color: #1d4ed8;
+  border-color: rgba(37, 99, 235, 0.28);
+  background: rgba(37, 99, 235, 0.08);
+}
+.task-expand-btn:focus-visible {
+  outline: 2px solid var(--kk-primary);
+  outline-offset: 2px;
+}
+.task-expand-btn .el-icon {
+  transition: transform .15s var(--kk-ease);
+}
+.task-expand-btn.is-expanded .el-icon {
+  transform: rotate(90deg);
+}
+.task-title-cell.is-subtask { cursor: default; gap: 8px; }
+.task-level-branch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 22px;
+  margin-top: 1px;
+}
+.task-level-branch::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 0;
+  width: 1.5px;
+  height: 12px;
+  background: rgba(37, 99, 235, 0.35);
+}
+.task-level-branch::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 11px;
+  width: 9px;
+  height: 1.5px;
+  background: rgba(37, 99, 235, 0.35);
+  border-radius: 1px;
+}
+.task-table :deep(td.el-table__cell:has(.task-title-wrap) > .cell) {
+  overflow: visible;
+}
+.task-title-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 250px;
+}
+.task-title-wrap.has-count {
+  padding-top: 6px;
+  padding-right: 16px;
+}
+.task-title-wrap :deep(.el-link) {
+  max-width: 100%;
+}
+.task-child-count {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.14);
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.92);
+  pointer-events: none;
+}
+.task-level-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+}
+.task-level-badge.is-child {
+  color: var(--kk-text-secondary);
+  background: rgba(24, 24, 27, 0.06);
+  border: 1px solid rgba(24, 24, 27, 0.1);
+}
+.task-row-actions { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px 12px; }
+.task-row-actions :deep(.el-dropdown) { line-height: 1; vertical-align: middle; }
+.task-row-actions :deep(.el-tooltip__trigger) {
+  outline: none !important;
+  box-shadow: none !important;
+}
+.task-action-btn {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color .15s var(--kk-ease);
+}
+.task-action-btn:focus,
+.task-action-btn:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.task-action-btn.is-detail {
+  color: #2563eb;
+}
+.task-action-btn.is-detail:hover {
+  color: #1d4ed8;
+}
+.task-action-btn.is-more {
+  color: var(--kk-text-secondary);
+}
+.task-action-btn.is-more:hover {
+  color: var(--kk-text);
+}
+.details-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  margin: 0 0 14px;
+  padding: 14px 0 0;
+}
+.delivery-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; min-width: 0; }
+.delivery-tabs button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: rgba(24, 24, 27, 0.04);
+  color: var(--kk-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color .15s var(--kk-ease), background-color .15s var(--kk-ease), border-color .15s var(--kk-ease);
+}
+.delivery-tabs button:hover { color: var(--kk-text); background: rgba(24, 24, 27, 0.07); }
+.delivery-tabs button.is-active {
+  color: #fff;
+  background: #18181b;
+  border-color: #18181b;
+}
 .delivery-tabs button:focus-visible { outline: 2px solid var(--kk-primary); outline-offset: 2px; }
 .task-title-cell[draggable="true"] { cursor: grab; }
 .task-title-cell[draggable="true"]:active { cursor: grabbing; }
 .task-title-cell.is-dragging { opacity: .48; }
-.task-title-cell { min-width: 0; line-height: 1.4; }
+.task-title-cell {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  line-height: 1.4;
+}
+.task-drag-hint {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--kk-text-muted);
+  opacity: 0.72;
+  animation: taskDragHintPulse 1.4s ease-in-out infinite;
+}
+.task-title-body { min-width: 0; flex: 1; }
 .task-title-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+@keyframes taskDragHintPulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.85; }
+}
 .task-title-line .el-link { min-width: 0; max-width: 250px; font-weight: 600; }
 .task-title-line :deep(.el-link__inner) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-title-line .el-tag { flex-shrink: 0; }
@@ -846,46 +1106,128 @@ onMounted(async () => {
   white-space: nowrap;
   max-width: 440px;
 }
+.task-project-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--kk-text-secondary);
+}
 .task-owner-cell { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .task-owner-cell strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--kk-text); }
 .task-owner-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--kk-text-muted); }
 .delivery-cell { max-width: 170px; }
 .delivery-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
 .delivery-head > span { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--kk-text-secondary); }
-.stat-hint { margin-top: 3px; font-size: 12px; color: var(--kk-text-muted); }
-
 .task-workspace {
+  --task-rail: 248px;
+  --task-rail-collapsed: 44px;
+  --task-pad-x: 18px;
+  --task-line: rgba(24, 24, 27, 0.07);
+  --task-radius: var(--kk-radius);
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: var(--task-rail) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0;
   align-items: stretch;
+  height: 100%;
+  max-height: 100%;
+  padding: 0;
+  border-radius: var(--task-radius);
+  overflow: hidden;
+  transition: grid-template-columns .2s var(--kk-ease);
 }
-.stat-grid--personal { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-.task-workspace--personal { grid-template-columns: 260px minmax(0, 1fr); }
+/* 铺满内边距后，全局 page-card 悬停光晕/内阴影会露出直角，这里关掉 */
+.task-workspace.page-card:hover {
+  border-color: var(--kk-glass-border);
+  box-shadow: var(--kk-glass-shadow);
+}
+.task-workspace.page-card:hover::after {
+  opacity: 0;
+}
+.task-workspace.is-nav-collapsed {
+  grid-template-columns: var(--task-rail-collapsed) minmax(0, 1fr);
+}
+.task-workspace.is-nav-collapsed .project-tree-panel {
+  display: none;
+}
+.task-workspace.is-nav-collapsed .project-panel-head {
+  grid-row: 1 / -1;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 14px 0 0;
+  border-bottom: 0;
+  border-radius: var(--task-radius) 0 0 var(--task-radius);
+}
 .task-workspace-main {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  grid-column: 2;
+  grid-row: 2;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  padding: 0 22px 16px;
+  border-bottom-right-radius: var(--task-radius);
 }
-.task-filter-bar { margin-bottom: 0; }
-.period-select { width: 136px; }
-.task-view-card { min-width: 0; overflow: hidden; }
+.filter-bar.task-filter-bar {
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  justify-content: flex-end;
+}
+.filter-bar.task-filter-bar .el-form-item {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.filter-bar.task-filter-bar .el-form-item__label {
+  padding: 0;
+  line-height: 32px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--kk-text-muted);
+}
+.filter-bar.task-filter-bar .filter-actions .el-form-item__label {
+  display: none;
+}
+.period-select { width: 120px; }
+.task-view-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 56px;
+  margin: 0;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--task-line);
+  border-top-right-radius: var(--task-radius);
+}
 .task-view-switcher {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  margin-bottom: 16px;
-  padding: 4px;
-  border: 1px solid var(--kk-border, #dcdfe6);
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid rgba(24, 24, 27, 0.08);
   border-radius: 10px;
-  background: var(--kk-bg-muted, #f5f7fa);
+  background: rgba(24, 24, 27, 0.04);
 }
 .task-view-switcher button {
-  min-height: 36px;
-  padding: 7px 16px;
+  min-height: 34px;
+  padding: 6px 14px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 8px;
   font: inherit;
   font-size: 13px;
   font-weight: 500;
@@ -896,85 +1238,194 @@ onMounted(async () => {
 }
 .task-view-switcher button:hover { color: var(--kk-text); }
 .task-view-switcher button.is-active {
-  color: var(--kk-primary);
-  background: var(--kk-bg, #fff);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, .08);
+  color: var(--kk-text);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 1px 3px rgba(24, 24, 27, .08);
 }
 .task-view-switcher button:focus-visible {
   outline: 2px solid var(--kk-primary);
   outline-offset: 2px;
 }
-.task-view-panel { min-width: 0; }
-.project-tree-panel {
+.task-view-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
   min-width: 0;
-  padding: 18px 14px;
+  min-height: 0;
+  height: 100%;
   overflow: hidden;
 }
-.project-tree-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 0 6px 14px;
-  border-bottom: 1px solid var(--kk-border, #ebeef5);
+.task-view-panel--timeline {
+  padding-top: 14px;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
-.project-tree-head h3 { margin: 0; font-size: 16px; color: var(--kk-text); }
-.project-tree-head p { margin: 4px 0 0; font-size: 12px; color: var(--kk-text-muted); }
-.project-tree-head > span {
-  min-width: 24px;
-  padding: 3px 7px;
+.task-view-panel--details {
+  overflow: hidden;
+}
+.task-table-scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 180px;
+  height: 100%;
+  overflow: hidden;
+}
+.task-table-scroll :deep(.el-table) {
+  height: 100%;
+}
+.task-table-scroll :deep(.el-table__inner-wrapper) {
+  height: 100%;
+}
+.task-view-panel--details .page-footer {
+  flex: 0 0 auto;
+  margin-top: 10px;
+  padding-bottom: 0;
+}
+.project-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  grid-column: 1;
+  grid-row: 1;
+  min-height: 56px;
+  padding: 12px var(--task-pad-x);
+  background: rgba(24, 24, 27, 0.018);
+  border-right: 1px solid var(--task-line);
+  border-bottom: 1px solid var(--task-line);
+  border-top-left-radius: var(--task-radius);
+}
+.project-panel-head h3 {
+  margin: 0;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--kk-text-secondary);
+  letter-spacing: 0.02em;
+}
+.project-collapse-btn {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--kk-text-muted);
+  background: transparent;
+  cursor: pointer;
+  transition: color .15s var(--kk-ease), background-color .15s var(--kk-ease), border-color .15s var(--kk-ease);
+}
+.project-collapse-btn:hover {
+  color: var(--kk-text);
+  background: rgba(255, 255, 255, 0.55);
+  border-color: rgba(24, 24, 27, 0.06);
+}
+.project-collapse-btn:focus-visible {
+  outline: 2px solid var(--kk-primary);
+  outline-offset: 2px;
+}
+.project-tree-panel {
+  display: flex;
+  flex-direction: column;
+  grid-column: 1;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px 10px 16px;
+  overflow: hidden;
+  background: rgba(24, 24, 27, 0.018);
+  border-right: 1px solid var(--task-line);
+  border-bottom-left-radius: var(--task-radius);
+}
+.project-nav {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  gap: 3px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.project-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--kk-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: color .15s var(--kk-ease), background-color .15s var(--kk-ease), border-color .15s var(--kk-ease);
+}
+.project-nav-item:hover {
+  color: var(--kk-text);
+  background: rgba(255, 255, 255, 0.45);
+}
+.project-nav-item.is-active {
+  color: var(--kk-text);
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.04);
+}
+.project-nav-item:focus-visible {
+  outline: 2px solid var(--kk-primary);
+  outline-offset: 2px;
+}
+.project-nav-item > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-nav-item > i {
+  flex: 0 0 auto;
+  min-width: 22px;
+  padding: 1px 6px;
   border-radius: 999px;
   text-align: center;
   font-size: 11px;
-  color: var(--kk-text-secondary);
-  background: var(--kk-bg-muted, #f5f7fa);
-}
-.project-tree {
-  margin-top: 10px;
-  background: transparent;
-  color: var(--kk-text-secondary);
-}
-.project-tree :deep(.el-tree-node__content) {
-  height: 40px;
-  margin: 2px 0;
-  border-radius: 8px;
-  padding-right: 7px;
-}
-.project-tree :deep(.el-tree-node__content:hover) { background: var(--kk-bg-muted, #f5f7fa); }
-.project-tree :deep(.el-tree-node.is-current > .el-tree-node__content) {
-  color: var(--kk-text);
-  background: color-mix(in srgb, var(--kk-primary) 10%, transparent);
-}
-.project-tree-node {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  min-width: 0;
-  font-size: 13px;
-}
-.project-tree-node .el-icon { flex: 0 0 auto; color: var(--kk-text-muted); }
-.project-tree-node > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-tree-node > i {
-  flex: 0 0 auto;
-  font-size: 10px;
   font-style: normal;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
   color: var(--kk-text-muted);
+  background: rgba(24, 24, 27, 0.06);
+}
+.project-nav-item.is-active > i {
+  color: var(--kk-text-secondary);
+  background: rgba(24, 24, 27, 0.08);
+}
+.project-scale-tag {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+}
+.project-scale-tag.is-major {
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.18);
+}
+.project-scale-tag.is-key {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.22);
+}
+.project-scale-tag.is-normal {
+  color: #475569;
+  background: rgba(100, 116, 139, 0.1);
+  border-color: rgba(100, 116, 139, 0.16);
 }
 
-.management-grid,
-.insight-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(360px, 2fr);
-  gap: 14px;
-  align-items: stretch;
-}
-.management-grid--personal { grid-template-columns: minmax(0, 1fr); }
-.management-grid > .page-card,
-.insight-grid > .page-card {
-  min-width: 0;
-  height: 100%;
-}
 .section-head {
   display: flex;
   align-items: flex-start;
@@ -984,89 +1435,59 @@ onMounted(async () => {
 }
 .section-head h3 { margin: 0; font-size: 16px; color: var(--kk-text); }
 .section-head p { margin: 4px 0 0; font-size: 12px; color: var(--kk-text-muted); }
-.risk-badges { display: flex; gap: 8px; font-size: 12px; color: var(--kk-text-secondary); }
-.risk-badges span { padding: 4px 8px; border-radius: 999px; background: var(--kk-bg-muted, #f5f7fa); }
-.risk-list, .health-list { display: flex; flex-direction: column; }
-.risk-row, .health-row {
-  width: 100%;
-  border: 0;
-  border-top: 1px solid var(--kk-border, #ebeef5);
-  background: transparent;
-  cursor: pointer;
-  color: inherit;
-}
-.risk-row:first-child, .health-row:first-child { border-top: 0; }
-.risk-row {
-  display: grid;
-  grid-template-columns: 82px minmax(0, 1fr) 100px;
-  gap: 10px;
-  align-items: center;
-  padding: 11px 2px;
-  text-align: left;
-}
-.risk-row:hover, .health-row:hover { background: var(--kk-bg-muted, #f5f7fa); }
-.risk-main, .risk-meta, .health-project div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.risk-main strong, .health-project strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.risk-main span, .risk-meta span, .health-project span { font-size: 12px; color: var(--kk-text-muted); }
-.risk-meta { text-align: right; }
-.risk-meta strong { font-size: 12px; color: var(--kk-text-secondary); }
-.health-row { padding: 11px 2px; text-align: left; }
-.health-project { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-.health-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 9px; }
-.health-metrics span { font-size: 11px; color: var(--kk-text-muted); }
-.health-metrics b { margin-right: 3px; font-size: 14px; color: var(--kk-text); }
-.health-metrics .danger b { color: var(--kk-danger); }
-.task-section-head { padding: 2px 2px 12px; margin-bottom: 0; }
-.performance-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.performance-metrics div { padding: 10px 12px; border-radius: 8px; background: var(--kk-bg-muted, #f5f7fa); }
-.performance-metrics span { display: block; font-size: 12px; color: var(--kk-text-muted); }
-.performance-metrics strong { display: block; margin-top: 5px; font-size: 21px; color: var(--kk-text); }
-.performance-metrics strong.danger { color: var(--kk-danger); }
-.trend-legend { display: flex; align-items: center; gap: 6px; margin-top: 16px; font-size: 11px; color: var(--kk-text-muted); }
-.trend-legend span { width: 8px; height: 8px; border-radius: 2px; }
-.created-dot, .trend-bars .created { background: #94a3b8; }
-.completed-dot, .trend-bars .completed { background: var(--kk-primary); }
-.trend-chart { display: grid; grid-template-columns: repeat(6, 1fr); align-items: end; gap: 10px; height: 112px; margin-top: 6px; }
-.trend-column { display: flex; flex-direction: column; align-items: center; gap: 5px; }
-.trend-column > span { font-size: 11px; color: var(--kk-text-muted); }
-.trend-bars { height: 76px; display: flex; align-items: end; gap: 3px; }
-.trend-bars i { display: block; width: 10px; min-height: 3px; border-radius: 3px 3px 0 0; }
-.owner-list { display: flex; flex-direction: column; gap: 13px; }
-.owner-line { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
-.owner-line strong { font-size: 13px; }
-.owner-line span { color: var(--kk-text-muted); }
-.owner-bar { height: 7px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: var(--kk-bg-muted, #ebeef5); }
-.owner-bar i { display: block; height: 100%; border-radius: inherit; background: var(--kk-primary); }
 .task-date-range { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--kk-text-secondary); }
 .task-date-range span { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
 .task-date-range i { width: 28px; flex-shrink: 0; font-style: normal; color: var(--kk-text-muted); }
 .overdue { color: var(--kk-danger); font-weight: 500; }
 
-@media (max-width: 1100px) {
-  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .management-grid,
-  .insight-grid { grid-template-columns: minmax(0, 1fr); }
-}
 @media (max-width: 900px) {
-  .task-workspace { grid-template-columns: minmax(0, 1fr); }
-  .project-tree-panel { max-height: 300px; }
-  .project-tree { max-height: 225px; overflow-y: auto; }
+  .task-page { height: calc(100vh - 100px); }
+  .task-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(120px, 0.35fr) minmax(0, 1fr);
+  }
+  .task-workspace.is-nav-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+  .project-panel-head,
+  .task-view-toolbar,
+  .project-tree-panel,
+  .task-workspace-main { grid-column: 1; }
+  .project-panel-head {
+    grid-row: 1;
+    border-right: 0;
+    border-radius: var(--task-radius) var(--task-radius) 0 0;
+  }
+  .task-view-toolbar {
+    grid-row: 2;
+    border-radius: 0;
+  }
+  .project-tree-panel {
+    grid-row: 3;
+    border-right: 0;
+    border-bottom: 1px solid var(--task-line);
+    border-radius: 0;
+  }
+  .task-workspace-main {
+    grid-row: 4;
+    min-height: 0;
+    border-radius: 0 0 var(--task-radius) var(--task-radius);
+  }
+  .task-workspace.is-nav-collapsed .project-panel-head {
+    grid-row: 1;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--task-line);
+    border-radius: var(--task-radius) var(--task-radius) 0 0;
+  }
+  .task-workspace.is-nav-collapsed .task-view-toolbar { grid-row: 2; }
+  .task-workspace.is-nav-collapsed .task-workspace-main { grid-row: 3; }
 }
 @media (max-width: 640px) {
-  .stat-grid { grid-template-columns: minmax(0, 1fr); }
-  .task-view-switcher { display: flex; width: 100%; }
-  .task-view-switcher button { flex: 1; min-width: 0; padding-inline: 8px; }
+  .task-page { height: calc(100vh - 88px); }
+  .task-view-toolbar { flex-wrap: wrap; }
   .section-head { gap: 10px; }
-  .risk-badges { flex-direction: column; align-items: flex-end; gap: 4px; }
-  .risk-row { grid-template-columns: 72px minmax(0, 1fr); }
-  .risk-meta { grid-column: 2; flex-direction: row; justify-content: space-between; text-align: left; }
-  .performance-metrics { grid-template-columns: minmax(0, 1fr); }
-}
-@media (prefers-reduced-transparency: reduce) {
-  .stat-card {
-    background: #fff;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-  }
 }
 </style>
