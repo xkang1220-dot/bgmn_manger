@@ -83,7 +83,7 @@ const previewIsVideo = ref(false)
 const transferDialog = ref(false)
 const transferring = ref(false)
 const transferForm = reactive({
-  assigneeId: undefined as number | undefined,
+  holderId: undefined as number | undefined,
   remark: '',
   imageFileIds: [] as number[],
 })
@@ -466,6 +466,8 @@ async function save() {
   saving.value = true
   try {
     const payload = { ...form }
+    // 新建任务统一从“待办”开始；后续状态流转从列表“更多”操作进入并二次确认。
+    if (isNew.value) payload.status = 0
     // 去掉仅展示用字段，避免污染请求体
     delete payload.assigneeName
     delete payload.holderName
@@ -564,7 +566,7 @@ async function reviewCompletion(approved: boolean) {
 
 async function openTransfer() {
   await loadProjectCandidates(form.projectId || detail.value?.projectId)
-  transferForm.assigneeId = undefined
+  transferForm.holderId = undefined
   transferForm.remark = ''
   transferForm.imageFileIds = []
   transferImages.value = []
@@ -581,8 +583,8 @@ function onTransferDialogClose() {
 }
 
 const transferCandidates = computed(() => {
-  const joined = new Set((detail.value?.participantIds || []).map((id: number) => Number(id)))
-  return candidateUsers.value.filter((u) => isEligibleCandidate(u) && !joined.has(Number(u.id)))
+  const currentHolderId = Number(detail.value?.holderId)
+  return candidateUsers.value.filter((u) => isEligibleCandidate(u) && Number(u.id) !== currentHolderId)
 })
 
 async function onUploadTransferImage(options: any) {
@@ -602,14 +604,14 @@ async function onUploadTransferImage(options: any) {
 
 async function submitTransfer() {
   if (!form.id) return
-  if (!transferForm.assigneeId) {
+  if (!transferForm.holderId) {
     ElMessage.warning('请选择移交对象')
     return
   }
   transferring.value = true
   try {
     await bizApi.transferTask(form.id, {
-      assigneeId: transferForm.assigneeId,
+      holderId: transferForm.holderId,
       remark: transferForm.remark || undefined,
       imageFileIds: transferForm.imageFileIds.length ? transferForm.imageFileIds : undefined,
     })
@@ -969,11 +971,10 @@ function commentAttachmentUrl(file: any, preview = false) {
                 </el-radio-group>
               </el-form-item>
               <el-form-item label="任务状态">
-                <el-radio-group v-model="form.status" class="option-cards">
-                  <el-radio-button :value="0">待办</el-radio-button>
-                  <el-radio-button :value="1">进行中</el-radio-button>
-                  <el-radio-button :value="2" :disabled="hasUnfinishedChildren()">完成</el-radio-button>
-                </el-radio-group>
+                <el-tag :type="statusType[isNew ? 0 : form.status]" effect="light">
+                  {{ statusMap[isNew ? 0 : form.status] || '待办' }}
+                </el-tag>
+                <span v-if="isNew" class="field-help">新建任务默认保存为待办</span>
               </el-form-item>
             </div>
           </section>
@@ -1041,7 +1042,7 @@ function commentAttachmentUrl(file: any, preview = false) {
     <el-dialog v-model="transferDialog" title="移交任务" width="420px" append-to-body @close="onTransferDialogClose">
       <el-form label-width="84px">
         <el-form-item label="移交给" required>
-          <el-select v-model="transferForm.assigneeId" filterable placeholder="移交给项目负责人或参与人" style="width: 100%">
+          <el-select v-model="transferForm.holderId" filterable placeholder="选择新的任务持有人" style="width: 100%">
             <el-option
               v-for="u in transferCandidates"
               :key="u.id"
@@ -1049,7 +1050,7 @@ function commentAttachmentUrl(file: any, preview = false) {
               :value="u.id"
             />
           </el-select>
-          <div v-if="!transferCandidates.length" class="transfer-empty-hint">项目内可选人员均已是任务参与人，无需移交</div>
+          <div v-if="!transferCandidates.length" class="transfer-empty-hint">暂无其他可选持有人</div>
         </el-form-item>
         <el-form-item label="说明">
           <el-input v-model="transferForm.remark" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="可选，写明移交原因" />
@@ -1233,6 +1234,12 @@ function commentAttachmentUrl(file: any, preview = false) {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: 14px;
+}
+
+.field-help {
+  margin-left: 8px;
+  color: var(--kk-text-muted);
+  font-size: 12px;
 }
 
 .option-cards {

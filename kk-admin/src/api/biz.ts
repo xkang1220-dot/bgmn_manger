@@ -338,7 +338,7 @@ export const bizApi = {
   taskFlows(taskId: number) {
     return request<any[]>({ url: `/task/${taskId}/flows`, method: 'get' })
   },
-  transferTask(taskId: number, data: { assigneeId: number; remark?: string; imageFileIds?: number[] }) {
+  transferTask(taskId: number, data: { holderId: number; remark?: string; imageFileIds?: number[] }) {
     return request<void>({ url: `/task/${taskId}/transfer`, method: 'put', data })
   },
   uploadTaskImage(file: File) {

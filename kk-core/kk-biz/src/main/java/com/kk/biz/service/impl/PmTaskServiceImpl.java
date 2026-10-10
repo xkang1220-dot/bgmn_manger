@@ -894,9 +894,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         assertParticipantsEligible(project.getId(), participants);
         assertParticipantsEligible(project.getId(), List.of(holderId));
         assertUserInCompany(holderId, project.getCompanyId());
-        if (task.getStatus() == null) {
-            task.setStatus(0);
-        }
+        // 所有新任务统一从待办开始，状态流转必须通过独立的状态操作完成。
+        task.setStatus(0);
         if (task.getPriority() == null) {
             task.setPriority(2);
         }
@@ -1229,14 +1228,14 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             throw new BusinessException("移交说明不能超过 500 字");
         }
         ensureParticipant(id, targetUserId);
-        if (Objects.equals(existing.getAssigneeId(), targetUserId)) {
+        if (Objects.equals(existing.getHolderId(), targetUserId)) {
             return;
         }
-        PmTask ownerUpdate = new PmTask();
-        ownerUpdate.setId(id);
-        ownerUpdate.setAssigneeId(targetUserId);
-        ownerUpdate.setLastActivityAt(LocalDateTime.now());
-        updateById(ownerUpdate);
+        PmTask holderUpdate = new PmTask();
+        holderUpdate.setId(id);
+        holderUpdate.setHolderId(targetUserId);
+        holderUpdate.setLastActivityAt(LocalDateTime.now());
+        updateById(holderUpdate);
         long fromUserId = StpUtil.getLoginIdAsLong();
         recordFlow(id, "TRANSFER", fromUserId, targetUserId, null, null, note, imageFileIds);
         if (!Objects.equals(fromUserId, targetUserId)) {

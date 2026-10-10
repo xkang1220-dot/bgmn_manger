@@ -396,17 +396,56 @@ function canReviewTask(row: any) {
   return isTaskManager && row.status === 4
 }
 
+function canChangeTaskStatus(row: any) {
+  return userStore.hasPermission('project:task:edit') && row.canEdit && ![3, 4].includes(Number(row.status))
+}
+
 function hasTaskActions(row: any) {
-  return canCreateSubtask(row) || canEditTask(row) || canTransferTask(row) || canCloseTask(row) || canReviewTask(row)
+  return canCreateSubtask(row) || canEditTask(row) || canTransferTask(row) || canCloseTask(row)
+    || canReviewTask(row) || canChangeTaskStatus(row)
 }
 
 function onTaskAction(row: any, command: string) {
   if (command === 'subtask') open(row, 'subtask')
   else if (command === 'edit') open(row, 'edit')
   else if (command === 'transfer') open(row, 'transfer')
+  else if (command === 'start') void changeTaskStatus(row, 1)
+  else if (command === 'complete') void changeTaskStatus(row, 2)
+  else if (command === 'pause') void changeTaskStatus(row, 0)
   else if (command === 'close') open(row, 'close')
   else if (command === 'review-pass') void review(row, true)
   else if (command === 'review-reject') void review(row, false)
+}
+
+const taskStatusActions: Record<number, { title: string; verb: string; success: string; type: 'warning' | 'success' | 'info' }> = {
+  0: { title: '暂停任务', verb: '暂停', success: '任务已暂停并转为待办', type: 'info' },
+  1: { title: '开始任务', verb: '开始', success: '任务已开始', type: 'warning' },
+  2: { title: '完成任务', verb: '完成', success: '任务已完成', type: 'success' },
+}
+
+async function changeTaskStatus(row: any, status: 0 | 1 | 2) {
+  if (Number(row.status) === status) return
+  if (status === 2 && hasUnfinishedChildren(row)) {
+    ElMessage.warning('请先完成所有子任务，再完成父任务')
+    return
+  }
+  const action = taskStatusActions[status]
+  try {
+    await ElMessageBox.confirm(
+      `确认${action.verb}任务「${row.title}」？状态将变更为「${statusMap[status]}」。`,
+      action.title,
+      {
+        confirmButtonText: `确认${action.verb}`,
+        cancelButtonText: '取消',
+        type: action.type,
+      },
+    )
+  } catch {
+    return
+  }
+  await bizApi.updateTaskStatus(row.id, status, undefined, action.title)
+  ElMessage.success(action.success)
+  await load()
 }
 
 async function review(row: any, approved: boolean) {
@@ -709,6 +748,9 @@ onUnmounted(() => {
                     <el-dropdown-item v-if="canCreateSubtask(row)" command="subtask">子任务</el-dropdown-item>
                     <el-dropdown-item v-if="canEditTask(row)" command="edit">编辑</el-dropdown-item>
                     <el-dropdown-item v-if="canTransferTask(row)" command="transfer">移交</el-dropdown-item>
+                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="start" divided :disabled="row.status === 1">开始任务</el-dropdown-item>
+                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="complete" :disabled="row.status === 2 || hasUnfinishedChildren(row)">完成任务</el-dropdown-item>
+                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="pause" :disabled="row.status === 0">暂停任务</el-dropdown-item>
                     <el-dropdown-item v-if="canCloseTask(row)" command="close" divided>关闭</el-dropdown-item>
                     <el-dropdown-item v-if="canReviewTask(row)" command="review-pass" divided>确认完成</el-dropdown-item>
                     <el-dropdown-item v-if="canReviewTask(row)" command="review-reject">驳回</el-dropdown-item>

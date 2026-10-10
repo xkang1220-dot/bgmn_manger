@@ -65,7 +65,7 @@ public interface PmTaskService extends IService<PmTask> {
     /** 任务管理员确认或驳回用户提交的完成申请。 */
     void reviewCompletion(Long id, boolean approved, String remark);
 
-    /** 移交：将目标人加入参与人（已存在则不重复）；不写持有人字段 */
+    /** 移交：将目标人设为任务持有人，并确保其在任务参与人中；负责人保持不变。 */
     void transfer(Long id, Long targetUserId, String remark);
 
     void transfer(Long id, Long targetUserId, String remark, List<Long> imageFileIds);

@@ -210,7 +210,7 @@ public class TaskController {
     @PutMapping("/{id}/transfer")
     @SaCheckPermission("project:task:add")
     public Result<Void> transfer(@PathVariable Long id, @RequestBody TransferRequest request) {
-        taskService.transfer(id, request.getAssigneeId(), request.getRemark(), request.getImageFileIds());
+        taskService.transfer(id, request.getHolderId(), request.getRemark(), request.getImageFileIds());
         return Result.ok();
     }
 
@@ -236,7 +236,7 @@ public class TaskController {
 
     @Data
     public static class TransferRequest {
-        private Long assigneeId;
+        private Long holderId;
         private String remark;
         private List<Long> imageFileIds;
     }
