@@ -124,12 +124,14 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         LocalDate today = LocalDate.now();
         LocalDateTime now = LocalDateTime.now();
-        boolean dashboardDrill = Set.of("TOTAL", "OPEN", "OVERDUE", "DUE_SOON", "STALE", "NO_DUE_DATE", "PENDING",
+        boolean dashboardDrill = Set.of("TOTAL", "OPEN", "DOING", "DONE", "OVERDUE", "DUE_SOON", "STALE", "NO_DUE_DATE", "PENDING",
                 "DONE_30", "ON_TIME", "CYCLE", "OWNER_OPEN", "CREATED_RANGE", "COMPLETED_RANGE")
                 .contains(dashboardCategory == null ? "" : dashboardCategory);
         if (dashboardDrill) {
             switch (dashboardCategory) {
                 case "OPEN" -> wrapper.in(PmTask::getStatus, 0, 1, 4);
+                case "DOING" -> wrapper.eq(PmTask::getStatus, 1);
+                case "DONE" -> wrapper.eq(PmTask::getStatus, 2);
                 case "OVERDUE" -> wrapper.lt(PmTask::getDueDate, today).in(PmTask::getStatus, 0, 1);
                 case "DUE_SOON" -> wrapper.between(PmTask::getDueDate, today, today.plusDays(7)).in(PmTask::getStatus, 0, 1);
                 case "STALE" -> wrapper.eq(PmTask::getStatus, 1).lt(PmTask::getLastActivityAt, now.minusDays(7));
@@ -365,7 +367,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             // 负责人和参与人先按任务内人员集合去重，兼任两种角色也只统计一次。
             Set<Long> taskUserIds = new HashSet<>(taskMemberIds.getOrDefault(row.getId(), Set.of()));
             if (row.getAssigneeId() != null) taskUserIds.add(row.getAssigneeId());
-            for (Long userId : taskUserIds) {
+            // 人员筛选限定了任务范围后，成员统计也只展示该人，避免带出同任务的其他成员。
+            Set<Long> statsUserIds = participantId == null ? taskUserIds
+                    : (taskUserIds.contains(participantId) ? Set.of(participantId) : Set.of());
+            for (Long userId : statsUserIds) {
                 SysUser member = ownerMap.get(userId);
                 Map<String, Object> stats = memberTaskStatsMap.computeIfAbsent(userId, id -> {
                     Map<String, Object> item = new HashMap<>();
