@@ -62,10 +62,12 @@ public class TaskController {
             @RequestParam(defaultValue = "10") long pageSize,
             Long projectId, Integer status, String statuses,
             Integer priority, Long participantId, String title, Boolean overdue, String dashboardCategory,
-            Long dashboardOwnerId, String dashboardFrom, String dashboardTo, String periodFrom, String periodTo) {
+            Long dashboardOwnerId, String dashboardFrom, String dashboardTo, String periodFrom, String periodTo,
+            Boolean taskTree) {
         return Result.ok(PageResult.of(taskService.pageManagementTasks(
                 page, pageSize, projectId, status, statuses, priority, participantId, title, overdue,
-                dashboardCategory, dashboardOwnerId, dashboardFrom, dashboardTo, periodFrom, periodTo)));
+                dashboardCategory, dashboardOwnerId, dashboardFrom, dashboardTo, periodFrom, periodTo,
+                Boolean.TRUE.equals(taskTree))));
     }
 
     @GetMapping("/board")

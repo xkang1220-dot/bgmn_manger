@@ -24,7 +24,7 @@ public class PmTaskFlow extends BaseEntity {
     @TableField(exist = false)
     private String taskTitle;
 
-    /** CREATE / ASSIGN / STATUS / TRANSFER */
+    /** CREATE / UPDATE / ASSIGN / STATUS / TRANSFER */
     private String action;
 
     private Long fromUserId;

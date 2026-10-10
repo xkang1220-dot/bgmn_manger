@@ -90,73 +90,6 @@ const draggingTaskId = ref<number | string | null>(null)
 const hoveredTaskId = ref<number | string | null>(null)
 const hoverTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-function shiftDate(base: string | null | undefined, days: number) {
-  const match = String(base || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/)
-  const anchor = match
-    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
-    : new Date()
-  anchor.setHours(0, 0, 0, 0)
-  anchor.setDate(anchor.getDate() + days)
-  const y = anchor.getFullYear()
-  const m = String(anchor.getMonth() + 1).padStart(2, '0')
-  const d = String(anchor.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
-}
-
-/** 列表暂无真实子任务接口时，给前几条父任务挂演示子任务，便于验收层级与时间重叠。 */
-function createMockSubtasks(parent: any) {
-  const base = parent.startDate || parent.dueDate
-  const shared = {
-    projectId: parent.projectId,
-    projectName: parent.projectName,
-    parentTaskId: parent.id,
-    assigneeName: parent.assigneeName || '未指定',
-    participantNames: parent.participantNames || [],
-    canEdit: false,
-    canTransfer: false,
-    isMock: true,
-  }
-  return [
-    {
-      ...shared,
-      id: -Number(`${parent.id}01`),
-      title: `${parent.title} · 资料准备`,
-      status: parent.status === 2 ? 2 : 1,
-      priority: parent.priority ?? 2,
-      startDate: shiftDate(base, 0),
-      dueDate: shiftDate(base, 6),
-      content: '<p>整理并对齐本任务所需资料（演示子任务）</p>',
-      overdue: false,
-      startedAt: parent.startedAt,
-      completedAt: parent.status === 2 ? parent.completedAt : undefined,
-    },
-    {
-      ...shared,
-      id: -Number(`${parent.id}02`),
-      title: `${parent.title} · 结果确认`,
-      status: parent.status === 2 ? 2 : 0,
-      priority: 3,
-      startDate: shiftDate(base, 4),
-      dueDate: shiftDate(base, 10),
-      content: '',
-      overdue: !!parent.overdue && parent.status !== 2,
-      startedAt: undefined,
-      completedAt: parent.status === 2 ? parent.completedAt : undefined,
-    },
-  ]
-}
-
-function withMockSubtasks(tasks: any[]) {
-  let attached = 0
-  return (tasks || []).map((task) => {
-    if (task.parentTaskId || (Array.isArray(task.children) && task.children.length) || attached >= 3) {
-      return { ...task, children: Array.isArray(task.children) ? task.children : [] }
-    }
-    attached += 1
-    return { ...task, children: createMockSubtasks(task) }
-  })
-}
-
 const orderedList = computed(() => {
   const ranks = new Map(taskOrder.value.map((id, index) => [String(id), index]))
   return [...list.value]
@@ -360,6 +293,7 @@ async function load() {
     const params: Record<string, unknown> = {
       page: query.page,
       pageSize: query.pageSize,
+      taskTree: true,
       ...resolvePeriod(),
     }
     if (query.title.trim()) params.title = query.title.trim()
@@ -373,8 +307,7 @@ async function load() {
       params.status = query.status
     }
     const res = await bizApi.managementTaskPage(params)
-    // TODO: 子任务接口就绪后改为直接使用后端 children / parentTaskId
-    list.value = withMockSubtasks(res.list)
+    list.value = res.list || []
     total.value = res.total
     await expandTasksWithChildren()
   } finally {
@@ -424,10 +357,6 @@ function filterOverdue() {
 }
 
 function open(row?: any, action: TaskDrawerAction = 'view') {
-  if (row?.isMock) {
-    ElMessage.info('子任务为演示数据，详情接口尚未接入')
-    return
-  }
   activeTaskId.value = row?.id ?? null
   taskDrawerAction.value = action
   taskDrawer.value = true
@@ -435,26 +364,26 @@ function open(row?: any, action: TaskDrawerAction = 'view') {
 
 function canCreateSubtask(row: any) {
   // 仅父任务可新建子任务；子任务行不展示该入口
-  return !row?.isMock && !isSubtaskRow(row) && row.status !== 3 && userStore.hasPermission('project:task:add')
+  return !isSubtaskRow(row) && [0, 1].includes(row.status) && userStore.hasPermission('project:task:add')
+}
+
+function hasUnfinishedChildren(row: any) {
+  return (row.children || []).some((child: any) => child.status !== 2)
 }
 
 function canEditTask(row: any) {
-  if (row?.isMock) return isSubtaskRow(row)
   return userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3
 }
 
 function canTransferTask(row: any) {
-  if (row?.isMock) return isSubtaskRow(row)
   return userStore.hasPermission('project:task:add') && row.canTransfer && row.status !== 3
 }
 
 function canCloseTask(row: any) {
-  if (row?.isMock) return isSubtaskRow(row)
-  return userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3
+  return userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3 && !hasUnfinishedChildren(row)
 }
 
 function canReviewTask(row: any) {
-  if (row?.isMock) return false
   return isTaskManager && row.status === 4
 }
 
@@ -784,7 +713,7 @@ onUnmounted(() => {
                 v-if="hasTaskActions(row)"
                 trigger="hover"
                 popper-class="task-action-dropdown"
-                @command="(command) => onTaskAction(row, String(command))"
+                @command="onTaskAction(row, String($event))"
               >
                 <button type="button" class="task-action-btn is-more">更多</button>
                 <template #dropdown>

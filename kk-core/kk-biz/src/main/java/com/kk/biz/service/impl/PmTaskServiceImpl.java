@@ -84,12 +84,18 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             3, "已关闭",
             4, "待确认完成"
     );
+    private static final Map<Integer, String> PRIORITY_LABEL = Map.of(1, "高", 2, "中", 3, "低");
+    private static final Map<String, String> RISK_LABEL = Map.of(
+            "NORMAL", "正常",
+            "WARNING", "预警",
+            "DANGER", "高风险"
+    );
 
     @Override
     public Page<PmTask> pageTasks(long page, long pageSize, Long projectId, Integer status, String statuses,
                                   Integer priority, Long participantId, String title, Boolean overdue) {
         return pageTasksInternal(page, pageSize, projectId, status, statuses, priority, participantId, title, overdue,
-                false, null, null, null, null, null, null);
+                false, null, null, null, null, null, null, false);
     }
 
     @Override
@@ -97,16 +103,16 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                                             Integer priority, Long participantId, String title, Boolean overdue,
                                             String dashboardCategory, Long dashboardOwnerId,
                                             String dashboardFrom, String dashboardTo,
-                                            String periodFrom, String periodTo) {
+                                            String periodFrom, String periodTo, boolean taskTree) {
         return pageTasksInternal(page, pageSize, projectId, status, statuses, priority, participantId, title, overdue, true,
-                dashboardCategory, dashboardOwnerId, dashboardFrom, dashboardTo, periodFrom, periodTo);
+                dashboardCategory, dashboardOwnerId, dashboardFrom, dashboardTo, periodFrom, periodTo, taskTree);
     }
 
     private Page<PmTask> pageTasksInternal(long page, long pageSize, Long projectId, Integer status, String statuses,
                                            Integer priority, Long participantId, String title, Boolean overdue,
                                            boolean managementScope, String dashboardCategory, Long dashboardOwnerId,
                                            String dashboardFrom, String dashboardTo,
-                                           String periodFrom, String periodTo) {
+                                           String periodFrom, String periodTo, boolean taskTree) {
         boolean hasQueryCondition = projectId != null
                 || status != null
                 || StringUtils.hasText(statuses)
@@ -118,6 +124,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<PmTask>()
                 .eq(priority != null, PmTask::getPriority, priority)
                 .like(StringUtils.hasText(title), PmTask::getTitle, title);
+        if (taskTree) {
+            wrapper.isNull(PmTask::getParentTaskId);
+        }
         if (StringUtils.hasText(periodFrom) && StringUtils.hasText(periodTo)) {
             wrapper.ge(PmTask::getCreateTime, LocalDate.parse(periodFrom).atStartOfDay())
                     .lt(PmTask::getCreateTime, LocalDate.parse(periodTo).atStartOfDay());
@@ -190,7 +199,35 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         Page<PmTask> result = page(new Page<>(page, pageSize), wrapper);
         fillExtras(result.getRecords());
+        if (taskTree) {
+            fillTaskChildren(result.getRecords());
+        }
         return result;
+    }
+
+    /** 为任务工作台组装真实的一层子任务；分页总数只统计顶层任务。 */
+    private void fillTaskChildren(List<PmTask> parents) {
+        if (parents == null || parents.isEmpty()) {
+            return;
+        }
+        List<Long> parentIds = parents.stream()
+                .map(PmTask::getId)
+                .filter(Objects::nonNull)
+                .toList();
+        if (parentIds.isEmpty()) {
+            return;
+        }
+        List<PmTask> children = list(new LambdaQueryWrapper<PmTask>()
+                .in(PmTask::getParentTaskId, parentIds)
+                .orderByAsc(PmTask::getPriority)
+                .orderByAsc(PmTask::getDueDate)
+                .orderByAsc(PmTask::getId));
+        fillExtras(children);
+        Map<Long, List<PmTask>> childrenByParent = children.stream()
+                .collect(Collectors.groupingBy(PmTask::getParentTaskId, LinkedHashMap::new, Collectors.toList()));
+        for (PmTask parent : parents) {
+            parent.setChildren(childrenByParent.getOrDefault(parent.getId(), List.of()));
+        }
     }
 
     private List<Integer> parseStatuses(String statuses) {
@@ -838,12 +875,19 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             assertParticipantsEligible(existing.getProjectId(), task.getParticipantIds());
         }
         if (Integer.valueOf(2).equals(task.getStatus())) {
+            assertChildrenCompletedBeforeFinish(existing);
             task.setStatus(completionTargetStatus(task.getTaskReward()));
         }
         validateDateRange(task);
         task.setContent(cleanTaskContent(task.getContent()));
         applyLifecycle(task, existing);
         Integer oldStatus = existing.getStatus();
+        List<Long> oldParticipantIds = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
+                        .eq(PmTaskMember::getTaskId, task.getId()))
+                .stream().map(PmTaskMember::getUserId).filter(Objects::nonNull).toList();
+        List<Long> oldImageIds = fileService.listByBiz(TASK_IMAGE_BIZ, task.getId())
+                .stream().map(SysFile::getId).filter(Objects::nonNull).toList();
+        String updateDetail = buildTaskUpdateDetail(existing, task, oldParticipantIds, oldImageIds);
         updateById(task);
         if (task.getStatus() != null && task.getStatus() != 2 && Integer.valueOf(2).equals(oldStatus)) {
             lambdaUpdate().eq(PmTask::getId, task.getId()).setSql("completed_at = NULL").update();
@@ -854,11 +898,83 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (task.getImageFileIds() != null) {
             syncTaskImages(task.getId(), task.getImageFileIds());
         }
+        if (StringUtils.hasText(updateDetail)) {
+            recordFlow(task.getId(), "UPDATE", null, null, null, null, updateDetail);
+        }
         if (task.getStatus() != null && !task.getStatus().equals(oldStatus)) {
             recordFlow(task.getId(), "STATUS", null, null, oldStatus, task.getStatus(), "编辑时变更状态");
         }
         projectService.recordFlow(existing.getProjectId(), "TASK_UPDATE", null, null, null,
                 "编辑任务「" + (StringUtils.hasText(task.getTitle()) ? task.getTitle() : existing.getTitle()) + "」");
+    }
+
+    private String buildTaskUpdateDetail(PmTask oldTask, PmTask newTask,
+                                         List<Long> oldParticipantIds, List<Long> oldImageIds) {
+        List<String> changes = new ArrayList<>();
+        addTaskChange(changes, "标题", oldTask.getTitle(), newTask.getTitle());
+        if (newTask.getContent() != null && !Objects.equals(oldTask.getContent(), newTask.getContent())) {
+            String oldContent = plainText(oldTask.getContent());
+            String newContent = plainText(newTask.getContent());
+            if (!Objects.equals(oldContent, newContent)) {
+                addTaskChange(changes, "描述", oldContent, newContent);
+            } else {
+                changes.add("描述格式已修改");
+            }
+        }
+        addTaskChange(changes, "优先级", priorityLabel(oldTask.getPriority()), priorityLabel(newTask.getPriority()));
+        if (!Objects.equals(oldTask.getAssigneeId(), newTask.getAssigneeId())) {
+            changes.add("负责人：" + userDisplayName(oldTask.getAssigneeId()) + " → "
+                    + userDisplayName(newTask.getAssigneeId()));
+        }
+        addTaskChange(changes, "开始日期", oldTask.getStartDate(), newTask.getStartDate());
+        addTaskChange(changes, "截止日期", oldTask.getDueDate(), newTask.getDueDate());
+        addTaskChange(changes, "风险等级", riskLabel(oldTask.getRiskLevel()), riskLabel(newTask.getRiskLevel()));
+
+        if (newTask.getParticipantIds() != null
+                && !new LinkedHashSet<>(oldParticipantIds).equals(new LinkedHashSet<>(newTask.getParticipantIds()))) {
+            changes.add("参与人：" + userNames(oldParticipantIds) + " → " + userNames(newTask.getParticipantIds()));
+        }
+        if (newTask.getImageFileIds() != null
+                && !new LinkedHashSet<>(oldImageIds).equals(new LinkedHashSet<>(newTask.getImageFileIds()))) {
+            changes.add("图片/附件：" + oldImageIds.size() + " 个 → " + newTask.getImageFileIds().size() + " 个");
+        }
+        String detail = String.join("；", changes);
+        return detail.length() <= 500 ? detail : detail.substring(0, 497) + "...";
+    }
+
+    private void addTaskChange(List<String> changes, String field, Object oldValue, Object newValue) {
+        if (newValue != null && !Objects.equals(oldValue, newValue)) {
+            changes.add(field + "：" + displayChangeValue(oldValue) + " → " + displayChangeValue(newValue));
+        }
+    }
+
+    private String displayChangeValue(Object value) {
+        String text = value == null || !StringUtils.hasText(String.valueOf(value)) ? "未设置" : String.valueOf(value);
+        return text.length() <= 180 ? text : text.substring(0, 177) + "...";
+    }
+
+    private String plainText(String html) {
+        if (!StringUtils.hasText(html)) {
+            return null;
+        }
+        String text = Jsoup.parse(html).text().trim();
+        return StringUtils.hasText(text) ? text : null;
+    }
+
+    private String priorityLabel(Integer priority) {
+        return priority == null ? null : PRIORITY_LABEL.getOrDefault(priority, String.valueOf(priority));
+    }
+
+    private String riskLabel(String riskLevel) {
+        return riskLevel == null ? null : RISK_LABEL.getOrDefault(riskLevel, riskLevel);
+    }
+
+    private String userNames(List<Long> userIds) {
+        if (userIds == null || userIds.isEmpty()) {
+            return "无";
+        }
+        return userIds.stream().filter(Objects::nonNull).distinct()
+                .map(this::userDisplayName).collect(Collectors.joining("、"));
     }
 
     private String cleanTaskContent(String content) {
@@ -911,6 +1027,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 throw new BusinessException("关闭原因不能超过 500 字");
             }
         }
+        if (status == 2 || status == 3) {
+            assertChildrenCompletedBeforeFinish(existing);
+        }
         int targetStatus = status == 2 ? completionTargetStatus(existing.getTaskReward()) : status;
         PmTask update = new PmTask();
         update.setId(id);
@@ -953,6 +1072,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         if (note != null && note.length() > 500) {
             throw new BusinessException("审核说明不能超过 500 字");
+        }
+        if (approved) {
+            assertChildrenCompletedBeforeFinish(existing);
         }
         PmTask update = new PmTask();
         update.setId(id);
@@ -1163,15 +1285,22 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             throw new BusinessException("任务不存在");
         }
         assertCanAccessTask(task);
-        Long rootId = task.getParentTaskId() == null ? task.getId() : task.getParentTaskId();
-        List<PmTask> family = list(new LambdaQueryWrapper<PmTask>()
-                .and(w -> w.eq(PmTask::getId, rootId).or().eq(PmTask::getParentTaskId, rootId))
-                .select(PmTask::getId, PmTask::getProjectId, PmTask::getAssigneeId, PmTask::getTitle))
+        // 操作记录只向下聚合：父任务可查看自身及子任务记录，子任务仅查看自身记录。
+        // 避免从子任务反查整个任务族，导致父任务或兄弟子任务的记录泄露到当前视图。
+        LambdaQueryWrapper<PmTask> visibleTaskQuery = new LambdaQueryWrapper<PmTask>()
+                .eq(PmTask::getId, task.getId());
+        if (task.getParentTaskId() == null) {
+            visibleTaskQuery.or().eq(PmTask::getParentTaskId, task.getId());
+        }
+        visibleTaskQuery.select(PmTask::getId, PmTask::getProjectId,
+                PmTask::getAssigneeId, PmTask::getTitle);
+        List<PmTask> visibleTasks = list(visibleTaskQuery)
                 .stream().filter(this::canAccessTask).toList();
-        Set<Long> familyIds = family.stream().map(PmTask::getId).collect(Collectors.toSet());
-        Map<Long, String> taskTitles = family.stream().collect(Collectors.toMap(PmTask::getId, PmTask::getTitle));
+        Set<Long> visibleTaskIds = visibleTasks.stream().map(PmTask::getId).collect(Collectors.toSet());
+        Map<Long, String> taskTitles = visibleTasks.stream()
+                .collect(Collectors.toMap(PmTask::getId, PmTask::getTitle));
         List<PmTaskFlow> list = flowMapper.selectList(new LambdaQueryWrapper<PmTaskFlow>()
-                .in(PmTaskFlow::getTaskId, familyIds)
+                .in(PmTaskFlow::getTaskId, visibleTaskIds)
                 .orderByDesc(PmTaskFlow::getId));
         list.forEach(flow -> flow.setTaskTitle(taskTitles.get(flow.getTaskId())));
         fillFlows(list);
@@ -1194,6 +1323,28 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         if (parent.getParentTaskId() != null) {
             throw new BusinessException("当前仅支持一级子任务");
+        }
+        if (Integer.valueOf(2).equals(parent.getStatus())
+                || Integer.valueOf(3).equals(parent.getStatus())
+                || Integer.valueOf(4).equals(parent.getStatus())) {
+            throw new BusinessException("已完成、已关闭或待确认完成的任务不能新增子任务");
+        }
+        if (currentTaskId != null && count(new LambdaQueryWrapper<PmTask>()
+                .eq(PmTask::getParentTaskId, currentTaskId)) > 0) {
+            throw new BusinessException("已有子任务的任务不能设为子任务");
+        }
+    }
+
+    /** 父任务只能在所有子任务真正完成后完成或关闭。 */
+    private void assertChildrenCompletedBeforeFinish(PmTask task) {
+        if (task == null || task.getId() == null || task.getParentTaskId() != null) {
+            return;
+        }
+        long unfinished = count(new LambdaQueryWrapper<PmTask>()
+                .eq(PmTask::getParentTaskId, task.getId())
+                .ne(PmTask::getStatus, 2));
+        if (unfinished > 0) {
+            throw new BusinessException("请先完成所有子任务，再完成或关闭父任务");
         }
     }
 
@@ -1267,6 +1418,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         return switch (action) {
             case "CREATE" -> "创建";
+            case "UPDATE" -> "修改";
             case "ASSIGN" -> "指派";
             case "STATUS" -> "状态变更";
             case "TRANSFER" -> "移交";
@@ -1281,6 +1433,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         String action = flow.getAction();
         if ("CREATE".equals(action)) {
             return "创建了任务";
+        }
+        if ("UPDATE".equals(action)) {
+            return "修改了任务";
         }
         if ("TRANSFER".equals(action)) {
             String to = flow.getToUserName() != null ? flow.getToUserName() : "—";

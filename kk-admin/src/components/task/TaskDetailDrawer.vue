@@ -119,6 +119,10 @@ const statusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'>
   4: 'warning',
 }
 
+function hasUnfinishedChildren(task: any = detail.value) {
+  return (task?.children || []).some((child: any) => child.status !== 2)
+}
+
 function emptyForm() {
   const selfId = userStore.user?.id as number | undefined
   return {
@@ -210,41 +214,6 @@ async function loadDetail(id: number) {
       bizApi.taskComments(id),
       bizApi.taskFlows(id),
     ])
-    // TODO: 子任务接口就绪后去掉演示数据
-    if (!full.parentTaskId && !(Array.isArray(full.children) && full.children.length)) {
-      const base = full.startDate || full.dueDate
-      const shift = (days: number) => {
-        const match = String(base || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/)
-        const anchor = match
-          ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
-          : new Date()
-        anchor.setHours(0, 0, 0, 0)
-        anchor.setDate(anchor.getDate() + days)
-        return `${anchor.getFullYear()}-${String(anchor.getMonth() + 1).padStart(2, '0')}-${String(anchor.getDate()).padStart(2, '0')}`
-      }
-      full.children = [
-        {
-          id: -Number(`${full.id}01`),
-          title: `${full.title} · 资料准备`,
-          status: 1,
-          assigneeName: full.assigneeName,
-          startDate: shift(0),
-          dueDate: shift(6),
-          overdue: false,
-          isMock: true,
-        },
-        {
-          id: -Number(`${full.id}02`),
-          title: `${full.title} · 结果确认`,
-          status: 0,
-          assigneeName: full.assigneeName,
-          startDate: shift(4),
-          dueDate: shift(10),
-          overdue: false,
-          isMock: true,
-        },
-      ]
-    }
     detail.value = full
     Object.assign(form, {
       ...full,
@@ -405,11 +374,7 @@ async function startSubtask() {
   await ensureOptions()
 }
 
-function openChildTask(task: { id: number; isMock?: boolean }) {
-  if (task.isMock) {
-    ElMessage.info('子任务为演示数据，详情接口尚未接入')
-    return
-  }
+function openChildTask(task: { id: number }) {
   void loadDetail(Number(task.id))
 }
 
@@ -516,6 +481,10 @@ async function save() {
 async function closeTask() {
   if (!form.id || closing.value) return
   if (detail.value?.status === 3) return
+  if (hasUnfinishedChildren()) {
+    ElMessage.warning('请先完成所有子任务，再关闭父任务')
+    return
+  }
   let reason = ''
   try {
     const { value } = await ElMessageBox.prompt('关闭后状态为「已关闭」，任务不会删除。请填写关闭原因。', '关闭任务', {
@@ -547,6 +516,10 @@ async function closeTask() {
 
 async function reviewCompletion(approved: boolean) {
   if (!detail.value?.id || reviewing.value) return
+  if (approved && hasUnfinishedChildren()) {
+    ElMessage.warning('请先完成所有子任务，再确认完成父任务')
+    return
+  }
   let remark = ''
   try {
     if (approved) {
@@ -874,8 +847,23 @@ function commentAttachmentUrl(file: any, preview = false) {
               </div>
             </el-tab-pane>
 
-            <el-tab-pane :label="`流转${flows.length ? ` (${flows.length})` : ''}`" name="flows">
-              <ol v-if="flows.length" class="flow-timeline" aria-label="任务流转记录">
+            <el-tab-pane
+              v-if="!detail.parentTaskId"
+              :label="`子任务${detail.children?.length ? ` (${detail.children.length})` : ''}`"
+              name="subtasks"
+            >
+              <SubtaskTimeline
+                :tasks="detail.children || []"
+                :parent-start-date="detail.startDate"
+                :parent-started-at="detail.startedAt"
+                :parent-completed-at="detail.completedAt"
+                :parent-status="detail.status"
+                @open="openChildTask"
+              />
+            </el-tab-pane>
+
+            <el-tab-pane :label="`操作记录${flows.length ? ` (${flows.length})` : ''}`" name="flows">
+              <ol v-if="flows.length" class="flow-timeline" aria-label="任务操作记录">
                 <li v-for="f in flows" :key="f.id" class="flow-entry">
                   <span class="flow-dot" aria-hidden="true" />
                   <article class="flow-card">
@@ -902,22 +890,7 @@ function commentAttachmentUrl(file: any, preview = false) {
                   </article>
                 </li>
               </ol>
-              <div v-else class="comment-empty">暂无流转记录</div>
-            </el-tab-pane>
-
-            <el-tab-pane
-              v-if="!detail.parentTaskId"
-              :label="`子任务${detail.children?.length ? ` (${detail.children.length})` : ''}`"
-              name="subtasks"
-            >
-              <SubtaskTimeline
-                :tasks="detail.children || []"
-                :parent-start-date="detail.startDate"
-                :parent-started-at="detail.startedAt"
-                :parent-completed-at="detail.completedAt"
-                :parent-status="detail.status"
-                @open="openChildTask"
-              />
+              <div v-else class="comment-empty">暂无操作记录</div>
             </el-tab-pane>
           </el-tabs>
         </div>
@@ -979,7 +952,7 @@ function commentAttachmentUrl(file: any, preview = false) {
                 <el-radio-group v-model="form.status" class="option-cards">
                   <el-radio-button :value="0">待办</el-radio-button>
                   <el-radio-button :value="1">进行中</el-radio-button>
-                  <el-radio-button :value="2">完成</el-radio-button>
+                  <el-radio-button :value="2" :disabled="hasUnfinishedChildren()">完成</el-radio-button>
                 </el-radio-group>
               </el-form-item>
             </div>
