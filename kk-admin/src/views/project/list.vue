@@ -2,14 +2,12 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Plus } from '@element-plus/icons-vue'
+import { ArrowLeft, Plus, User, Calendar, EditPen, Delete, FolderOpened } from '@element-plus/icons-vue'
 import { bizApi } from '@/api/biz'
 import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
 import { approvalFlowTip } from '@/utils/approvalTip'
 import { useUserStore } from '@/stores/user'
-import TaskKanban from '@/components/task/TaskKanban.vue'
-import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
 import ProjectNotes from '@/components/project/ProjectNotes.vue'
 
 const route = useRoute()
@@ -30,17 +28,11 @@ const companies = ref<any[]>([])
 
 const activeProjectId = ref<number | null>(null)
 const detail = ref<any>(null)
-const detailTab = ref('board')
-const taskSummary = ref<Record<string, number>>({})
-const tasks = ref<any[]>([])
-const taskTotal = ref(0)
+const detailTab = ref('info')
+const memberTaskStats = ref<any[]>([])
 const projectFlows = ref<any[]>([])
 const projectAccount = ref<any>(null)
-const taskQuery = reactive({ page: 1, pageSize: 10, status: undefined as number | undefined })
 const loadingDetail = ref(false)
-const kanbanRef = ref<InstanceType<typeof TaskKanban> | null>(null)
-const taskDrawer = ref(false)
-const activeTaskId = ref<number | null>(null)
 
 const dialog = ref(false)
 const isEdit = ref(false)
@@ -72,20 +64,6 @@ const scaleOptions = [
   { value: 'KEY', label: '重点', tip: '创建需审批；唯一审批人本人可免审' },
   { value: 'MAJOR', label: '重大', tip: '创建需审批；唯一审批人本人可免审' },
 ]
-const taskStatusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭' }
-const taskStatusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'> = {
-  0: 'info',
-  1: 'warning',
-  2: 'success',
-  3: 'info',
-}
-const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
-const priorityType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'> = {
-  1: 'danger',
-  2: 'warning',
-  3: 'info',
-}
-
 const statusFilters = [
   { label: '全部', value: undefined as number | undefined },
   { label: '筹备', value: 0 },
@@ -98,13 +76,10 @@ const inDetail = computed(() => activeProjectId.value != null && detail.value !=
 const isMajorShell = computed(
   () => !!detail.value && detail.value.scale === 'MAJOR' && !detail.value.parentId,
 )
+const isKeyOrMajor = computed(
+  () => !!detail.value && (detail.value.scale === 'KEY' || detail.value.scale === 'MAJOR'),
+)
 const isChildProject = computed(() => !!detail.value?.parentId)
-const canCreateTask = computed(() => {
-  if (!detail.value || isMajorShell.value) return false
-  const loginId = Number(userStore.user?.id)
-  return Number(detail.value.ownerId) === loginId
-    || (detail.value.members || []).some((member: any) => Number(member.userId) === loginId)
-})
 const saving = ref(false)
 const filteredEmpty = computed(
   () =>
@@ -115,6 +90,8 @@ const filteredEmpty = computed(
 const projectOrderStorageKey = computed(() => `bgmn:project-order:${userStore.user?.id || 'anonymous'}`)
 const projectOrder = ref<number[]>([])
 const draggingProjectId = ref<number | null>(null)
+const hoveredProjectId = ref<number | null>(null)
+const hoverTimers = ref<Map<number, NodeJS.Timeout>>(new Map())
 
 const displayedProjects = computed(() => {
   const positions = new Map(projectOrder.value.map((id, index) => [Number(id), index]))
@@ -153,6 +130,8 @@ function moveProject(projectId: number, offset: -1 | 1) {
 
 function onProjectDragStart(event: DragEvent, projectId: number) {
   draggingProjectId.value = Number(projectId)
+  hoveredProjectId.value = null
+  clearHoverTimer(Number(projectId))
   event.dataTransfer?.setData('text/plain', String(projectId))
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
 }
@@ -160,6 +139,7 @@ function onProjectDragStart(event: DragEvent, projectId: number) {
 function onProjectDrop(targetId: number) {
   const sourceId = draggingProjectId.value
   draggingProjectId.value = null
+  hoveredProjectId.value = null
   if (sourceId == null || sourceId === Number(targetId)) return
   const ids = displayedProjects.value.map((project) => Number(project.id))
   const sourceIndex = ids.indexOf(sourceId)
@@ -167,6 +147,29 @@ function onProjectDrop(targetId: number) {
   if (sourceIndex < 0 || targetIndex < 0) return
   ids.splice(targetIndex, 0, ids.splice(sourceIndex, 1)[0])
   persistProjectOrder(ids)
+}
+
+function clearHoverTimer(projectId: number) {
+  const timer = hoverTimers.value.get(projectId)
+  if (timer) {
+    clearTimeout(timer)
+    hoverTimers.value.delete(projectId)
+  }
+}
+
+function onProjectMouseEnter(projectId: number) {
+  clearHoverTimer(Number(projectId))
+  const timer = setTimeout(() => {
+    hoveredProjectId.value = Number(projectId)
+  }, 2000)
+  hoverTimers.value.set(Number(projectId), timer)
+}
+
+function onProjectMouseLeave(projectId: number) {
+  clearHoverTimer(Number(projectId))
+  if (hoveredProjectId.value === Number(projectId)) {
+    hoveredProjectId.value = null
+  }
 }
 
 const statusKey = computed({
@@ -177,6 +180,14 @@ const statusKey = computed({
     load()
   },
 })
+
+function plainDescription(html?: string) {
+  return String(html || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
 function statusTone(status?: number) {
   return ({ 0: 'slate', 1: 'amber', 2: 'cyan', 3: 'slate' } as Record<number, string>)[status ?? 0] || 'slate'
@@ -210,9 +221,7 @@ function resetFilter() {
 
 async function enterProject(row: any) {
   activeProjectId.value = row.id
-  detailTab.value = row.scale === 'MAJOR' && !row.parentId ? 'children' : 'board'
-  taskQuery.page = 1
-  taskQuery.status = undefined
+  detailTab.value = row.scale === 'MAJOR' && !row.parentId ? 'children' : 'info'
   children.value = []
   await router.replace({ query: { ...route.query, id: String(row.id) } })
   await loadDetail(row.id)
@@ -225,12 +234,14 @@ async function loadDetail(id: number) {
     projectAccount.value = await bizApi.projectAccountDetail(id).catch(() => null)
     if (detail.value?.scale === 'MAJOR' && !detail.value?.parentId) {
       await loadChildren()
-      if (detailTab.value === 'board' || detailTab.value === 'tasks') {
+      if (detailTab.value === 'personal-tasks') {
         detailTab.value = 'children'
       }
     } else {
       children.value = []
-      await loadTaskSummary()
+      if (detailTab.value === 'children') {
+        detailTab.value = 'info'
+      }
     }
     await loadActiveTabData()
   } finally {
@@ -253,8 +264,8 @@ async function loadChildren() {
 async function loadActiveTabData() {
   if (detailTab.value === 'children') {
     await loadChildren()
-  } else if (detailTab.value === 'tasks') {
-    await loadTasks()
+  } else if (detailTab.value === 'personal-tasks') {
+    await loadPersonalTaskSummary()
   } else if (detailTab.value === 'flows') {
     await loadProjectFlows()
   }
@@ -367,21 +378,18 @@ async function loadProjectFlows() {
   projectFlows.value = await bizApi.projectFlows(activeProjectId.value)
 }
 
-async function loadTaskSummary() {
+async function loadPersonalTaskSummary() {
   if (!activeProjectId.value) return
-  taskSummary.value = await bizApi.taskSummary({ projectId: activeProjectId.value })
-}
+  // TODO: Replace with actual API call when available
+  // personalTaskSummary.value = await bizApi.taskSummary({ projectId: activeProjectId.value })
 
-async function loadTasks() {
-  if (!activeProjectId.value) return
-  const res = await bizApi.taskPage({
-    page: taskQuery.page,
-    pageSize: taskQuery.pageSize,
-    projectId: activeProjectId.value,
-    status: taskQuery.status,
-  })
-  tasks.value = res.list
-  taskTotal.value = res.total
+  // Mock data for now
+  memberTaskStats.value = [
+    { userId: 1, userName: '张三', total: 15, todo: 3, doing: 8, done: 4, overdue: 0 },
+    { userId: 2, userName: '李四', total: 12, todo: 2, doing: 5, done: 5, overdue: 0 },
+    { userId: 3, userName: '王五', total: 8, todo: 1, doing: 4, done: 3, overdue: 0 },
+    { userId: 4, userName: '赵六', total: 20, todo: 5, doing: 10, done: 5, overdue: 0 },
+  ]
 }
 
 async function previewNextCode(companyId?: number | string | null) {
@@ -437,11 +445,53 @@ function durationDays(start?: string, end?: string) {
 
 const plannedDuration = computed(() => durationDays(detail.value?.startDate, detail.value?.endDate))
 const actualDuration = computed(() => durationDays(detail.value?.startDate, detail.value?.actualEndDate))
+
+function memberTaskStatsSummary({ columns, data }: { columns: any[]; data: any[] }) {
+  const sumKeys = new Set(['total', 'todo', 'doing', 'done', 'overdue'])
+  return columns.map((col, index) => {
+    if (index === 0) return '合计'
+    const key = col.property
+    if (!sumKeys.has(key)) return ''
+    return data.reduce((sum, row) => sum + Number(row?.[key] || 0), 0)
+  })
+}
+
 const personalDistributable = computed(() => {
   const loginId = Number(userStore.user?.id)
   const member = (detail.value?.members || []).find((row: any) => Number(row.userId) === loginId)
   return Number(projectAccount.value?.sharePendingBalance || 0) * Number(member?.percent || 0) / 100
 })
+
+async function onSaveProjectDescription(description: string) {
+  if (!detail.value?.id) return
+  const members = (detail.value.members || []).map((m: any) => ({
+    userId: m.userId,
+    layer: m.layer || m.responsibility || '项目成员',
+    percent: Number(m.percent || 0),
+  }))
+  try {
+    await bizApi.saveProject({
+      id: detail.value.id,
+      name: detail.value.name,
+      companyId: detail.value.companyId,
+      ownerId: detail.value.ownerId,
+      status: detail.value.status,
+      scale: detail.value.scale,
+      parentId: detail.value.parentId,
+      startDate: detail.value.startDate || null,
+      endDate: detail.value.endDate || null,
+      actualEndDate: detail.value.actualEndDate || null,
+      description,
+      websiteUrl: detail.value.websiteUrl,
+      repositoryUrl: detail.value.repositoryUrl,
+      members,
+    }, true)
+    detail.value = { ...detail.value, description }
+  } catch {
+    // 后端字段更新不完整时，资料页已写入本地 draft
+    detail.value = { ...detail.value, description }
+  }
+}
 
 async function save() {
   if (!form.name?.trim()) {
@@ -538,36 +588,6 @@ async function remove(id: number) {
   await load()
 }
 
-function goTaskManage() {
-  router.push({ path: '/project/task', query: { projectId: String(activeProjectId.value) } })
-}
-
-function openTaskDetail(task?: any) {
-  activeTaskId.value = task?.id ?? null
-  taskDrawer.value = true
-}
-
-function createTask() {
-  activeTaskId.value = null
-  taskDrawer.value = true
-}
-
-async function onTaskSaved() {
-  await Promise.all([loadTaskSummary(), loadActiveTabData()])
-  if (detailTab.value === 'board') {
-    kanbanRef.value?.load()
-  }
-}
-
-watch(
-  () => taskQuery.status,
-  () => {
-    if (detailTab.value !== 'tasks') return
-    taskQuery.page = 1
-    loadTasks()
-  },
-)
-
 watch(detailTab, () => {
   void loadActiveTabData()
 })
@@ -593,7 +613,7 @@ onMounted(async () => {
     <template v-if="!inDetail">
       <div class="page-top">
         <div class="page-top__main">
-          <p class="page-desc">以项目卡片浏览；点进卡片查看看板与任务。分成请到「财务 → 项目账款」</p>
+          <p class="page-desc">以项目卡片浏览；点进卡片查看项目详情。分成请到「财务 → 项目账款」</p>
         </div>
         <div class="page-actions">
           <el-button v-permission="'project:add'" type="primary" :icon="Plus" @click="open()">新建项目</el-button>
@@ -640,12 +660,14 @@ onMounted(async () => {
           v-for="(row, projectIndex) in displayedProjects"
           :key="row.id"
           class="project-card"
-          :class="['project-card--' + statusTone(row.status), { 'is-dragging': draggingProjectId === Number(row.id) }]"
+          :class="['project-card--' + statusTone(row.status), { 'is-dragging': draggingProjectId === Number(row.id), 'show-drag-hint': hoveredProjectId === Number(row.id) }]"
           role="button"
           tabindex="0"
           draggable="true"
           @click="enterProject(row)"
           @keyup.enter="enterProject(row)"
+          @mouseenter="onProjectMouseEnter(row.id)"
+          @mouseleave="onProjectMouseLeave(row.id)"
           @dragstart="onProjectDragStart($event, row.id)"
           @dragend="draggingProjectId = null"
           @dragover.prevent
@@ -672,25 +694,10 @@ onMounted(async () => {
             </div>
             <el-icon class="project-card__icon" :size="40"><FolderOpened /></el-icon>
           </div>
+          <p v-if="plainDescription(row.description)" class="project-card__desc">
+            {{ plainDescription(row.description) }}
+          </p>
           <div class="project-card__actions" @click.stop>
-            <div class="project-order-actions" aria-label="调整项目顺序">
-              <el-button
-                text
-                class="icon-btn"
-                :disabled="projectIndex === 0"
-                aria-label="上移项目"
-                title="上移项目"
-                @click="moveProject(row.id, -1)"
-              >上移</el-button>
-              <el-button
-                text
-                class="icon-btn"
-                :disabled="projectIndex === displayedProjects.length - 1"
-                aria-label="下移项目"
-                title="下移项目"
-                @click="moveProject(row.id, 1)"
-              >下移</el-button>
-            </div>
             <el-button
               v-permission="'project:edit'"
               class="icon-btn"
@@ -711,7 +718,7 @@ onMounted(async () => {
             >
               <el-icon :size="16"><Delete /></el-icon>
             </el-button>
-            <span class="project-card__go">进入看板</span>
+            <span class="project-card__go">进入详情</span>
           </div>
         </article>
       </div>
@@ -761,46 +768,7 @@ onMounted(async () => {
             </div>
           </div>
 
-          <div class="metric-bar" v-if="!isMajorShell">
-            <div class="metric-item">
-              <el-icon class="metric-icon" :size="18"><Tickets /></el-icon>
-              <div class="metric-copy">
-                <span class="metric-label">任务总数</span>
-                <span class="metric-value">{{ taskSummary.total ?? 0 }}</span>
-              </div>
-            </div>
-            <div class="metric-item">
-              <el-icon class="metric-icon is-todo" :size="18"><Clock /></el-icon>
-              <div class="metric-copy">
-                <span class="metric-label">待办</span>
-                <span class="metric-value">{{ taskSummary.todo ?? 0 }}</span>
-              </div>
-            </div>
-            <div class="metric-item">
-              <el-icon class="metric-icon is-doing" :size="18"><Flag /></el-icon>
-              <div class="metric-copy">
-                <span class="metric-label">进行中</span>
-                <span class="metric-value">{{ taskSummary.doing ?? 0 }}</span>
-              </div>
-            </div>
-            <div class="metric-item">
-              <el-icon class="metric-icon is-done" :size="18"><CircleCheck /></el-icon>
-              <div class="metric-copy">
-                <span class="metric-label">已完成</span>
-                <span class="metric-value">{{ taskSummary.done ?? 0 }}</span>
-              </div>
-            </div>
-            <div class="metric-item">
-              <el-icon class="metric-icon is-overdue" :size="18"><Warning /></el-icon>
-              <div class="metric-copy">
-                <span class="metric-label">逾期</span>
-                <span class="metric-value" :class="{ overdue: (taskSummary.overdue ?? 0) > 0 }">
-                  {{ taskSummary.overdue ?? 0 }}
-                </span>
-              </div>
-            </div>
-          </div>
-          <div v-else class="metric-bar">
+          <div v-if="isMajorShell" class="metric-bar">
             <div class="metric-item">
               <div class="metric-copy">
                 <span class="metric-label">小项目数</span>
@@ -809,7 +777,7 @@ onMounted(async () => {
             </div>
           </div>
 
-          <div v-if="!isMajorShell && projectAccount" class="fund-summary" aria-label="项目资金概览">
+          <div v-if="isKeyOrMajor && projectAccount" class="fund-summary" aria-label="项目资金概览">
             <div><span>项目资金总额</span><b>¥{{ Number(projectAccount.balance || 0).toFixed(2) }}</b></div>
             <div><span>待分成</span><b>¥{{ Number(projectAccount.sharePendingBalance || 0).toFixed(2) }}</b></div>
             <div><span>非分成</span><b>¥{{ Number(projectAccount.nonShareBalance || 0).toFixed(2) }}</b></div>
@@ -875,83 +843,6 @@ onMounted(async () => {
             <el-empty v-else description="暂无小项目，请先新建" />
           </el-tab-pane>
 
-          <el-tab-pane v-if="!isMajorShell" label="看板" name="board">
-            <TaskKanban
-              v-if="activeProjectId && detailTab === 'board'"
-              ref="kanbanRef"
-              :project-id="activeProjectId"
-              :can-create-task="canCreateTask"
-              @open-task="openTaskDetail"
-              @create-task="createTask"
-              @changed="onTaskSaved"
-            />
-          </el-tab-pane>
-
-          <el-tab-pane v-if="!isMajorShell" label="任务列表" name="tasks">
-            <div class="panel-toolbar">
-              <div class="filter-pills">
-                <button
-                  v-for="item in [
-                    { label: '全部', value: undefined },
-                    { label: '待办', value: 0 },
-                    { label: '进行中', value: 1 },
-                    { label: '已完成', value: 2 },
-                    { label: '已关闭', value: 3 },
-                  ]"
-                  :key="String(item.value)"
-                  type="button"
-                  class="filter-pill"
-                  :class="{ active: taskQuery.status === item.value }"
-                  @click="taskQuery.status = item.value"
-                >
-                  {{ item.label }}
-                </button>
-              </div>
-              <div class="panel-toolbar__right">
-                <el-button v-if="canCreateTask" size="small" type="primary" @click="createTask">新建任务</el-button>
-                <el-button size="small" @click="goTaskManage">全部任务</el-button>
-              </div>
-            </div>
-            <div class="table-wrap">
-              <el-table :data="tasks" stripe @row-click="openTaskDetail">
-                <el-table-column prop="title" label="任务" min-width="180" show-overflow-tooltip>
-                  <template #default="{ row }">
-                    <el-link type="primary" :underline="false" @click.stop="openTaskDetail(row)">{{ row.title }}</el-link>
-                  </template>
-                </el-table-column>
-                <el-table-column label="优先级" width="80" align="center">
-                  <template #default="{ row }">
-                    <el-tag :type="priorityType[row.priority]" size="small" effect="light">{{ priorityMap[row.priority] || '中' }}</el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="参与人员" min-width="160" show-overflow-tooltip>
-                  <template #default="{ row }">
-                    {{ row.participantNames?.length ? row.participantNames.join('、') : '—' }}
-                  </template>
-                </el-table-column>
-                <el-table-column label="状态" width="90" align="center">
-                  <template #default="{ row }">
-                    <el-tag :type="taskStatusType[row.status]" size="small" effect="light">{{ taskStatusMap[row.status] }}</el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="截止日期" width="120">
-                  <template #default="{ row }">
-                    <span :class="{ overdue: row.overdue }">{{ row.dueDate || '—' }}</span>
-                  </template>
-                </el-table-column>
-              </el-table>
-            </div>
-            <div class="page-footer">
-              <el-pagination
-                v-model:current-page="taskQuery.page"
-                :page-size="taskQuery.pageSize"
-                :total="taskTotal"
-                layout="total, prev, pager, next"
-                @current-change="loadTasks"
-              />
-            </div>
-          </el-tab-pane>
-
           <el-tab-pane label="项目信息" name="info">
             <div class="info-grid">
               <div class="info-item">
@@ -1002,20 +893,48 @@ onMounted(async () => {
                 <span class="info-label">实际开发周期</span>
                 <span class="info-value">{{ detail.actualEndDate || '进行中' }}{{ actualDuration ? ` · ${actualDuration} 天` : '' }}</span>
               </div>
-              <div class="info-item">
-                <span class="info-label">项目网站</span>
-                <el-link v-if="detail.websiteUrl" :href="detail.websiteUrl" target="_blank" type="primary">{{ detail.websiteUrl }}</el-link>
-                <span v-else class="info-value">—</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">代码仓库</span>
-                <el-link v-if="detail.repositoryUrl" :href="detail.repositoryUrl" target="_blank" type="primary">{{ detail.repositoryUrl }}</el-link>
-                <span v-else class="info-value">—</span>
-              </div>
               <div class="info-item info-item--full">
-                <span class="info-label">说明</span>
-                <span class="info-value desc-text">{{ detail.description || '暂无说明' }}</span>
+                <span class="info-label">简介</span>
+                <div v-if="detail.description" class="info-value desc-text" v-html="detail.description" />
+                <span v-else class="info-value">暂无简介</span>
               </div>
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="项目资料" name="notes">
+            <ProjectNotes
+              v-if="activeProjectId && detailTab === 'notes'"
+              :project-id="activeProjectId"
+              :description="detail.description"
+              :website-url="detail.websiteUrl"
+              :repository-url="detail.repositoryUrl"
+              @save-description="onSaveProjectDescription"
+            />
+          </el-tab-pane>
+
+          <el-tab-pane v-if="!isMajorShell" label="任务详情" name="personal-tasks">
+            <div class="panel-toolbar">
+              <p class="form-tip" style="margin: 0">展示项目中所有人的任务统计数据</p>
+            </div>
+            <div class="table-wrap">
+              <el-table
+                class="member-task-stats-table"
+                :data="memberTaskStats"
+                stripe
+                show-summary
+                :summary-method="memberTaskStatsSummary"
+              >
+                <el-table-column prop="userName" label="成员" min-width="120" />
+                <el-table-column prop="total" label="任务总数" width="100" align="center" />
+                <el-table-column prop="todo" label="待办" width="80" align="center" />
+                <el-table-column prop="doing" label="进行中" width="80" align="center" />
+                <el-table-column prop="done" label="已完成" width="80" align="center" />
+                <el-table-column prop="overdue" label="逾期" width="80" align="center">
+                  <template #default="{ row }">
+                    <span :class="{ overdue: row.overdue > 0 }">{{ row.overdue }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
             </div>
           </el-tab-pane>
 
@@ -1038,14 +957,6 @@ onMounted(async () => {
               </el-timeline-item>
             </el-timeline>
             <el-empty v-else description="暂无操作记录" />
-          </el-tab-pane>
-
-          <el-tab-pane label="项目资料" name="notes">
-            <p class="form-tip project-resource-tip">在这里沉淀项目说明和附件，作为项目文件区使用。</p>
-            <ProjectNotes
-              v-if="activeProjectId && detailTab === 'notes'"
-              :project-id="activeProjectId"
-            />
           </el-tab-pane>
         </el-tabs>
       </section>
@@ -1131,12 +1042,6 @@ onMounted(async () => {
         <el-form-item label="实际结束时间">
           <el-date-picker v-model="form.actualEndDate" value-format="YYYY-MM-DD" style="width: 100%" />
         </el-form-item>
-        <el-form-item label="项目网站">
-          <el-input v-model="form.websiteUrl" placeholder="https://example.com" />
-        </el-form-item>
-        <el-form-item label="代码仓库">
-          <el-input v-model="form.repositoryUrl" placeholder="https://gitlab.com/group/project" />
-        </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="form.status" style="width: 100%">
             <el-option :value="0" label="筹备" />
@@ -1162,7 +1067,7 @@ onMounted(async () => {
             <div v-else class="form-tip">规模不变或降到常规直存；改为重点/重大（含互切）需审批。</div>
           </template>
         </el-form-item>
-        <el-form-item label="说明"><el-input v-model="form.description" type="textarea" :rows="3" /></el-form-item>
+        <el-form-item label="简介"><el-input v-model="form.description" type="textarea" :rows="3" /></el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
@@ -1170,13 +1075,6 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <TaskDetailDrawer
-      v-model="taskDrawer"
-      :task-id="activeTaskId"
-      :default-project-id="activeProjectId"
-      @saved="onTaskSaved"
-      @deleted="onTaskSaved"
-    />
   </div>
 </template>
 
@@ -1248,6 +1146,25 @@ onMounted(async () => {
 
 .project-card:hover { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08); }
 .project-card.is-dragging { opacity: .52; box-shadow: none; }
+.project-card.show-drag-hint { cursor: grab; }
+.project-card.show-drag-hint::after {
+  content: '拖动排序';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 24px;
+  color: var(--kk-primary);
+  opacity: 0.5;
+  pointer-events: none;
+  animation: dragHintPulse 1.5s ease-in-out infinite;
+  font-weight: 500;
+}
+
+@keyframes dragHintPulse {
+  0%, 100% { opacity: 0.2; transform: translate(-50%, -50%) scale(1); }
+  50% { opacity: 0.4; transform: translate(-50%, -50%) scale(1.1); }
+}
 .project-card:focus-visible {
   outline: 2px solid var(--kk-primary);
   outline-offset: 2px;
@@ -1296,6 +1213,21 @@ onMounted(async () => {
 .project-card__meta {
   font-size: 12px;
   color: var(--kk-text-muted);
+}
+
+.project-card__desc {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--kk-text-secondary, #64748b);
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  word-break: break-word;
 }
 
 .project-card__icon {
@@ -1670,26 +1602,6 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 
-.filter-pills {
-  display: flex;
-  gap: 6px;
-}
-
-.filter-pill {
-  border: none;
-  background: #f1f5f9;
-  color: #64748b;
-  border-radius: 7px;
-  padding: 6px 14px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.filter-pill.active {
-  background: var(--kk-primary);
-  color: #fff;
-}
-
 .info-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -1723,6 +1635,11 @@ onMounted(async () => {
   font-weight: 500;
 }
 
+.member-task-stats-table :deep(.el-table__footer-wrapper td.el-table__cell),
+.member-task-stats-table :deep(.el-table__footer-wrapper td.el-table__cell .cell) {
+  font-weight: 700;
+}
+
 .fund-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1733,7 +1650,6 @@ onMounted(async () => {
 .fund-summary span, .fund-summary b { display: block; }
 .fund-summary span { font-size: 12px; color: var(--kk-text-muted); }
 .fund-summary b { margin-top: 4px; font-size: 16px; color: var(--kk-text); font-variant-numeric: tabular-nums; }
-.project-resource-tip { margin: 0 0 12px; }
 
 .member-responsibility-grid {
   display: grid;
