@@ -42,6 +42,9 @@ public class PmTask extends BaseEntity {
 
     private Long assigneeId;
 
+    /** 持有人；必须是项目负责人或项目参与人，且每个任务仅一人。 */
+    private Long holderId;
+
     /** 任务报酬；仅任务管理员可设置，返回时由服务层按权限及人员开关脱敏 */
     @TableField(updateStrategy = FieldStrategy.NEVER)
     private BigDecimal taskReward;
@@ -71,6 +74,10 @@ public class PmTask extends BaseEntity {
     /** 唯一主责人展示名 */
     @TableField(exist = false)
     private String assigneeName;
+
+    /** 唯一持有人展示名 */
+    @TableField(exist = false)
+    private String holderName;
 
     /** 当前登录人是否可编辑（任务参与人 / 项目负责人 / 股东 control / 全局管理员） */
     @TableField(exist = false)

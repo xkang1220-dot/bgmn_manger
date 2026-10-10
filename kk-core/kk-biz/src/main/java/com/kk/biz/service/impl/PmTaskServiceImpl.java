@@ -95,7 +95,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     public Page<PmTask> pageTasks(long page, long pageSize, Long projectId, Integer status, String statuses,
                                   Integer priority, Long participantId, String title, Boolean overdue) {
         return pageTasksInternal(page, pageSize, projectId, status, statuses, priority, participantId, title, overdue,
-                false, null, null, null, null, null, null, false);
+                false, null, null, null, null, null, null, false, null);
     }
 
     @Override
@@ -103,16 +103,16 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                                             Integer priority, Long participantId, String title, Boolean overdue,
                                             String dashboardCategory, Long dashboardOwnerId,
                                             String dashboardFrom, String dashboardTo,
-                                            String periodFrom, String periodTo, boolean taskTree) {
+                                            String periodFrom, String periodTo, boolean taskTree, String scope) {
         return pageTasksInternal(page, pageSize, projectId, status, statuses, priority, participantId, title, overdue, true,
-                dashboardCategory, dashboardOwnerId, dashboardFrom, dashboardTo, periodFrom, periodTo, taskTree);
+                dashboardCategory, dashboardOwnerId, dashboardFrom, dashboardTo, periodFrom, periodTo, taskTree, scope);
     }
 
     private Page<PmTask> pageTasksInternal(long page, long pageSize, Long projectId, Integer status, String statuses,
                                            Integer priority, Long participantId, String title, Boolean overdue,
                                            boolean managementScope, String dashboardCategory, Long dashboardOwnerId,
                                            String dashboardFrom, String dashboardTo,
-                                           String periodFrom, String periodTo, boolean taskTree) {
+                                           String periodFrom, String periodTo, boolean taskTree, String scope) {
         boolean hasQueryCondition = projectId != null
                 || status != null
                 || StringUtils.hasText(statuses)
@@ -137,6 +137,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 "DONE_30", "ON_TIME", "CYCLE", "OWNER_OPEN", "CREATED_RANGE", "COMPLETED_RANGE")
                 .contains(dashboardCategory == null ? "" : dashboardCategory);
         if (dashboardDrill) {
+            // 驾驶舱成员统计按任务持有人下钻。
+            if (dashboardOwnerId != null && !"OWNER_OPEN".equals(dashboardCategory)) {
+                applyHolderFilter(wrapper, dashboardOwnerId);
+            }
             switch (dashboardCategory) {
                 case "OPEN" -> wrapper.in(PmTask::getStatus, 0, 1, 4);
                 case "DOING" -> wrapper.eq(PmTask::getStatus, 1);
@@ -155,7 +159,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 case "ON_TIME" -> wrapper.eq(PmTask::getStatus, 2).isNotNull(PmTask::getCompletedAt).isNotNull(PmTask::getDueDate);
                 case "CYCLE" -> wrapper.eq(PmTask::getStatus, 2).isNotNull(PmTask::getStartedAt).isNotNull(PmTask::getCompletedAt);
                 case "OWNER_OPEN" -> {
-                    applyTaskLoadUserFilter(wrapper, dashboardOwnerId);
+                    applyHolderFilter(wrapper, dashboardOwnerId);
                     wrapper.in(PmTask::getStatus, 0, 1, 4);
                 }
                 case "CREATED_RANGE" -> wrapper.ge(PmTask::getCreateTime, LocalDate.parse(dashboardFrom).atStartOfDay())
@@ -177,11 +181,24 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             }
         }
         applyProjectIdFilter(wrapper, projectId);
-        applyParticipantFilter(wrapper, participantId);
-        applyVisibleScope(wrapper);
-        // 驾驶舱分类下钻仅向 task_manager 开放全局范围；普通任务列表仍严格按本人任务收口。
-        if (managementScope && !(dashboardDrill && StpUtil.hasRole("task_manager"))) {
-            applyManagementProjectScope(wrapper);
+        if (dashboardDrill) {
+            applyHolderFilter(wrapper, participantId);
+        } else {
+            applyParticipantFilter(wrapper, participantId);
+        }
+        boolean taskWorkspace = managementScope && taskTree && !dashboardDrill;
+        if (taskWorkspace) {
+            if ("all".equalsIgnoreCase(scope)) {
+                applyJoinedProjectScope(wrapper);
+            } else {
+                applyMineTaskTreeScope(wrapper);
+            }
+        } else {
+            applyVisibleScope(wrapper);
+            // 驾驶舱分类下钻仅向 task_manager 开放全局范围；其它管理查询仍沿用个人口径。
+            if (managementScope && !(dashboardDrill && StpUtil.hasRole("task_manager"))) {
+                applyManagementProjectScope(wrapper);
+            }
         }
         if (hasQueryCondition) {
             wrapper.orderByAsc(PmTask::getPriority)
@@ -200,13 +217,13 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         Page<PmTask> result = page(new Page<>(page, pageSize), wrapper);
         fillExtras(result.getRecords());
         if (taskTree) {
-            fillTaskChildren(result.getRecords());
+            fillTaskChildren(result.getRecords(), taskWorkspace ? scope : null);
         }
         return result;
     }
 
     /** 为任务工作台组装真实的一层子任务；分页总数只统计顶层任务。 */
-    private void fillTaskChildren(List<PmTask> parents) {
+    private void fillTaskChildren(List<PmTask> parents, String scope) {
         if (parents == null || parents.isEmpty()) {
             return;
         }
@@ -217,8 +234,23 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (parentIds.isEmpty()) {
             return;
         }
-        List<PmTask> children = list(new LambdaQueryWrapper<PmTask>()
-                .in(PmTask::getParentTaskId, parentIds)
+        LambdaQueryWrapper<PmTask> childWrapper = new LambdaQueryWrapper<PmTask>()
+                .in(PmTask::getParentTaskId, parentIds);
+        if (scope != null && !"all".equalsIgnoreCase(scope)) {
+            long loginId = StpUtil.getLoginIdAsLong();
+            Set<Long> fullyVisibleParentIds = parents.stream()
+                    .filter(parent -> Objects.equals(parent.getAssigneeId(), loginId))
+                    .map(PmTask::getId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+            childWrapper.and(visible -> {
+                visible.eq(PmTask::getAssigneeId, loginId).or().eq(PmTask::getHolderId, loginId);
+                if (!fullyVisibleParentIds.isEmpty()) {
+                    visible.or().in(PmTask::getParentTaskId, fullyVisibleParentIds);
+                }
+            });
+        }
+        List<PmTask> children = list(childWrapper
                 .orderByAsc(PmTask::getPriority)
                 .orderByAsc(PmTask::getDueDate)
                 .orderByAsc(PmTask::getId));
@@ -228,6 +260,53 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         for (PmTask parent : parents) {
             parent.setChildren(childrenByParent.getOrDefault(parent.getId(), List.of()));
         }
+    }
+
+    /** “我的任务”：父任务本人负责/持有，或本人负责/持有的子任务所对应的父任务。 */
+    private void applyMineTaskTreeScope(LambdaQueryWrapper<PmTask> wrapper) {
+        long loginId = StpUtil.getLoginIdAsLong();
+        Set<Long> parentIds = list(new LambdaQueryWrapper<PmTask>()
+                        .isNotNull(PmTask::getParentTaskId)
+                        .and(w -> w.eq(PmTask::getAssigneeId, loginId).or().eq(PmTask::getHolderId, loginId))
+                        .select(PmTask::getParentTaskId))
+                .stream()
+                .map(PmTask::getParentTaskId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        wrapper.and(visible -> {
+            visible.eq(PmTask::getAssigneeId, loginId).or().eq(PmTask::getHolderId, loginId);
+            if (!parentIds.isEmpty()) {
+                visible.or().in(PmTask::getId, parentIds);
+            }
+        });
+    }
+
+    /** “全部任务”：只能进入本人作为项目成员参与的项目，但进入后可查看项目全部任务。 */
+    private void applyJoinedProjectScope(LambdaQueryWrapper<PmTask> wrapper) {
+        long loginId = StpUtil.getLoginIdAsLong();
+        Set<Long> projectIds = projectMemberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
+                        .eq(PmProjectMember::getUserId, loginId)
+                        .select(PmProjectMember::getProjectId))
+                .stream()
+                .map(PmProjectMember::getProjectId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        projectIds.addAll(listOwnedProjectIds(loginId));
+        if (projectIds.isEmpty()) {
+            wrapper.eq(PmTask::getProjectId, -1L);
+        } else {
+            wrapper.in(PmTask::getProjectId, projectIds);
+        }
+    }
+
+    private Set<Long> listOwnedProjectIds(long userId) {
+        return projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
+                        .eq(PmProject::getOwnerId, userId)
+                        .select(PmProject::getId))
+                .stream()
+                .map(PmProject::getId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
     }
 
     private List<Integer> parseStatuses(String statuses) {
@@ -268,7 +347,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     }
 
     @Override
-    public PmTask getDetail(Long id) {
+    public PmTask getDetail(Long id, String scope) {
         PmTask task = getById(id);
         if (task == null) {
             throw new BusinessException("任务不存在");
@@ -286,6 +365,13 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 .orderByAsc(PmTask::getPriority)
                 .orderByAsc(PmTask::getDueDate)
                 .orderByAsc(PmTask::getId));
+        if (!canViewAllChildren(task, scope)) {
+            long loginId = StpUtil.getLoginIdAsLong();
+            children = children.stream()
+                    .filter(child -> Objects.equals(child.getAssigneeId(), loginId)
+                            || Objects.equals(child.getHolderId(), loginId))
+                    .toList();
+        }
         fillExtras(children);
         task.setChildren(children);
         return task;
@@ -293,31 +379,39 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
 
     @Override
     public Map<String, Object> summary(Long projectId, Integer priority, Long participantId, String title) {
-        return summaryInternal(projectId, priority, participantId, title, false);
+        return summaryInternal(projectId, priority, participantId, title, false, false);
     }
 
     @Override
     public Map<String, Object> managementSummary(Long projectId, Integer priority, Long participantId, String title,
                                                  String periodFrom, String periodTo) {
-        return summaryInternal(projectId, priority, participantId, title, true, periodFrom, periodTo);
+        return summaryInternal(projectId, priority, participantId, title, true, false, periodFrom, periodTo);
     }
 
     @Override
     public Map<String, Object> managementDashboard(Long projectId, Integer priority, Long participantId, String title,
                                                    String periodFrom, String periodTo) {
         // 驾驶舱是任务管理员的全局视角，角色校验由 Controller 强制执行。
-        return summaryInternal(projectId, priority, participantId, title, false, periodFrom, periodTo);
+        return summaryInternal(projectId, priority, participantId, title, false, true, periodFrom, periodTo);
+    }
+
+    /** 任务驾驶舱人员口径：每条任务只归属于唯一持有人。 */
+    private void applyHolderFilter(LambdaQueryWrapper<PmTask> wrapper, Long holderId) {
+        if (holderId != null) {
+            wrapper.eq(PmTask::getHolderId, holderId);
+        }
     }
 
     private Map<String, Object> summaryInternal(Long projectId, Integer priority, Long participantId, String title,
-                                                boolean managementScope) {
-        return summaryInternal(projectId, priority, participantId, title, managementScope, null, null);
+                                                boolean managementScope, boolean holderStatistics) {
+        return summaryInternal(projectId, priority, participantId, title, managementScope, holderStatistics, null, null);
     }
 
     private Map<String, Object> summaryInternal(Long projectId, Integer priority, Long participantId, String title,
-                                                boolean managementScope, String periodFrom, String periodTo) {
+                                                boolean managementScope, boolean holderStatistics,
+                                                String periodFrom, String periodTo) {
         LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<PmTask>()
-                .select(PmTask::getId, PmTask::getProjectId, PmTask::getAssigneeId, PmTask::getTitle,
+                .select(PmTask::getId, PmTask::getProjectId, PmTask::getAssigneeId, PmTask::getHolderId, PmTask::getTitle,
                         PmTask::getStatus, PmTask::getPriority, PmTask::getStartDate,
                         PmTask::getDueDate, PmTask::getStartedAt, PmTask::getCompletedAt,
                         PmTask::getLastActivityAt, PmTask::getRiskLevel,
@@ -329,7 +423,11 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                     .lt(PmTask::getCreateTime, LocalDate.parse(periodTo).atStartOfDay());
         }
         applyProjectIdFilter(wrapper, projectId);
-        applyParticipantFilter(wrapper, participantId);
+        if (holderStatistics) {
+            applyHolderFilter(wrapper, participantId);
+        } else {
+            applyParticipantFilter(wrapper, participantId);
+        }
         applyVisibleScope(wrapper);
         if (managementScope) {
             applyManagementProjectScope(wrapper);
@@ -342,7 +440,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         LocalDateTime staleBefore = LocalDateTime.now().minusDays(7);
         LocalDateTime recentBefore = LocalDateTime.now().minusDays(30);
         Set<Long> taskIds = rows.stream().map(PmTask::getId).filter(Objects::nonNull).collect(Collectors.toSet());
-        Map<Long, Set<Long>> taskMemberIds = taskIds.isEmpty() ? Map.of()
+        Map<Long, Set<Long>> taskMemberIds = holderStatistics || taskIds.isEmpty() ? Map.of()
                 : taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
                         .in(PmTaskMember::getTaskId, taskIds)
                         .select(PmTaskMember::getTaskId, PmTaskMember::getUserId))
@@ -363,7 +461,11 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 .collect(Collectors.toMap(PmProject::getId, p -> p, (a, b) -> a));
         Set<Long> ownerIds = projectMap.values().stream().map(PmProject::getOwnerId).filter(Objects::nonNull).collect(Collectors.toSet());
         rows.stream().map(PmTask::getAssigneeId).filter(Objects::nonNull).forEach(ownerIds::add);
-        taskMemberIds.values().forEach(ownerIds::addAll);
+        if (holderStatistics) {
+            rows.stream().map(PmTask::getHolderId).filter(Objects::nonNull).forEach(ownerIds::add);
+        } else {
+            taskMemberIds.values().forEach(ownerIds::addAll);
+        }
         Map<Long, SysUser> ownerMap = loadUserMap(ownerIds);
         Map<Long, Map<String, Object>> healthByProject = new HashMap<>();
         List<Map<String, Object>> riskTasks = new ArrayList<>();
@@ -401,9 +503,14 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 cycleCount++;
             }
 
-            // 负责人和参与人先按任务内人员集合去重，兼任两种角色也只统计一次。
-            Set<Long> taskUserIds = new HashSet<>(taskMemberIds.getOrDefault(row.getId(), Set.of()));
-            if (row.getAssigneeId() != null) taskUserIds.add(row.getAssigneeId());
+            // 驾驶舱按唯一持有人归属任务；父任务和子任务都是独立记录，各计一次。
+            Set<Long> taskUserIds;
+            if (holderStatistics) {
+                taskUserIds = row.getHolderId() == null ? Set.of() : Set.of(row.getHolderId());
+            } else {
+                taskUserIds = new HashSet<>(taskMemberIds.getOrDefault(row.getId(), Set.of()));
+                if (row.getAssigneeId() != null) taskUserIds.add(row.getAssigneeId());
+            }
             // 人员筛选限定了任务范围后，成员统计也只展示该人，避免带出同任务的其他成员。
             Set<Long> statsUserIds = participantId == null ? taskUserIds
                     : (taskUserIds.contains(participantId) ? Set.of(participantId) : Set.of());
@@ -427,7 +534,6 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 if (rowOverdue) increment(stats, "overdue");
             }
             if (open || status == 4) {
-                // 负责人也可能同时存在于参与人中，按任务内人员集合去重。
                 for (Long userId : taskUserIds) {
                     SysUser owner = ownerMap.get(userId);
                     Map<String, Object> load = ownerLoadMap.computeIfAbsent(userId, id -> {
@@ -475,7 +581,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 risk.put("id", row.getId());
                 risk.put("title", row.getTitle());
                 risk.put("projectName", project == null ? "未关联项目" : project.getName());
-                SysUser taskOwner = ownerMap.get(row.getAssigneeId());
+                Long taskOwnerId = holderStatistics ? row.getHolderId() : row.getAssigneeId();
+                SysUser taskOwner = ownerMap.get(taskOwnerId);
                 risk.put("ownerName", taskOwner == null ? "未指定" : userName(taskOwner));
                 risk.put("dueDate", row.getDueDate());
                 risk.put("priority", row.getPriority());
@@ -582,27 +689,6 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             wrapper.and(w -> w.eq(PmTask::getAssigneeId, loginId)
                     .or().in(PmTask::getId, memberTaskIds));
         }
-    }
-
-    /** 任务负载人员口径：任务负责人或任务参与人。 */
-    private void applyTaskLoadUserFilter(LambdaQueryWrapper<PmTask> wrapper, Long userId) {
-        if (userId == null) {
-            wrapper.eq(PmTask::getId, -1L);
-            return;
-        }
-        Set<Long> memberTaskIds = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
-                        .eq(PmTaskMember::getUserId, userId)
-                        .select(PmTaskMember::getTaskId))
-                .stream()
-                .map(PmTaskMember::getTaskId)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet());
-        wrapper.and(condition -> {
-            condition.eq(PmTask::getAssigneeId, userId);
-            if (!memberTaskIds.isEmpty()) {
-                condition.or().in(PmTask::getId, memberTaskIds);
-            }
-        });
     }
 
     private void applyProjectIdFilter(LambdaQueryWrapper<PmTask> wrapper, Long projectId) {
@@ -800,9 +886,14 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (ownerId == null) throw new BusinessException("请指定任务负责人");
         if (!participants.contains(ownerId)) participants.add(ownerId);
         task.setAssigneeId(ownerId);
+        Long holderId = task.getHolderId() != null ? task.getHolderId() : ownerId;
+        if (holderId == null) throw new BusinessException("请选择任务持有人");
+        task.setHolderId(holderId);
         task.setParticipantIds(participants);
         assertUsersInCompany(project.getCompanyId(), ownerId, participants);
         assertParticipantsEligible(project.getId(), participants);
+        assertParticipantsEligible(project.getId(), List.of(holderId));
+        assertUserInCompany(holderId, project.getCompanyId());
         if (task.getStatus() == null) {
             task.setStatus(0);
         }
@@ -859,8 +950,12 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         if (task.getAssigneeId() == null) task.setAssigneeId(existing.getAssigneeId());
         if (task.getAssigneeId() == null) throw new BusinessException("请指定任务负责人");
+        if (task.getHolderId() == null) task.setHolderId(existing.getHolderId());
+        if (task.getHolderId() == null) throw new BusinessException("请选择任务持有人");
         assertUsersInCompany(companyId, task.getAssigneeId(), task.getParticipantIds());
         assertParticipantsEligible(existing.getProjectId(), List.of(task.getAssigneeId()));
+        assertParticipantsEligible(existing.getProjectId(), List.of(task.getHolderId()));
+        assertUserInCompany(task.getHolderId(), companyId);
         if (task.getParticipantIds() != null) {
             if (!StpUtil.hasPermission("project:task:add")) {
                 Set<Long> existingParticipants = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
@@ -925,6 +1020,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (!Objects.equals(oldTask.getAssigneeId(), newTask.getAssigneeId())) {
             changes.add("负责人：" + userDisplayName(oldTask.getAssigneeId()) + " → "
                     + userDisplayName(newTask.getAssigneeId()));
+        }
+        if (!Objects.equals(oldTask.getHolderId(), newTask.getHolderId())) {
+            changes.add("持有人：" + userDisplayName(oldTask.getHolderId()) + " → "
+                    + userDisplayName(newTask.getHolderId()));
         }
         addTaskChange(changes, "开始日期", oldTask.getStartDate(), newTask.getStartDate());
         addTaskChange(changes, "截止日期", oldTask.getDueDate(), newTask.getDueDate());
@@ -1592,16 +1691,54 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             return true;
         }
         if (Objects.equals(task.getAssigneeId(), loginId)
+                || Objects.equals(task.getHolderId(), loginId)
                 || isTaskParticipant(task.getId(), loginId)) {
             return true;
+        }
+        if (task.getParentTaskId() == null) {
+            Long relatedChildCount = count(new LambdaQueryWrapper<PmTask>()
+                    .eq(PmTask::getParentTaskId, task.getId())
+                    .and(w -> w.eq(PmTask::getAssigneeId, loginId).or().eq(PmTask::getHolderId, loginId)));
+            if (relatedChildCount != null && relatedChildCount > 0) {
+                return true;
+            }
         }
         if (task.getProjectId() != null) {
             PmProject project = projectMapper.selectById(task.getProjectId());
             if (project != null && Objects.equals(project.getOwnerId(), loginId)) {
                 return true;
             }
+            Long memberCount = projectMemberMapper.selectCount(new LambdaQueryWrapper<PmProjectMember>()
+                    .eq(PmProjectMember::getProjectId, task.getProjectId())
+                    .eq(PmProjectMember::getUserId, loginId));
+            if (memberCount != null && memberCount > 0) {
+                return true;
+            }
         }
         return false;
+    }
+
+    private boolean canViewAllChildren(PmTask parent, String scope) {
+        long loginId = StpUtil.getLoginIdAsLong();
+        if (dataScopeService.isGlobalAdmin(loginId)
+                || StpUtil.hasPermission("project:task:confirm")
+                || Objects.equals(parent.getAssigneeId(), loginId)) {
+            return true;
+        }
+        if (parent.getProjectId() == null) {
+            return false;
+        }
+        if ("mine".equalsIgnoreCase(scope)) {
+            return false;
+        }
+        PmProject project = projectMapper.selectById(parent.getProjectId());
+        if (project != null && Objects.equals(project.getOwnerId(), loginId)) {
+            return true;
+        }
+        Long memberCount = projectMemberMapper.selectCount(new LambdaQueryWrapper<PmProjectMember>()
+                .eq(PmProjectMember::getProjectId, parent.getProjectId())
+                .eq(PmProjectMember::getUserId, loginId));
+        return memberCount != null && memberCount > 0;
     }
 
     /** 可写：admin / 公司 control / 项目负责人 / 任务参与人（含创建人若在参与人中；创建人也放行） */
@@ -1778,6 +1915,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         for (PmTask task : tasks) {
             taskIds.add(task.getId());
             if (task.getAssigneeId() != null) userIds.add(task.getAssigneeId());
+            if (task.getHolderId() != null) userIds.add(task.getHolderId());
             if (task.getProjectId() != null) {
                 projectIds.add(task.getProjectId());
             }
@@ -1825,6 +1963,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                     : parentTaskTitles.get(task.getParentTaskId()));
             SysUser owner = userMap.get(task.getAssigneeId());
             task.setAssigneeName(owner == null ? null : userName(owner));
+            SysUser holder = userMap.get(task.getHolderId());
+            task.setHolderName(holder == null ? null : userName(holder));
             task.setCanEdit(canWriteTask(task, project));
             task.setCanTransfer(canTransferTask(task, project));
             List<PmTaskMember> members = membersByTask.getOrDefault(task.getId(), List.of());

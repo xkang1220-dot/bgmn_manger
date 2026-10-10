@@ -36,6 +36,7 @@ let filterTimer: ReturnType<typeof setTimeout> | undefined
 const browserProjectId = ref<number | undefined>()
 const browserLoading = ref(false)
 const browserRows = ref<any[]>([])
+let browserRequestId = 0
 type BrowserTabKey = 'all' | 0 | 1 | 2 | 4 | 'overdue'
 const browserTab = ref<BrowserTabKey>('all')
 const browserTabs: Array<{ key: BrowserTabKey; label: string }> = [
@@ -199,19 +200,37 @@ function buildFilterParams() {
 }
 
 async function loadBrowserTasks() {
+  const requestId = ++browserRequestId
   browserLoading.value = true
   try {
     const params: Record<string, unknown> = {
       ...buildFilterParams(),
       page: 1,
       pageSize: 200,
+      // 驾驶舱列表与统计统一按唯一持有人筛选。
+      dashboardCategory: 'TOTAL',
     }
     // 模块内项目选择优先；成员始终走顶部人员筛选
     if (browserProjectId.value != null) params.projectId = browserProjectId.value
-    const result = await bizApi.managementTaskPage(params)
-    browserRows.value = (result.list || []).filter((item: any) => !item.parentTaskId)
+    const firstPage = await bizApi.managementTaskPage(params)
+    const rows = [...(firstPage.list || [])]
+    const total = Number(firstPage.total || rows.length)
+    const pageSize = Number(params.pageSize)
+    const pageCount = Math.ceil(total / pageSize)
+    if (pageCount > 1) {
+      const remainingPages = await Promise.all(
+        Array.from({ length: pageCount - 1 }, (_, index) =>
+          bizApi.managementTaskPage({ ...params, page: index + 2 }),
+        ),
+      )
+      remainingPages.forEach(result => rows.push(...(result.list || [])))
+    }
+    // 接口分页总数包含子任务；驾驶舱项目与状态统计只展示顶层任务，必须在拉取全量后统一过滤。
+    if (requestId === browserRequestId) {
+      browserRows.value = rows.filter((item: any) => !item.parentTaskId)
+    }
   } finally {
-    browserLoading.value = false
+    if (requestId === browserRequestId) browserLoading.value = false
   }
 }
 
@@ -316,8 +335,18 @@ function showTasks(category: string, projectId?: number, projectName?: string, e
   loadTaskList()
 }
 
-function showMemberTasks(item: any) {
-  showTasks('OWNER_OPEN', undefined, undefined, { ownerId: Number(item.memberId), title: `${item.memberName} · 未结任务` })
+type MemberTaskCategory = 'DONE' | 'DOING' | 'OVERDUE'
+const memberTaskCategoryLabels: Record<MemberTaskCategory, string> = {
+  DONE: '已完成',
+  DOING: '进行中',
+  OVERDUE: '已逾期',
+}
+
+function showMemberTasks(item: any, category: MemberTaskCategory) {
+  showTasks(category, undefined, undefined, {
+    ownerId: Number(item.memberId),
+    title: `${item.memberName} · ${memberTaskCategoryLabels[category]}`,
+  })
 }
 
 function openListedTask(id: number) {
@@ -432,7 +461,7 @@ onBeforeUnmount(() => {
                 </span>
                 <strong>{{ task.title }}</strong>
                 <small>
-                  <span>{{ task.assigneeName || '未指定' }}</span>
+                  <span>持有人 {{ task.holderName || '未指定' }}</span>
                   <span v-if="browserProjectId == null">{{ task.projectName || '未关联项目' }}</span>
                   <span v-if="task.dueDate" :class="{ overdue: task.overdue }">{{ task.dueDate }}</span>
                 </small>
@@ -464,23 +493,31 @@ onBeforeUnmount(() => {
           <div class="member-chart" :style="{ minWidth: `${memberChartMinWidth}px` }" role="img" aria-label="成员任务数量柱状图">
             <div class="member-grid-lines" aria-hidden="true"><i /><i /><i /><i /><i /></div>
             <div class="member-chart-groups" :style="{ gridTemplateColumns: `repeat(${memberChartRows.length}, minmax(112px, 1fr))` }">
-              <button v-for="item in memberChartRows" :key="item.memberId" type="button" class="member-chart-group"
-                :aria-label="`${item.memberName}：已完成${item.done}项，进行中${item.doing}项，逾期${item.overdue}项，完成率${item.completionRate}%`" @click="showMemberTasks(item)">
+              <div v-for="item in memberChartRows" :key="item.memberId" class="member-chart-group">
                 <span class="member-bars">
-                  <el-tooltip :content="`已完成 ${item.done} 项`" placement="top"><i class="done" :style="{ height: `${Math.max(3, item.done / memberChartMax * 100)}%` }"><b>{{ item.done }}</b></i></el-tooltip>
-                  <el-tooltip :content="`进行中 ${item.doing} 项`" placement="top"><i class="doing" :style="{ height: `${Math.max(3, item.doing / memberChartMax * 100)}%` }"><b>{{ item.doing }}</b></i></el-tooltip>
-                  <el-tooltip :content="`已逾期 ${item.overdue} 项`" placement="top"><i class="overdue" :style="{ height: `${Math.max(3, item.overdue / memberChartMax * 100)}%` }"><b>{{ item.overdue }}</b></i></el-tooltip>
+                  <el-tooltip :content="`已完成 ${item.done} 项`" placement="top">
+                    <button type="button" class="done" :style="{ height: `${Math.max(3, item.done / memberChartMax * 100)}%` }"
+                      :aria-label="`查看${item.memberName}的已完成任务，共${item.done}项`" @click="showMemberTasks(item, 'DONE')"><b>{{ item.done }}</b></button>
+                  </el-tooltip>
+                  <el-tooltip :content="`进行中 ${item.doing} 项`" placement="top">
+                    <button type="button" class="doing" :style="{ height: `${Math.max(3, item.doing / memberChartMax * 100)}%` }"
+                      :aria-label="`查看${item.memberName}的进行中任务，共${item.doing}项`" @click="showMemberTasks(item, 'DOING')"><b>{{ item.doing }}</b></button>
+                  </el-tooltip>
+                  <el-tooltip :content="`已逾期 ${item.overdue} 项`" placement="top">
+                    <button type="button" class="overdue" :style="{ height: `${Math.max(3, item.overdue / memberChartMax * 100)}%` }"
+                      :aria-label="`查看${item.memberName}的已逾期任务，共${item.overdue}项`" @click="showMemberTasks(item, 'OVERDUE')"><b>{{ item.overdue }}</b></button>
+                  </el-tooltip>
                 </span>
                 <strong :title="item.memberName">{{ item.memberName }}</strong>
                 <small>共 {{ item.total }} 项 · {{ item.completionRate }}%</small>
-              </button>
+              </div>
             </div>
           </div>
         </div>
       </div>
       <button v-else-if="memberChartRows.length" type="button" class="member-focus"
         :aria-label="`${memberChartRows[0].memberName}：共${memberChartRows[0].total}项，已完成${memberChartRows[0].done}项，进行中${memberChartRows[0].doing}项，逾期${memberChartRows[0].overdue}项`"
-        @click="showMemberTasks(memberChartRows[0])">
+        @click="showMemberTasks(memberChartRows[0], 'DOING')">
         <span class="member-focus-person">
           <i aria-hidden="true">{{ memberInitial(memberChartRows[0].memberName) }}</i>
           <span><strong>{{ memberChartRows[0].memberName }}</strong><small>当前筛选成员</small></span>
@@ -502,7 +539,7 @@ onBeforeUnmount(() => {
     <el-dialog v-model="listOpen" :title="listTitle" width="min(820px, calc(100vw - 24px))">
       <div v-loading="listLoading" class="drill-list">
         <button v-for="item in listRows" :key="item.id" type="button" @click="openListedTask(item.id)">
-          <div><strong>{{ item.title }}</strong><span>{{ item.projectName || '未关联项目' }} · 负责人 {{ item.assigneeName || '未指定' }}</span></div>
+          <div><strong>{{ item.title }}</strong><span>{{ item.projectName || '未关联项目' }} · 持有人 {{ item.holderName || '未指定' }}</span></div>
           <aside>{{ item.dueDate || '未设截止日' }} · {{ statusMap[item.status] }}</aside>
         </button>
         <el-pagination v-if="listTotal > 10" v-model:current-page="listPage" :page-size="10" :total="listTotal" layout="prev, pager, next, total" @current-change="loadTaskList" />
@@ -942,7 +979,6 @@ onBeforeUnmount(() => {
   transition: background-color 140ms ease-out;
 }
 .member-chart-group:hover { background: rgba(255, 255, 255, 0.45); }
-.member-chart-group:focus-visible { outline: 2px solid var(--cockpit-ink); outline-offset: -2px; }
 .member-bars {
   height: 210px;
   display: flex;
@@ -951,16 +987,22 @@ onBeforeUnmount(() => {
   justify-content: center;
   gap: 5px;
 }
-.member-bars i {
+.member-bars button {
   position: relative;
   width: 18px;
   min-height: 3px;
   display: block;
+  padding: 0;
+  border: 0;
   border-radius: 4px 4px 1px 1px;
+  cursor: pointer;
+  transition: filter 140ms ease-out, transform 140ms ease-out;
 }
-.member-bars i.done { background: var(--cockpit-done); }
-.member-bars i.doing { background: var(--cockpit-doing); }
-.member-bars i.overdue { background: #ff6b6b; }
+.member-bars button:hover { filter: brightness(.9); transform: translateY(-2px); }
+.member-bars button:focus-visible { outline: 2px solid var(--cockpit-ink); outline-offset: 2px; }
+.member-bars button.done { background: var(--cockpit-done); }
+.member-bars button.doing { background: var(--cockpit-doing); }
+.member-bars button.overdue { background: #ff6b6b; }
 .member-bars b {
   position: absolute;
   bottom: calc(100% + 3px);

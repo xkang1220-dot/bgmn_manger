@@ -16,14 +16,14 @@ public interface PmTaskService extends IService<PmTask> {
     Page<PmTask> pageTasks(long page, long pageSize, Long projectId, Integer status, String statuses,
                            Integer priority, Long participantId, String title, Boolean overdue);
 
-    /** 任务管理页：普通用户仅查询本人主责或直接参与的任务，任务管理员/超管不限制。 */
+    /** 任务管理页：mine 按负责人/持有人；all 按参与项目，且项目负责人可看所负责项目全部任务。 */
     Page<PmTask> pageManagementTasks(long page, long pageSize, Long projectId, Integer status, String statuses,
                                      Integer priority, Long participantId, String title, Boolean overdue,
                                      String dashboardCategory, Long dashboardOwnerId,
                                      String dashboardFrom, String dashboardTo,
-                                     String periodFrom, String periodTo, boolean taskTree);
+                                     String periodFrom, String periodTo, boolean taskTree, String scope);
 
-    PmTask getDetail(Long id);
+    PmTask getDetail(Long id, String scope);
 
     /**
      * 任务统计。与列表共用项目/标题/优先级/参与人筛选；

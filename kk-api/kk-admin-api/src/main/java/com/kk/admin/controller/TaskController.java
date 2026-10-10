@@ -63,11 +63,11 @@ public class TaskController {
             Long projectId, Integer status, String statuses,
             Integer priority, Long participantId, String title, Boolean overdue, String dashboardCategory,
             Long dashboardOwnerId, String dashboardFrom, String dashboardTo, String periodFrom, String periodTo,
-            Boolean taskTree) {
+            Boolean taskTree, String scope) {
         return Result.ok(PageResult.of(taskService.pageManagementTasks(
                 page, pageSize, projectId, status, statuses, priority, participantId, title, overdue,
                 dashboardCategory, dashboardOwnerId, dashboardFrom, dashboardTo, periodFrom, periodTo,
-                Boolean.TRUE.equals(taskTree))));
+                Boolean.TRUE.equals(taskTree), scope)));
     }
 
     @GetMapping("/board")
@@ -124,8 +124,8 @@ public class TaskController {
 
     @GetMapping("/{id}")
     @SaCheckPermission("project:task:list")
-    public Result<PmTask> detail(@PathVariable Long id) {
-        return Result.ok(taskService.getDetail(id));
+    public Result<PmTask> detail(@PathVariable Long id, String scope) {
+        return Result.ok(taskService.getDetail(id, scope));
     }
 
     @PostMapping

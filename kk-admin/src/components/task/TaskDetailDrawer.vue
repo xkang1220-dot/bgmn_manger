@@ -16,6 +16,7 @@ const props = defineProps<{
   initialAction?: 'view' | 'edit' | 'transfer' | 'close' | 'subtask'
   /** 新建时默认项目 */
   defaultProjectId?: number | null
+  taskScope?: 'mine' | 'all'
 }>()
 
 const emit = defineEmits<{
@@ -98,6 +99,7 @@ const form = reactive<any>({
   projectId: undefined,
   parentTaskId: undefined,
   assigneeId: undefined,
+  holderId: undefined,
   participantIds: [] as number[],
   status: 0,
   priority: 2,
@@ -131,6 +133,7 @@ function emptyForm() {
     projectId: props.defaultProjectId != null ? Number(props.defaultProjectId) : undefined,
     parentTaskId: undefined,
     assigneeId: selfId,
+    holderId: selfId,
     participantIds: selfId != null ? [selfId] : ([] as number[]),
     status: 0,
     priority: 2,
@@ -210,7 +213,7 @@ async function loadDetail(id: number) {
       projects.value = (await bizApi.taskManagementProjects()) || []
     }
     const [full, commentList, flowList] = await Promise.all([
-      bizApi.taskDetail(id),
+      bizApi.taskDetail(id, props.taskScope),
       bizApi.taskComments(id),
       bizApi.taskFlows(id),
     ])
@@ -298,6 +301,7 @@ async function loadProjectCandidates(projectId?: number) {
   }
   candidateUsers.value = [...map.values()]
   if (form.assigneeId == null && d.ownerId != null) form.assigneeId = Number(d.ownerId)
+  if (form.holderId == null && d.ownerId != null) form.holderId = Number(d.ownerId)
   candidateProjectId.value = projectId
   const have = new Set(candidateUsers.value.map((u) => Number(u.id)))
   const ids = form.participantIds || []
@@ -388,6 +392,7 @@ watch(
         candidateUsers.value.filter(isEligibleCandidate).map((u) => Number(u.id)),
       )
       form.participantIds = (form.participantIds || []).filter((id: number) => allowed.has(Number(id)))
+      if (form.holderId != null && !allowed.has(Number(form.holderId))) form.holderId = undefined
       const selfId = userStore.user?.id
       if (selfId != null && allowed.has(Number(selfId)) && !form.participantIds.includes(selfId)) {
         form.participantIds = [...form.participantIds, selfId]
@@ -437,6 +442,10 @@ async function save() {
     ElMessage.warning('请选择任务负责人')
     return
   }
+  if (!form.holderId) {
+    ElMessage.warning('请选择任务持有人')
+    return
+  }
   if (showTaskReward.value && form.taskReward != null && Number(form.taskReward) < 0) {
     ElMessage.warning('任务报酬不能小于 0')
     return
@@ -449,12 +458,17 @@ async function save() {
     ElMessage.warning('参与人须为项目负责人或项目参与人，请先移除无效人员')
     return
   }
+  if (!eligibleIds.has(Number(form.holderId))) {
+    ElMessage.warning('持有人须为项目负责人或项目参与人')
+    return
+  }
   syncImageFileIds()
   saving.value = true
   try {
     const payload = { ...form }
     // 去掉仅展示用字段，避免污染请求体
     delete payload.assigneeName
+    delete payload.holderName
     delete payload.canTransfer
     delete payload.canEdit
     delete payload.participantNames
@@ -934,6 +948,11 @@ function commentAttachmentUrl(file: any, preview = false) {
             <div class="form-grid">
               <el-form-item label="负责人" required>
                 <el-select v-model="form.assigneeId" filterable placeholder="选择唯一交付责任人" style="width: 100%">
+                  <el-option v-for="u in candidateUsers.filter(isEligibleCandidate)" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="持有人" required>
+                <el-select v-model="form.holderId" filterable placeholder="选择唯一持有人" style="width: 100%">
                   <el-option v-for="u in candidateUsers.filter(isEligibleCandidate)" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
                 </el-select>
               </el-form-item>

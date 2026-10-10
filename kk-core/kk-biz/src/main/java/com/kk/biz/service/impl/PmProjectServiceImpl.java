@@ -113,18 +113,30 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
     }
 
     @Override
-    public List<PmProject> listTaskManagementOptions() {
+    public List<PmProject> listTaskManagementOptions(String scope) {
         long userId = StpUtil.getLoginIdAsLong();
         LambdaQueryWrapper<PmProject> wrapper = new LambdaQueryWrapper<PmProject>()
                 .and(w -> w.isNull(PmProject::getApproveStatus).or().eq(PmProject::getApproveStatus, 1));
-        if (!dataScopeService.isGlobalAdmin(userId) && !StpUtil.hasPermission("project:task:confirm")) {
-            Set<Long> projectIds = memberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
+        Set<Long> projectIds;
+        if ("all".equalsIgnoreCase(scope)) {
+            projectIds = memberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
                             .eq(PmProjectMember::getUserId, userId)
                             .select(PmProjectMember::getProjectId))
                     .stream()
                     .map(PmProjectMember::getProjectId)
                     .filter(Objects::nonNull)
                     .collect(Collectors.toSet());
+        } else {
+            projectIds = taskMapper.selectList(new LambdaQueryWrapper<PmTask>()
+                            .and(w -> w.eq(PmTask::getAssigneeId, userId).or().eq(PmTask::getHolderId, userId))
+                            .select(PmTask::getProjectId))
+                    .stream()
+                    .map(PmTask::getProjectId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+        }
+        if ("all".equalsIgnoreCase(scope)) {
+            // “全部任务”中，项目负责人可以进入自己负责的项目并查看全部任务。
             list(new LambdaQueryWrapper<PmProject>()
                             .eq(PmProject::getOwnerId, userId)
                             .select(PmProject::getId))
@@ -132,18 +144,22 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
                     .map(PmProject::getId)
                     .filter(Objects::nonNull)
                     .forEach(projectIds::add);
-            if (!projectIds.isEmpty()) {
-                List<PmProject> related = list(new LambdaQueryWrapper<PmProject>()
-                        .and(w -> w.in(PmProject::getId, projectIds).or().in(PmProject::getParentId, projectIds))
-                        .select(PmProject::getId, PmProject::getParentId));
-                related.stream().map(PmProject::getId).filter(Objects::nonNull).forEach(projectIds::add);
-                related.stream().map(PmProject::getParentId).filter(Objects::nonNull).forEach(projectIds::add);
-            }
-            if (projectIds.isEmpty()) {
-                wrapper.eq(PmProject::getId, -1L);
-            } else {
-                wrapper.in(PmProject::getId, projectIds);
-            }
+        }
+        // 子项目命中时补入其父项目，仅用于完整展示左侧层级；不反向放大到其它子项目。
+        if (!projectIds.isEmpty()) {
+            list(new LambdaQueryWrapper<PmProject>()
+                            .in(PmProject::getId, projectIds)
+                            .isNotNull(PmProject::getParentId)
+                            .select(PmProject::getParentId))
+                    .stream()
+                    .map(PmProject::getParentId)
+                    .filter(Objects::nonNull)
+                    .forEach(projectIds::add);
+        }
+        if (projectIds.isEmpty()) {
+            wrapper.eq(PmProject::getId, -1L);
+        } else {
+            wrapper.in(PmProject::getId, projectIds);
         }
         wrapper.orderByDesc(PmProject::getId);
         List<PmProject> projects = list(wrapper);

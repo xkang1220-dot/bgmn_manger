@@ -9,6 +9,7 @@ type SubtaskItem = {
   completedAt?: string | null
   status?: number
   assigneeName?: string | null
+  holderName?: string | null
   overdue?: boolean
 }
 
@@ -201,7 +202,7 @@ function barStyle(task: { startMs: number; endMs: number }) {
                 <button type="button" class="gantt-intro" @click="emit('open', task)">
                   <strong :title="task.title">{{ task.title }}</strong>
                   <span class="gantt-meta">
-                    <em>{{ task.assigneeName || '未指定' }}</em>
+                    <em>{{ task.assigneeName || '未指定' }} · 持有人 {{ task.holderName || '未指定' }}</em>
                     <i>{{ statusMap[task.status ?? 0] }}</i>
                     <i class="is-date">{{ formatDate(task.startDate) }} — {{ formatDate(task.endDate) }}</i>
                   </span>
@@ -239,7 +240,7 @@ function barStyle(task: { startMs: number; endMs: number }) {
         >
           <span>
             <b>{{ task.title }}</b>
-            <small>{{ task.assigneeName || '未指定' }}</small>
+            <small>{{ task.assigneeName || '未指定' }} · 持有人 {{ task.holderName || '未指定' }}</small>
           </span>
           <el-tag size="small" effect="plain">{{ statusMap[task.status ?? 0] }}</el-tag>
         </button>

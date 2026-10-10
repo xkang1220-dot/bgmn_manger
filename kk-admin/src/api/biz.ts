@@ -193,8 +193,8 @@ export const bizApi = {
   projectList() {
     return request<any[]>({ url: '/project/list', method: 'get' })
   },
-  taskManagementProjects() {
-    return request<any[]>({ url: '/project/task-options', method: 'get' })
+  taskManagementProjects(scope: 'mine' | 'all' = 'mine') {
+    return request<any[]>({ url: '/project/task-options', method: 'get', params: { scope } })
   },
   myProjects() {
     return request<any[]>({ url: '/project/mine', method: 'get' })
@@ -303,8 +303,8 @@ export const bizApi = {
   }) {
     return request<any>({ url: '/task/management/dashboard', method: 'get', params: params || {} })
   },
-  taskDetail(id: number) {
-    return request<any>({ url: `/task/${id}`, method: 'get' })
+  taskDetail(id: number, scope?: 'mine' | 'all') {
+    return request<any>({ url: `/task/${id}`, method: 'get', params: { scope } })
   },
   saveTask(data: any, isEdit: boolean) {
     return request<void>({ url: '/task', method: isEdit ? 'put' : 'post', data })

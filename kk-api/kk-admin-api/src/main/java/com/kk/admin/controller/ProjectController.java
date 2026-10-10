@@ -81,8 +81,8 @@ public class ProjectController {
 
     @GetMapping("/task-options")
     @SaCheckPermission("project:task:list")
-    public Result<List<PmProject>> taskOptions() {
-        return Result.ok(projectService.listTaskManagementOptions());
+    public Result<List<PmProject>> taskOptions(String scope) {
+        return Result.ok(projectService.listTaskManagementOptions(scope));
     }
 
     /** 个人中心：只返回当前用户负责或参与的项目 */

@@ -14,13 +14,15 @@ const route = useRoute()
 const userStore = useUserStore()
 // 任务管理始终是个人工作台；管理视角已拆分到独立的“任务驾驶舱”。
 const isTaskManager = false
+type TaskScope = 'mine' | 'all'
+const taskScope = ref<TaskScope>('mine')
 
 const query = reactive({
   page: 1,
   pageSize: 10,
   title: '',
   projectId: undefined as number | undefined,
-  status: 0 as number | undefined,
+  status: undefined as number | undefined,
   statuses: undefined as number[] | undefined,
   priority: undefined as number | undefined,
   overdue: undefined as boolean | undefined,
@@ -279,6 +281,7 @@ async function load() {
       page: query.page,
       pageSize: query.pageSize,
       taskTree: true,
+      scope: taskScope.value,
       ...resolvePeriod(),
     }
     if (query.title.trim()) params.title = query.title.trim()
@@ -315,7 +318,7 @@ function resetQuery() {
     page: 1,
     title: '',
     projectId: undefined,
-    status: 0,
+    status: undefined,
     statuses: undefined,
     priority: undefined,
     overdue: undefined,
@@ -325,7 +328,7 @@ function resetQuery() {
   load()
 }
 
-const isAllTasksView = computed(() => query.status === undefined && !query.overdue)
+const isAllTasksView = computed(() => taskScope.value === 'all')
 
 function filterByStatus(status?: number) {
   query.status = status
@@ -335,9 +338,23 @@ function filterByStatus(status?: number) {
   load()
 }
 
-function selectMyTasksView() {
-  if (!isAllTasksView.value) return
-  filterByStatus(0)
+async function selectTaskScope(scope: TaskScope) {
+  const scopeChanged = taskScope.value !== scope
+  const clearsStatusFilter = query.status !== undefined
+    || query.statuses !== undefined
+    || query.overdue !== undefined
+  if (!scopeChanged && !clearsStatusFilter) return
+  taskScope.value = scope
+  query.status = undefined
+  query.statuses = undefined
+  query.overdue = undefined
+  query.projectId = undefined
+  query.page = 1
+  if (scopeChanged) {
+    projects.value = await bizApi.taskManagementProjects(scope).catch(() => [])
+  }
+  await loadTaskOrder()
+  await load()
 }
 
 function filterOverdue() {
@@ -415,7 +432,7 @@ async function review(row: any, approved: boolean) {
 }
 
 onMounted(async () => {
-  projects.value = await bizApi.myProjects().catch(() => [])
+  projects.value = await bizApi.taskManagementProjects(taskScope.value).catch(() => [])
   shareCompanies.value = userStore.hasPermission('project:task:share')
     ? await companyTaskShareApi.options().catch(() => [])
     : []
@@ -463,22 +480,22 @@ onUnmounted(() => {
           <button
             type="button"
             role="tab"
-            :aria-selected="isAllTasksView"
-            :tabindex="isAllTasksView ? 0 : -1"
-            :class="{ 'is-active': isAllTasksView }"
-            @click="filterByStatus()"
+            :aria-selected="!isAllTasksView"
+            :tabindex="isAllTasksView ? -1 : 0"
+            :class="{ 'is-active': !isAllTasksView }"
+            @click="selectTaskScope('mine')"
           >
-            全部任务
+            我的任务
           </button>
           <button
             type="button"
             role="tab"
-            :aria-selected="!isAllTasksView"
-            :tabindex="isAllTasksView ? -1 : 0"
-            :class="{ 'is-active': !isAllTasksView }"
-            @click="selectMyTasksView"
+            :aria-selected="isAllTasksView"
+            :tabindex="isAllTasksView ? 0 : -1"
+            :class="{ 'is-active': isAllTasksView }"
+            @click="selectTaskScope('all')"
           >
-            我的任务
+            全部任务
           </button>
         </div>
         <div class="page-actions">
@@ -638,10 +655,11 @@ onUnmounted(() => {
             <span class="task-project-name">{{ row.projectName || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="负责人" min-width="190">
+        <el-table-column label="负责人 / 持有人" min-width="190">
           <template #default="{ row }">
             <div class="task-owner-cell">
               <strong>{{ row.assigneeName || '未指定' }}</strong>
+              <span>持有人：{{ row.holderName || '未指定' }}</span>
               <span v-if="row.participantNames?.length">
                 协作：{{ row.participantNames.filter((name: string) => name !== row.assigneeName).join('、') || '—' }}
               </span>
@@ -721,6 +739,7 @@ onUnmounted(() => {
     <TaskDetailDrawer
       v-model="taskDrawer"
       :task-id="activeTaskId"
+      :task-scope="taskScope"
       :default-project-id="query.projectId"
       :initial-action="taskDrawerAction"
       @saved="load"
