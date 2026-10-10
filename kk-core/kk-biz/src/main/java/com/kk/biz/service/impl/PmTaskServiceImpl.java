@@ -20,6 +20,7 @@ import com.kk.biz.mapper.PmTaskFlowMapper;
 import com.kk.biz.mapper.PmTaskMapper;
 import com.kk.biz.mapper.PmTaskMemberMapper;
 import com.kk.biz.service.PmTaskService;
+import com.kk.biz.service.PmProjectService;
 import com.kk.biz.service.SysFileService;
 import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
@@ -74,6 +75,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     private final SysFileService fileService;
     private final DataScopeService dataScopeService;
     private final SysNotificationService notificationService;
+    private final PmProjectService projectService;
 
     private static final Map<Integer, String> STATUS_LABEL = Map.of(
             0, "待办",
@@ -122,12 +124,14 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         LocalDate today = LocalDate.now();
         LocalDateTime now = LocalDateTime.now();
-        boolean dashboardDrill = Set.of("TOTAL", "OPEN", "OVERDUE", "DUE_SOON", "STALE", "NO_DUE_DATE", "PENDING",
+        boolean dashboardDrill = Set.of("TOTAL", "OPEN", "DOING", "DONE", "OVERDUE", "DUE_SOON", "STALE", "NO_DUE_DATE", "PENDING",
                 "DONE_30", "ON_TIME", "CYCLE", "OWNER_OPEN", "CREATED_RANGE", "COMPLETED_RANGE")
                 .contains(dashboardCategory == null ? "" : dashboardCategory);
         if (dashboardDrill) {
             switch (dashboardCategory) {
                 case "OPEN" -> wrapper.in(PmTask::getStatus, 0, 1, 4);
+                case "DOING" -> wrapper.eq(PmTask::getStatus, 1);
+                case "DONE" -> wrapper.eq(PmTask::getStatus, 2);
                 case "OVERDUE" -> wrapper.lt(PmTask::getDueDate, today).in(PmTask::getStatus, 0, 1);
                 case "DUE_SOON" -> wrapper.between(PmTask::getDueDate, today, today.plusDays(7)).in(PmTask::getStatus, 0, 1);
                 case "STALE" -> wrapper.eq(PmTask::getStatus, 1).lt(PmTask::getLastActivityAt, now.minusDays(7));
@@ -363,19 +367,24 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             // 负责人和参与人先按任务内人员集合去重，兼任两种角色也只统计一次。
             Set<Long> taskUserIds = new HashSet<>(taskMemberIds.getOrDefault(row.getId(), Set.of()));
             if (row.getAssigneeId() != null) taskUserIds.add(row.getAssigneeId());
-            for (Long userId : taskUserIds) {
+            // 人员筛选限定了任务范围后，成员统计也只展示该人，避免带出同任务的其他成员。
+            Set<Long> statsUserIds = participantId == null ? taskUserIds
+                    : (taskUserIds.contains(participantId) ? Set.of(participantId) : Set.of());
+            for (Long userId : statsUserIds) {
                 SysUser member = ownerMap.get(userId);
                 Map<String, Object> stats = memberTaskStatsMap.computeIfAbsent(userId, id -> {
                     Map<String, Object> item = new HashMap<>();
                     item.put("memberId", id);
                     item.put("memberName", member == null ? "用户" + id : userName(member));
                     item.put("total", 0L);
+                    item.put("todo", 0L);
                     item.put("done", 0L);
                     item.put("doing", 0L);
                     item.put("overdue", 0L);
                     return item;
                 });
                 increment(stats, "total");
+                if (status == 0) increment(stats, "todo");
                 if (status == 2) increment(stats, "done");
                 if (status == 1) increment(stats, "doing");
                 if (rowOverdue) increment(stats, "overdue");
@@ -770,6 +779,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         syncParticipants(task.getId(), task.getParticipantIds());
         syncTaskImages(task.getId(), task.getImageFileIds());
         recordFlow(task.getId(), "CREATE", null, null, null, task.getStatus(), "创建任务");
+        projectService.recordFlow(task.getProjectId(), "TASK_CREATE", null, null, null,
+                "新建任务「" + task.getTitle() + "」");
     }
 
     @Override
@@ -846,6 +857,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (task.getStatus() != null && !task.getStatus().equals(oldStatus)) {
             recordFlow(task.getId(), "STATUS", null, null, oldStatus, task.getStatus(), "编辑时变更状态");
         }
+        projectService.recordFlow(existing.getProjectId(), "TASK_UPDATE", null, null, null,
+                "编辑任务「" + (StringUtils.hasText(task.getTitle()) ? task.getTitle() : existing.getTitle()) + "」");
     }
 
     private String cleanTaskContent(String content) {
@@ -910,6 +923,13 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         String flowNote = targetStatus == 4 && !StringUtils.hasText(note) ? "提交完成，等待任务管理员确认" : note;
         recordFlow(id, targetStatus == 4 ? "COMPLETE_SUBMIT" : "STATUS", null, null,
                 oldStatus, targetStatus, flowNote, imageFileIds);
+        String projectAction = targetStatus == 2 ? "TASK_COMPLETE" : "TASK_UPDATE";
+        String projectSummary = targetStatus == 2
+                ? "完成任务「" + existing.getTitle() + "」"
+                : "变更任务「" + existing.getTitle() + "」状态："
+                    + STATUS_LABEL.getOrDefault(oldStatus, "—") + " → "
+                    + STATUS_LABEL.getOrDefault(targetStatus, "—");
+        projectService.recordFlow(existing.getProjectId(), projectAction, null, null, null, projectSummary);
     }
 
     static int completionTargetStatus(BigDecimal taskReward) {
@@ -941,6 +961,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         updateById(update);
         recordFlow(id, approved ? "COMPLETE_APPROVE" : "COMPLETE_REJECT", null, null,
                 4, approved ? 2 : 1, note);
+        projectService.recordFlow(existing.getProjectId(), approved ? "TASK_COMPLETE" : "TASK_UPDATE",
+                null, null, null, approved
+                        ? "确认完成任务「" + existing.getTitle() + "」"
+                        : "驳回任务「" + existing.getTitle() + "」的完成申请");
     }
 
     @Override

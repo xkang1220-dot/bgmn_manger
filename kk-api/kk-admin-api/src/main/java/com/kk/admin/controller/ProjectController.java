@@ -8,12 +8,15 @@ import com.kk.biz.dto.ItemOrderRequest;
 import com.kk.biz.entity.PmProject;
 import com.kk.biz.entity.PmProjectFlow;
 import com.kk.biz.entity.PmProjectNote;
+import com.kk.biz.entity.PmProjectLink;
 import com.kk.biz.entity.SysFile;
 import com.kk.biz.service.PmProjectNoteService;
 import com.kk.biz.service.PmProjectService;
+import com.kk.biz.service.PmTaskService;
 import com.kk.biz.service.WfApprovalFlowService;
 import com.kk.biz.service.WfApprovalService;
 import com.kk.biz.service.UserItemOrderService;
+import com.kk.biz.service.ProjectResourceService;
 import com.kk.biz.workflow.ApprovalTypes;
 import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
@@ -39,6 +42,8 @@ public class ProjectController {
     private final WfApprovalService approvalService;
     private final WfApprovalFlowService approvalFlowService;
     private final UserItemOrderService userItemOrderService;
+    private final ProjectResourceService projectResourceService;
+    private final PmTaskService taskService;
 
     @GetMapping("/order")
     @SaCheckPermission("project:list")
@@ -126,6 +131,45 @@ public class ProjectController {
     @SaCheckPermission(value = {"project:list", "project:edit"}, mode = SaMode.OR)
     public Result<Void> deleteNoteAttachment(@PathVariable Long fileId) {
         projectNoteService.deleteAttachment(fileId);
+        return Result.ok();
+    }
+
+    @GetMapping("/{id:\\d+}/resources")
+    @SaCheckPermission("project:list")
+    public Result<Map<String, Object>> resources(@PathVariable Long id) {
+        return Result.ok(projectResourceService.getResources(id));
+    }
+
+    @GetMapping("/{id:\\d+}/task-stats")
+    @SaCheckPermission("project:list")
+    public Result<Map<String, Object>> taskStats(@PathVariable Long id) {
+        projectService.getDetail(id);
+        return Result.ok(taskService.summary(id, null, null, null));
+    }
+
+    @PostMapping("/{id:\\d+}/links")
+    @SaCheckPermission(value = {"project:list", "project:edit"}, mode = SaMode.OR)
+    public Result<PmProjectLink> saveLink(@PathVariable Long id, @RequestBody PmProjectLink link) {
+        return Result.ok(projectResourceService.saveLink(id, link));
+    }
+
+    @DeleteMapping("/{id:\\d+}/links/{linkId}")
+    @SaCheckPermission(value = {"project:list", "project:edit"}, mode = SaMode.OR)
+    public Result<Void> deleteLink(@PathVariable Long id, @PathVariable Long linkId) {
+        projectResourceService.deleteLink(id, linkId);
+        return Result.ok();
+    }
+
+    @PostMapping("/{id:\\d+}/files")
+    @SaCheckPermission(value = {"project:list", "project:edit"}, mode = SaMode.OR)
+    public Result<SysFile> uploadResourceFile(@PathVariable Long id, @RequestParam("file") MultipartFile file) {
+        return Result.ok(projectResourceService.uploadFile(id, file));
+    }
+
+    @DeleteMapping("/{id:\\d+}/files/{fileId}")
+    @SaCheckPermission(value = {"project:list", "project:edit"}, mode = SaMode.OR)
+    public Result<Void> deleteResourceFile(@PathVariable Long id, @PathVariable Long fileId) {
+        projectResourceService.deleteFile(id, fileId);
         return Result.ok();
     }
 

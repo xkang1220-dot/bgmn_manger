@@ -379,16 +379,16 @@ async function loadProjectFlows() {
 
 async function loadPersonalTaskSummary() {
   if (!activeProjectId.value) return
-  // TODO: Replace with actual API call when available
-  // personalTaskSummary.value = await bizApi.taskSummary({ projectId: activeProjectId.value })
-
-  // Mock data for now
-  memberTaskStats.value = [
-    { userId: 1, userName: '张三', total: 15, todo: 3, doing: 8, done: 4, overdue: 0 },
-    { userId: 2, userName: '李四', total: 12, todo: 2, doing: 5, done: 5, overdue: 0 },
-    { userId: 3, userName: '王五', total: 8, todo: 1, doing: 4, done: 3, overdue: 0 },
-    { userId: 4, userName: '赵六', total: 20, todo: 5, doing: 10, done: 5, overdue: 0 },
-  ]
+  const dashboard = await bizApi.projectTaskStats(activeProjectId.value)
+  memberTaskStats.value = (dashboard?.memberTaskStats || []).map((item: any) => ({
+    userId: item.memberId,
+    userName: item.memberName,
+    total: Number(item.total || 0),
+    todo: Number(item.todo || 0),
+    doing: Number(item.doing || 0),
+    done: Number(item.done || 0),
+    overdue: Number(item.overdue || 0),
+  }))
 }
 
 async function previewNextCode(companyId?: number | string | null) {
@@ -486,9 +486,9 @@ async function onSaveProjectDescription(description: string) {
       members,
     }, true)
     detail.value = { ...detail.value, description }
+    ElMessage.success('项目说明已保存')
   } catch {
-    // 后端字段更新不完整时，资料页已写入本地 draft
-    detail.value = { ...detail.value, description }
+    ElMessage.error('项目说明保存失败')
   }
 }
 

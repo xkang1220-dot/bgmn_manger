@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { bizApi } from '@/api/biz'
+import { sysApi } from '@/api/system'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
 
 const loading = ref(false)
 const dashboard = ref<any>({})
 const projects = ref<any[]>([])
+const users = ref<any[]>([])
 const drawerOpen = ref(false)
 const activeTaskId = ref<number | null>(null)
 const listOpen = ref(false)
@@ -19,7 +21,13 @@ const listProjectId = ref<number | undefined>()
 const listOwnerId = ref<number | undefined>()
 const listFrom = ref<string | undefined>()
 const listTo = ref<string | undefined>()
-const filters = reactive({ projectId: undefined as number | undefined, priority: undefined as number | undefined, title: '' })
+type DetailCategory = 'DONE' | 'DOING' | 'OVERDUE'
+const detailCategory = ref<DetailCategory>('DOING')
+const detailLoading = ref(false)
+const detailRows = ref<any[]>([])
+const detailTotal = ref(0)
+const detailPage = ref(1)
+const filters = reactive({ participantId: undefined as number | undefined, projectId: undefined as number | undefined, priority: undefined as number | undefined, title: '' })
 type PeriodKey = 'THIS_MONTH' | 'LAST_MONTH' | 'THIS_QUARTER' | 'LAST_QUARTER' | 'THIS_YEAR' | 'CUSTOM'
 const period = ref<PeriodKey>('THIS_MONTH')
 const customPeriod = ref<[string, string] | undefined>()
@@ -71,21 +79,14 @@ const periodBounds = computed(() => {
   return { from: formatDate(from), to: formatDate(to) }
 })
 
-const riskTypeMap: Record<string, { label: string; type: 'danger' | 'warning' | 'info' | 'success' }> = {
-  OVERDUE: { label: '已逾期', type: 'danger' },
-  DUE_SOON: { label: '即将到期', type: 'warning' },
-  STALE: { label: '七天未推进', type: 'warning' },
-  NO_DUE_DATE: { label: '未设截止日', type: 'info' },
-  PENDING: { label: '待确认', type: 'success' },
-}
 const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭', 4: '待确认完成' }
-const healthMap: Record<string, { label: string; type: 'danger' | 'warning' | 'success' }> = {
-  DANGER: { label: '高风险', type: 'danger' }, WARNING: { label: '需关注', type: 'warning' }, HEALTHY: { label: '健康', type: 'success' },
-}
-
-const maxTrend = computed(() => Math.max(1, ...(dashboard.value.trend || []).flatMap((item: any) => [item.created || 0, item.completed || 0])))
-const memberStatsSummary = computed(() => {
+const filteredMemberTaskStats = computed(() => {
   const rows = dashboard.value.memberTaskStats || []
+  if (filters.participantId == null) return rows
+  return rows.filter((item: any) => Number(item.memberId) === Number(filters.participantId))
+})
+const memberStatsSummary = computed(() => {
+  const rows = filteredMemberTaskStats.value
   const total = rows.reduce((sum: number, item: any) => sum + Number(item.total || 0), 0)
   const done = rows.reduce((sum: number, item: any) => sum + Number(item.done || 0), 0)
   const overdue = rows.reduce((sum: number, item: any) => sum + Number(item.overdue || 0), 0)
@@ -96,7 +97,7 @@ const memberStatsSummary = computed(() => {
     overdue,
   }
 })
-const memberChartRows = computed(() => (dashboard.value.memberTaskStats || []).map((item: any) => ({
+const memberChartRows = computed(() => filteredMemberTaskStats.value.map((item: any) => ({
   ...item,
   total: Number(item.total || 0),
   done: Number(item.done || 0),
@@ -106,14 +107,43 @@ const memberChartRows = computed(() => (dashboard.value.memberTaskStats || []).m
 })))
 const memberChartMax = computed(() => Math.max(1, ...memberChartRows.value.flatMap((item: any) => [item.done, item.doing, item.overdue])))
 const memberChartMinWidth = computed(() => Math.max(720, memberChartRows.value.length * 128))
+function memberInitial(name: string) {
+  return (name || '?').trim().slice(0, 1).toUpperCase()
+}
+
+function detailStatus(item: any) {
+  return detailCategory.value === 'OVERDUE' ? '已逾期' : (statusMap[item.status] || '未知状态')
+}
+
+function detailStatusType(item: any) {
+  if (detailCategory.value === 'OVERDUE') return 'danger'
+  if (Number(item.status) === 2) return 'success'
+  if (Number(item.status) === 4) return 'warning'
+  return 'primary'
+}
+const selectedUserName = computed(() => {
+  if (filters.participantId == null) return '全部成员'
+  const user = users.value.find(item => Number(item.id) === Number(filters.participantId))
+  return user?.nickname || user?.username || '当前成员'
+})
+function taskParticipantText(item: any) {
+  const names = item.participantNames
+  return Array.isArray(names) && names.length ? names.join('、') : '暂无参与者'
+}
+const detailTabs = computed(() => [
+  { label: '已完成', value: 'DONE' as const, count: Number(dashboard.value.done || 0) },
+  { label: '进行中', value: 'DOING' as const, count: Number(dashboard.value.doing || 0) },
+  { label: '已逾期', value: 'OVERDUE' as const, count: Number(dashboard.value.overdue || 0) },
+])
 const openTasks = computed(() => Number(dashboard.value.todo || 0) + Number(dashboard.value.doing || 0) + Number(dashboard.value.pending || 0))
 const selectedPeriodLabel = computed(() => periodOptions.find(item => item.value === period.value)?.label || '当前周期')
-const activeFilterCount = computed(() => [filters.projectId, filters.priority, filters.title.trim()].filter(value => value !== undefined && value !== '').length)
+const activeFilterCount = computed(() => [filters.participantId, filters.projectId, filters.priority, filters.title.trim()].filter(value => value !== undefined && value !== '').length)
 
 async function load() {
   loading.value = true
   try {
     const params: Record<string, unknown> = {}
+    if (filters.participantId != null) params.participantId = filters.participantId
     if (filters.projectId != null) params.projectId = filters.projectId
     if (filters.priority != null) params.priority = filters.priority
     if (filters.title.trim()) params.title = filters.title.trim()
@@ -122,9 +152,40 @@ async function load() {
       params.periodTo = periodBounds.value.to
     }
     dashboard.value = await bizApi.managementTaskDashboard(params)
+    await loadDetailTasks()
   } finally {
     loading.value = false
   }
+}
+
+async function loadDetailTasks() {
+  detailLoading.value = true
+  try {
+    const params: Record<string, unknown> = {
+      page: detailPage.value,
+      pageSize: 10,
+      dashboardCategory: detailCategory.value,
+    }
+    if (filters.participantId != null) params.participantId = filters.participantId
+    if (filters.projectId != null) params.projectId = filters.projectId
+    if (filters.priority != null) params.priority = filters.priority
+    if (filters.title.trim()) params.title = filters.title.trim()
+    if (periodBounds.value) {
+      params.periodFrom = periodBounds.value.from
+      params.periodTo = periodBounds.value.to
+    }
+    const result = await bizApi.managementTaskPage(params)
+    detailRows.value = result.list || []
+    detailTotal.value = Number(result.total || 0)
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+function changeDetailCategory(value: string | number | boolean | undefined) {
+  detailCategory.value = value as DetailCategory
+  detailPage.value = 1
+  loadDetailTasks()
 }
 
 function scheduleFilterLoad(delay = 300) {
@@ -136,19 +197,21 @@ function scheduleFilterLoad(delay = 300) {
 }
 
 watch(
-  () => [filters.projectId, filters.priority, filters.title] as const,
-  ([projectId, priority], [previousProjectId, previousPriority]) => {
-    const selectChanged = projectId !== previousProjectId || priority !== previousPriority
+  () => [filters.participantId, filters.projectId, filters.priority, filters.title] as const,
+  ([participantId, projectId, priority], [previousParticipantId, previousProjectId, previousPriority]) => {
+    const selectChanged = participantId !== previousParticipantId || projectId !== previousProjectId || priority !== previousPriority
     scheduleFilterLoad(selectChanged ? 0 : 300)
   },
 )
 
 function reset() {
+  filters.participantId = undefined
   filters.projectId = undefined
   filters.priority = undefined
   filters.title = ''
   period.value = 'THIS_MONTH'
   customPeriod.value = undefined
+  detailPage.value = 1
   scheduleFilterLoad(0)
 }
 
@@ -161,19 +224,14 @@ function changeCustomPeriod() {
   if (customPeriod.value?.length === 2) load()
 }
 
-function drillProject(projectId: number) {
-  filters.projectId = projectId
-  load()
-}
-
 function openTask(id: number) {
   activeTaskId.value = id
   drawerOpen.value = true
 }
 
 const categoryTitles: Record<string, string> = {
-  TOTAL: '全部任务', OPEN: '在办任务', OVERDUE: '逾期任务', DONE_30: '周期内完成任务', ON_TIME: '按期完成率统计任务',
-  CYCLE: '平均交付周期统计任务', DUE_SOON: '7天内到期任务', STALE: '长期未推进任务',
+  TOTAL: '全部任务', OPEN: '在办任务', OVERDUE: '逾期任务', DONE_30: '周期内完成任务',
+  DUE_SOON: '7天内到期任务', STALE: '长期未推进任务',
   NO_DUE_DATE: '未设截止日任务', PENDING: '待确认完成任务',
 }
 
@@ -182,6 +240,7 @@ async function loadTaskList() {
   try {
     const params: Record<string, unknown> = { page: listPage.value, pageSize: 10, dashboardCategory: listCategory.value }
     const projectId = listProjectId.value ?? filters.projectId
+    if (filters.participantId != null) params.participantId = filters.participantId
     if (projectId != null) params.projectId = projectId
     if (filters.priority != null) params.priority = filters.priority
     if (filters.title.trim()) params.title = filters.title.trim()
@@ -212,20 +271,6 @@ function showTasks(category: string, projectId?: number, projectName?: string, e
   loadTaskList()
 }
 
-function showRiskProjects() {
-  listCategory.value = 'PROJECTS'
-  listTitle.value = '风险项目'
-  listRows.value = dashboard.value.projectHealth?.filter((item: any) => item.level !== 'HEALTHY') || []
-  listTotal.value = listRows.value.length
-  listOpen.value = true
-}
-
-function showTrendTasks(item: any, type: 'created' | 'completed') {
-  const category = type === 'created' ? 'CREATED_RANGE' : 'COMPLETED_RANGE'
-  const label = type === 'created' ? '新增任务' : '完成任务'
-  showTasks(category, undefined, undefined, { from: item.from, to: item.to, title: `${item.label} 当周${label}` })
-}
-
 function showMemberTasks(item: any) {
   showTasks('OWNER_OPEN', undefined, undefined, { ownerId: Number(item.memberId), title: `${item.memberName} · 未结任务` })
 }
@@ -241,7 +286,12 @@ async function refreshAfterTaskSaved() {
 }
 
 onMounted(async () => {
-  projects.value = await bizApi.taskManagementProjects()
+  const [projectOptions, userOptions] = await Promise.all([
+    bizApi.taskManagementProjects(),
+    sysApi.userList(),
+  ])
+  projects.value = projectOptions
+  users.value = userOptions
   await load()
 })
 
@@ -275,6 +325,11 @@ onBeforeUnmount(() => {
           start-placeholder="开始日期" end-placeholder="结束日期" range-separator="至" :clearable="false" @change="changeCustomPeriod" />
       </div>
       <el-form class="cockpit-filter">
+        <el-form-item label="人员">
+          <el-select v-model="filters.participantId" clearable filterable placeholder="全部人员">
+            <el-option v-for="item in users" :key="item.id" :label="item.nickname || item.username" :value="Number(item.id)" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="项目">
           <el-select v-model="filters.projectId" clearable filterable placeholder="全部项目">
             <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="Number(item.id)" />
@@ -294,10 +349,7 @@ onBeforeUnmount(() => {
       <button type="button" @click="showTasks('TOTAL')"><span>总任务数量</span><strong>{{ dashboard.total ?? 0 }}</strong><small>所选范围内的全部任务</small><em>查看明细</em></button>
       <button type="button" @click="showTasks('OPEN')"><span>在办任务</span><strong>{{ openTasks }}</strong><small>待办、进行中与待确认</small><em>查看明细</em></button>
       <button type="button" class="metric-danger" @click="showTasks('OVERDUE')"><span>逾期任务</span><strong>{{ dashboard.overdue ?? 0 }}</strong><small>已对交付承诺造成影响</small><em>优先处理</em></button>
-      <button type="button" class="metric-warning" @click="showRiskProjects"><span>风险项目</span><strong>{{ dashboard.riskProjects ?? 0 }}</strong><small>存在逾期、临期或高风险任务</small><em>查看项目</em></button>
       <button type="button" @click="showTasks('DONE_30')"><span>周期完成量</span><strong>{{ dashboard.done30 ?? 0 }}</strong><small>所选周期内创建且已完成</small><em>查看明细</em></button>
-      <button type="button" @click="showTasks('ON_TIME')"><span>按期完成率</span><strong>{{ dashboard.onTimeRate == null ? '—' : `${dashboard.onTimeRate}%` }}</strong><small>衡量交付承诺的可靠性</small><em>查看明细</em></button>
-      <button type="button" @click="showTasks('CYCLE')"><span>平均交付周期</span><strong>{{ dashboard.avgCycleDays == null ? '—' : `${dashboard.avgCycleDays}天` }}</strong><small>从实际开始到完成</small><em>查看明细</em></button>
     </section>
 
     <section class="decision-strip" aria-label="待处理事项">
@@ -307,59 +359,17 @@ onBeforeUnmount(() => {
       <button type="button" @click="showTasks('NO_DUE_DATE')"><i class="signal" aria-hidden="true" /><span><b>{{ dashboard.noDueDate ?? 0 }}</b> 项任务未设截止日</span></button>
     </section>
 
-    <div class="main-grid">
-      <section class="page-card health-panel">
-        <div class="section-head"><div><h3>项目健康排名</h3><p>从最需管理介入的项目开始查看</p></div></div>
-        <button v-for="item in dashboard.projectHealth || []" :key="item.projectId" type="button" class="health-row" @click="drillProject(item.projectId)">
-          <div><strong>{{ item.projectName }}</strong><span>项目负责人 {{ item.ownerName }}</span></div>
-          <p><b>{{ item.open }}</b>未结 <em>{{ item.overdue }}逾期</em> {{ item.dueSoon }}临期</p>
-          <el-tag :type="healthMap[item.level]?.type || 'info'" size="small">{{ healthMap[item.level]?.label }}</el-tag>
-        </button>
-        <el-empty v-if="!dashboard.projectHealth?.length" description="暂无项目风险数据" :image-size="56" />
-      </section>
-
-      <section class="page-card risk-panel">
-        <div class="section-head"><div><h3>需关注清单</h3><p>按交付影响排序，建议优先协调资源或明确决策</p></div></div>
-        <div v-if="dashboard.riskTasks?.length" class="risk-list">
-          <button v-for="item in dashboard.riskTasks" :key="item.id" type="button" class="risk-row" @click="openTask(item.id)">
-            <el-tag :type="riskTypeMap[item.riskType]?.type || 'info'" size="small">{{ riskTypeMap[item.riskType]?.label || '关注' }}</el-tag>
-            <div><strong>{{ item.title }}</strong><span>{{ item.projectName }} · 负责人 {{ item.ownerName }}</span></div>
-            <aside><strong>{{ item.dueDate || '未设日期' }}</strong><span>{{ statusMap[item.status] }}</span></aside>
-          </button>
-        </div>
-        <el-empty v-else description="当前没有高优先级风险" :image-size="64" />
-      </section>
-
-      <section class="page-card trend-panel">
-        <div class="section-head"><div><h3>六周交付趋势</h3><p>对比新增任务与完成任务，判断存量是否持续积压</p></div></div>
-        <div class="legend"><i class="created" />新增 <i class="completed" />完成</div>
-        <div class="trend-chart">
-          <div v-for="item in dashboard.trend || []" :key="item.label" class="trend-column">
-            <div>
-              <el-tooltip :content="`新增：${item.created ?? 0}`" placement="top">
-                <button type="button" class="created" :aria-label="`${item.label} 新增任务`" :style="{ height: `${Math.max(2, item.created / maxTrend * 100)}%` }" @click="showTrendTasks(item, 'created')" />
-              </el-tooltip>
-              <el-tooltip :content="`完成：${item.completed ?? 0}`" placement="top">
-                <button type="button" class="completed" :aria-label="`${item.label} 完成任务`" :style="{ height: `${Math.max(2, item.completed / maxTrend * 100)}%` }" @click="showTrendTasks(item, 'completed')" />
-              </el-tooltip>
-            </div>
-            <span>{{ item.label }}</span>
-          </div>
-        </div>
-      </section>
-    </div>
-
     <section class="page-card member-stats-panel">
       <div class="section-head">
         <div><h3>成员任务统计</h3><p>合并展示任务状态与当前负载；同一成员在同一任务中只计一次</p></div>
-        <div class="member-summary" aria-label="成员任务概览">
+        <div v-if="filters.participantId == null" class="member-summary" aria-label="成员任务概览">
           <span><b>{{ memberStatsSummary.members }}</b> 位成员</span>
           <span><b>{{ memberStatsSummary.total }}</b> 项任务</span>
           <span><b>{{ memberStatsSummary.doneRate }}%</b> 完成率</span>
           <span :class="{ danger: memberStatsSummary.overdue > 0 }"><b>{{ memberStatsSummary.overdue }}</b> 项延期</span>
         </div>
       </div>
-      <div v-if="memberChartRows.length" class="member-chart-shell">
+      <div v-if="memberChartRows.length && filters.participantId == null" class="member-chart-shell">
         <div class="member-chart-legend" aria-label="图例">
           <span><i class="done" />已完成</span><span><i class="doing" />进行中</span><span><i class="overdue" />已逾期</span>
         </div>
@@ -367,7 +377,8 @@ onBeforeUnmount(() => {
           <div class="member-chart" :style="{ minWidth: `${memberChartMinWidth}px` }" role="img" aria-label="成员任务数量柱状图">
             <div class="member-grid-lines" aria-hidden="true"><i /><i /><i /><i /><i /></div>
             <div class="member-chart-groups" :style="{ gridTemplateColumns: `repeat(${memberChartRows.length}, minmax(128px, 1fr))` }">
-              <button v-for="item in memberChartRows" :key="item.memberId" type="button" class="member-chart-group" :aria-label="`${item.memberName}：已完成${item.done}项，进行中${item.doing}项，逾期${item.overdue}项，完成率${item.completionRate}%`" @click="showMemberTasks(item)">
+              <button v-for="item in memberChartRows" :key="item.memberId" type="button" class="member-chart-group"
+                :aria-label="`${item.memberName}：已完成${item.done}项，进行中${item.doing}项，逾期${item.overdue}项，完成率${item.completionRate}%`" @click="showMemberTasks(item)">
                 <span class="member-bars">
                   <el-tooltip :content="`已完成 ${item.done} 项`" placement="top"><i class="done" :style="{ height: `${Math.max(3, item.done / memberChartMax * 100)}%` }"><b>{{ item.done }}</b></i></el-tooltip>
                   <el-tooltip :content="`进行中 ${item.doing} 项`" placement="top"><i class="doing" :style="{ height: `${Math.max(3, item.doing / memberChartMax * 100)}%` }"><b>{{ item.doing }}</b></i></el-tooltip>
@@ -380,24 +391,70 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
+      <button v-else-if="memberChartRows.length" type="button" class="member-focus"
+        :aria-label="`${memberChartRows[0].memberName}：共${memberChartRows[0].total}项，已完成${memberChartRows[0].done}项，进行中${memberChartRows[0].doing}项，逾期${memberChartRows[0].overdue}项`"
+        @click="showMemberTasks(memberChartRows[0])">
+        <span class="member-focus-person">
+          <i aria-hidden="true">{{ memberInitial(memberChartRows[0].memberName) }}</i>
+          <span><strong>{{ memberChartRows[0].memberName }}</strong><small>当前筛选成员</small></span>
+        </span>
+        <span class="member-focus-progress">
+          <span><b>完成进度</b><strong>{{ memberChartRows[0].completionRate }}%</strong></span>
+          <i aria-hidden="true"><b :style="{ width: `${memberChartRows[0].completionRate}%` }" /></i>
+        </span>
+        <span class="member-focus-stats">
+          <span><b>{{ memberChartRows[0].total }}</b><small>总任务</small></span>
+          <span><b>{{ memberChartRows[0].done }}</b><small>已完成</small></span>
+          <span><b>{{ memberChartRows[0].doing }}</b><small>进行中</small></span>
+          <span :class="{ danger: memberChartRows[0].overdue > 0 }"><b>{{ memberChartRows[0].overdue }}</b><small>逾期</small></span>
+        </span>
+        <span class="member-focus-action" aria-hidden="true">查看任务 <b>›</b></span>
+      </button>
       <el-empty v-else description="暂无成员任务数据" :image-size="64" />
+    </section>
+
+    <section class="page-card task-detail-panel" aria-labelledby="task-detail-title">
+      <div class="section-head task-detail-head">
+        <div>
+          <h3 id="task-detail-title">任务明细</h3>
+          <p>{{ selectedUserName }} · 自动继承上方全部筛选条件</p>
+        </div>
+        <el-radio-group :model-value="detailCategory" size="small" aria-label="任务状态" @change="changeDetailCategory">
+          <el-radio-button v-for="tab in detailTabs" :key="tab.value" :value="tab.value">
+            {{ tab.label }} <b>{{ tab.count }}</b>
+          </el-radio-button>
+        </el-radio-group>
+      </div>
+      <div v-loading="detailLoading" class="task-detail-list" aria-live="polite">
+        <div v-if="detailRows.length" class="task-table-head" aria-hidden="true">
+          <span>任务名称</span><span>所属项目</span><span>任务人员</span><span>状态</span><span>截止日期</span><span>操作</span>
+        </div>
+        <button v-for="item in detailRows" :key="item.id" type="button" class="task-table-row" :aria-label="`查看任务：${item.title}`" @click="openTask(item.id)">
+          <span class="task-title-cell" data-label="任务名称"><strong>{{ item.title }}</strong><small>点击查看任务详情</small></span>
+          <span class="task-project-cell" data-label="所属项目">{{ item.projectName || '未关联项目' }}</span>
+          <span class="task-owner-cell" data-label="任务人员">
+            <i aria-hidden="true">{{ memberInitial(item.assigneeName || '未') }}</i>
+            <span class="task-people-copy">
+              <strong>负责人：{{ item.assigneeName || '未指定' }}</strong>
+              <small :title="taskParticipantText(item)">参与人：{{ taskParticipantText(item) }}</small>
+            </span>
+          </span>
+          <span class="task-status-cell" data-label="状态"><el-tag :type="detailStatusType(item)" size="small" effect="light">{{ detailStatus(item) }}</el-tag></span>
+          <span class="task-due-cell" :class="{ empty: !item.dueDate, overdue: detailCategory === 'OVERDUE' }" data-label="截止日期">{{ item.dueDate || '未设置' }}</span>
+          <span class="task-action-cell" aria-hidden="true">查看 <b>›</b></span>
+        </button>
+        <el-empty v-if="!detailRows.length && !detailLoading" :description="`${selectedUserName}暂无${detailTabs.find(item => item.value === detailCategory)?.label || ''}任务`" :image-size="64" />
+        <el-pagination v-if="detailTotal > 10" v-model:current-page="detailPage" :page-size="10" :total="detailTotal" layout="prev, pager, next, total" @current-change="loadDetailTasks" />
+      </div>
     </section>
 
     <el-dialog v-model="listOpen" :title="listTitle" width="min(820px, calc(100vw - 24px))">
       <div v-loading="listLoading" class="drill-list">
-        <template v-if="listCategory === 'PROJECTS'">
-          <button v-for="item in listRows" :key="item.projectId" type="button" @click="showTasks('OPEN', item.projectId, item.projectName)">
-            <div><strong>{{ item.projectName }}</strong><span>负责人 {{ item.ownerName }}</span></div>
-            <aside>{{ item.open }} 未结 · <em>{{ item.overdue }} 逾期</em> · {{ item.dueSoon }} 临期</aside>
-          </button>
-        </template>
-        <template v-else>
-          <button v-for="item in listRows" :key="item.id" type="button" @click="openListedTask(item.id)">
-            <div><strong>{{ item.title }}</strong><span>{{ item.projectName || '未关联项目' }} · 负责人 {{ item.assigneeName || '未指定' }}</span></div>
-            <aside>{{ item.dueDate || '未设截止日' }} · {{ statusMap[item.status] }}</aside>
-          </button>
-          <el-pagination v-if="listTotal > 10" v-model:current-page="listPage" :page-size="10" :total="listTotal" layout="prev, pager, next, total" @current-change="loadTaskList" />
-        </template>
+        <button v-for="item in listRows" :key="item.id" type="button" @click="openListedTask(item.id)">
+          <div><strong>{{ item.title }}</strong><span>{{ item.projectName || '未关联项目' }} · 负责人 {{ item.assigneeName || '未指定' }}</span></div>
+          <aside>{{ item.dueDate || '未设截止日' }} · {{ statusMap[item.status] }}</aside>
+        </button>
+        <el-pagination v-if="listTotal > 10" v-model:current-page="listPage" :page-size="10" :total="listTotal" layout="prev, pager, next, total" @current-change="loadTaskList" />
         <el-empty v-if="!listRows.length && !listLoading" description="暂无符合条件的数据" :image-size="64" />
       </div>
     </el-dialog>
@@ -411,7 +468,7 @@ onBeforeUnmount(() => {
 .period-filter { margin-left: auto; }
 .period-filter :deep(.el-form-item__content) { flex-wrap: nowrap; gap: 10px; }
 .period-filter :deep(.el-date-editor) { width: 250px; }
-.metric-grid { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); overflow: hidden; border: 1px solid var(--kk-card-border); border-radius: 16px; background: var(--kk-card-bg); box-shadow: 0 1px 2px rgba(0,0,0,.035); }
+.metric-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); overflow: hidden; border: 1px solid var(--kk-card-border); border-radius: 16px; background: var(--kk-card-bg); box-shadow: 0 1px 2px rgba(0,0,0,.035); }
 .metric-grid button { min-width: 0; padding: 18px 20px; border: 0; border-right: 1px solid var(--kk-card-border); background: transparent; text-align: left; cursor: pointer; transition: background-color 160ms ease-out, transform 160ms ease-out; }
 .metric-grid button:last-child { border-right: 0; }
 .metric-grid button:hover { background: rgba(0,0,0,.025); transform: translateY(-1px); }
@@ -420,37 +477,41 @@ onBeforeUnmount(() => {
 .metric-grid span { font-size: 12px; font-weight: 500; }
 .metric-grid strong { display: block; margin: 8px 0 6px; color: var(--kk-text); font-size: 28px; line-height: 1; font-variant-numeric: tabular-nums; }
 .metric-grid small { overflow: hidden; font-size: 11px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
-.metric-danger strong { color: var(--kk-danger); }.metric-warning strong { color: #b86b08; }
+.metric-danger strong { color: var(--kk-danger); }
 .decision-strip { display: grid; grid-template-columns: repeat(4,1fr); overflow: hidden; border: 1px solid var(--kk-card-border); border-radius: 14px; background: rgba(255,255,255,.38); }
 .decision-strip button { display: flex; align-items: baseline; justify-content: center; gap: 7px; padding: 13px 16px; border: 0; border-right: 1px solid var(--kk-card-border); background: transparent; cursor: pointer; transition: background-color 160ms ease-out; }
 .decision-strip button:hover { background: rgba(0,0,0,.025); }
 .decision-strip button:last-child { border: 0; }.decision-strip b { color: var(--kk-text); font-size: 19px; font-variant-numeric: tabular-nums; }.decision-strip span { color: var(--kk-text-secondary); font-size: 12px; }
 .drill-list { min-height: 120px; }.drill-list>button { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 10px; border: 0; border-bottom: 1px solid var(--kk-card-border); background: transparent; text-align: left; cursor: pointer; }.drill-list>button:hover { background: rgba(0,0,0,.025); }.drill-list div strong,.drill-list div span { display: block; }.drill-list div span { margin-top: 5px; color: var(--kk-text-muted); font-size: 12px; }.drill-list aside { flex: none; color: var(--kk-text-secondary); font-size: 12px; }.drill-list em { color: var(--kk-danger); font-style: normal; }.drill-list .el-pagination { justify-content: flex-end; margin-top: 18px; }
-.main-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 20px; }.insight-grid { display: grid; grid-template-columns: 1fr; gap: 20px; }
-.page-card { padding: 20px; }.risk-panel { position: relative; border-left: 3px solid var(--el-color-primary); }
+.insight-grid { display: grid; grid-template-columns: 1fr; gap: 20px; }
+.page-card { padding: 20px; }
 .section-head { display: flex; justify-content: space-between; margin-bottom: 14px; }.section-head h3 { margin: 0 0 5px; color: var(--kk-text); font-size: 16px; line-height: 1.3; text-wrap: balance; }.section-head p { margin: 0; color: var(--kk-text-muted); font-size: 12px; line-height: 1.5; text-wrap: pretty; }
-.risk-list { display: flex; flex-direction: column; }.risk-row { display: grid; grid-template-columns: 82px minmax(0,1fr) 108px; align-items: center; gap: 14px; min-height: 62px; padding: 10px 8px; border: 0; border-top: 1px solid var(--kk-card-border); background: transparent; text-align: left; cursor: pointer; transition: background-color 160ms ease-out; }.risk-row:last-child { border-bottom: 0; }.risk-row div strong,.risk-row div span,.risk-row aside strong,.risk-row aside span { display: block; }.risk-row div strong,.risk-row aside strong { color: var(--kk-text); font-variant-numeric: tabular-nums; }.risk-row div span,.risk-row aside span { margin-top: 4px; color: var(--kk-text-muted); font-size: 12px; }.risk-row aside { text-align: right; }.risk-row:hover { background: rgba(0,0,0,.025); }.risk-row:focus-visible,.health-row:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: -2px; }
-.health-row { width: 100%; display: grid; grid-template-columns: minmax(0,1fr) auto 72px; align-items: center; gap: 12px; min-height: 62px; padding: 10px 6px; border: 0; border-top: 1px solid var(--kk-card-border); background: transparent; text-align: left; cursor: pointer; transition: background-color 160ms ease-out; }.health-row:hover { background: rgba(0,0,0,.025); }.health-row div strong,.health-row div span { display: block; }.health-row div span { margin-top: 4px; color: var(--kk-text-muted); font-size: 11px; }.health-row p { margin: 0; color: var(--kk-text-secondary); font-size: 12px; }.health-row p b { margin-right: 2px; color: var(--kk-text); font-size: 16px; font-variant-numeric: tabular-nums; }.health-row em { margin: 0 7px; color: var(--kk-danger); font-style: normal; }
-.trend-panel { display: flex; min-height: 0; flex-direction: column; }.legend { text-align: right; color: var(--kk-text-muted); font-size: 11px; }.legend i { display: inline-block; width: 8px; height: 8px; margin: 0 4px 0 12px; border-radius: 2px; }.created { background: #9aa6b2; }.completed { background: var(--el-color-primary); }.trend-chart { min-height: 142px; display: flex; flex: 1; align-items: stretch; justify-content: space-around; padding-top: 14px; }.trend-column { display: flex; flex-direction: column; }.trend-column>div { min-height: 106px; display: flex; flex: 1; align-items: flex-end; gap: 5px; }.trend-column button { display: block; width: 14px; padding: 0; border: 0; border-radius: 3px 3px 0 0; cursor: pointer; transition: filter 140ms ease-out, transform 140ms ease-out; }.trend-column button:hover { filter: brightness(.82); transform: scaleX(1.15); }.trend-column button:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }.trend-column>span { display: block; margin-top: 7px; color: var(--kk-text-muted); font-size: 11px; text-align: center; }
 .load-row { width: 100%; display: block; margin: 4px 0; padding: 9px 6px; border: 0; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; transition: background-color 140ms ease-out; }.load-row:hover { background: rgba(0,0,0,.025); }.load-row:focus-visible { outline: 2px solid var(--el-color-primary); }.load-row>div { display: flex; justify-content: space-between; gap: 16px; font-size: 12px; }.load-row strong { color: var(--kk-text); }.load-row span { color: var(--kk-text-muted); font-variant-numeric: tabular-nums; }.load-row p { height: 6px; margin: 8px 0 0; overflow: hidden; border-radius: 6px; background: var(--kk-fill); }.load-row p i { display: block; height: 100%; border-radius: 6px; background: var(--el-color-primary); }.load-row p i.danger { background: var(--kk-danger); }
 .member-stats-panel { overflow: hidden; padding: 22px 24px 18px; }
 .member-stats-panel>.section-head { align-items: flex-start; gap: 20px; }
 .member-summary { display: flex; overflow: hidden; border: 1px solid var(--kk-card-border); border-radius: 10px; background: var(--kk-fill); }
 .member-summary span { padding: 8px 13px; border-right: 1px solid var(--kk-card-border); color: var(--kk-text-muted); font-size: 11px; white-space: nowrap; }
 .member-summary span:last-child { border-right: 0; }.member-summary b { margin-right: 3px; color: var(--kk-text); font-size: 13px; font-variant-numeric: tabular-nums; }.member-summary .danger b { color: var(--kk-danger); }
-.member-table-scroll { overflow-x: auto; scrollbar-width: thin; }
-.member-table { min-width: 920px; }
-.member-table-head,.member-row { display: grid; grid-template-columns: minmax(190px,1.25fr) 74px repeat(3,minmax(150px,1fr)); align-items: center; column-gap: 24px; }
-.member-table-head { height: 34px; padding: 0 14px; border-bottom: 1px solid var(--kk-card-border); color: var(--kk-text-muted); font-size: 11px; }
-.member-table-head span:nth-child(2) { text-align: center; }
-.member-row { min-height: 54px; padding: 0 14px; border-bottom: 1px solid var(--kk-card-border); transition: background-color 140ms ease-out; }
-.member-row:last-child { border-bottom: 0; }.member-row:hover { background: rgba(0,0,0,.018); }
-.member-identity { min-width: 0; display: flex; align-items: center; gap: 10px; }.member-rank { width: 20px; color: var(--kk-text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }.member-avatar { width: 28px; height: 28px; display: grid; flex: none; place-items: center; border: 1px solid rgba(79,124,255,.12); border-radius: 9px; background: rgba(79,124,255,.08); color: #4267d5; font-size: 12px; font-weight: 650; }.member-identity strong { overflow: hidden; color: var(--kk-text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.member-total { justify-self: center; min-width: 34px; padding: 5px 8px; border-radius: 8px; background: var(--kk-fill); color: var(--kk-text); font-size: 13px; font-variant-numeric: tabular-nums; text-align: center; }
-.member-measure { display: grid; grid-template-columns: minmax(70px,1fr) 24px; align-items: center; gap: 9px; }.member-measure>span { height: 6px; overflow: hidden; border-radius: 8px; background: var(--kk-fill); }.member-measure i { display: block; min-width: 2px; height: 100%; border-radius: inherit; }.member-measure b { color: var(--kk-text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; }.member-measure.done i { background: #42b883; }.member-measure.doing i { background: #4f7cff; }.member-measure.overdue i { background: #f2555a; }.member-measure.overdue.active b { color: var(--kk-danger); }
-@media(max-width:1300px){.metric-grid{grid-template-columns:repeat(3,1fr)}.metric-grid button:nth-child(3){border-right:0}.metric-grid button:nth-child(-n+3){border-bottom:1px solid var(--kk-card-border)}}
-@media(max-width:900px){.period-filter{width:100%;margin-left:0}.period-filter :deep(.el-form-item__content){flex-wrap:wrap}.main-grid,.insight-grid{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}.metric-grid button:nth-child(3){border-right:1px solid var(--kk-card-border)}.metric-grid button:nth-child(even){border-right:0}.metric-grid button:nth-child(-n+4){border-bottom:1px solid var(--kk-card-border)}.decision-strip{grid-template-columns:1fr 1fr}.decision-strip button:nth-child(2){border-right:0}.decision-strip button:nth-child(-n+2){border-bottom:1px solid var(--kk-card-border)}.risk-panel,.load-panel{margin-top:20px}}
-@media(max-width:560px){.cockpit{gap:16px}.metric-grid{grid-template-columns:1fr 1fr}.metric-grid button{padding:15px}.metric-grid strong{font-size:24px}.metric-grid small{white-space:normal}.decision-strip button{align-items:center;justify-content:flex-start;padding:12px}.decision-strip span{line-height:1.35}.risk-row{grid-template-columns:1fr 90px}.risk-row>.el-tag{grid-column:1 / -1;justify-self:start}.health-row{grid-template-columns:1fr auto}.health-row>p{display:none}.page-card{padding:16px}.drill-list>button{display:block}.drill-list aside{margin-top:8px}}
+.member-chart-shell { position: relative; padding-top: 2px; }
+.member-chart-legend { display: flex; align-items: center; justify-content: flex-end; gap: 16px; margin: 0 0 10px; color: var(--kk-text-muted); font-size: 10px; }
+.member-chart-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }.member-chart-legend i { width: 9px; height: 9px; display: inline-block; border-radius: 2px; }.member-chart-legend i.done { background: #34c98f; }.member-chart-legend i.doing { background: #5b7cfa; }.member-chart-legend i.overdue { background: #ff6b6b; }
+.member-chart-scroll { overflow-x: auto; padding-bottom: 5px; scrollbar-width: thin; }
+.member-chart { position: relative; width: 100%; height: 304px; }
+.member-grid-lines { position: absolute; inset: 18px 0 66px; display: flex; flex-direction: column; justify-content: space-between; pointer-events: none; }.member-grid-lines i { display: block; border-top: 1px dashed rgba(100,116,139,.16); }
+.member-chart-groups { position: absolute; inset: 0; display: grid; }
+.member-chart-group { min-width: 0; display: grid; grid-template-rows: 238px auto auto; padding: 0 16px; border: 0; background: transparent; color: inherit; cursor: pointer; text-align: center; }.member-chart-group:hover { background: linear-gradient(to bottom, rgba(24,24,27,.025), transparent); }.member-chart-group:focus-visible { outline: 2px solid var(--cockpit-blue); outline-offset: -2px; }
+.member-bars { height: 220px; display: flex; align-self: end; align-items: flex-end; justify-content: center; gap: 6px; }.member-bars i { position: relative; width: 20px; min-height: 3px; display: block; border-radius: 4px 4px 1px 1px; transition: filter 140ms ease-out; }.member-chart-group:hover .member-bars i { filter: saturate(1.14) brightness(.96); }.member-bars i.done { background: #34c98f; }.member-bars i.doing { background: #5b7cfa; }.member-bars i.overdue { background: #ff6b6b; }.member-bars b { position: absolute; bottom: calc(100% + 3px); left: 50%; color: var(--kk-text-secondary); font-size: 9px; font-style: normal; font-weight: 600; font-variant-numeric: tabular-nums; transform: translateX(-50%); }
+.member-chart-group>strong { min-width: 0; overflow: hidden; margin-top: 9px; color: var(--kk-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.member-chart-group>small { margin-top: 3px; color: var(--kk-text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.member-focus { width: 100%; min-height: 96px; display: grid; grid-template-columns: minmax(150px,.75fr) minmax(240px,1.4fr) minmax(330px,1.3fr) auto; align-items: center; gap: 32px; padding: 18px 20px; border: 1px solid var(--kk-card-border); border-radius: 10px; background: color-mix(in srgb, var(--kk-card-bg) 88%, var(--kk-fill)); color: inherit; text-align: left; cursor: pointer; transition: border-color 150ms ease-out, background-color 150ms ease-out; }
+.member-focus:hover { border-color: color-mix(in srgb, var(--cockpit-blue) 25%, var(--kk-card-border)); background: var(--kk-card-bg); }.member-focus:focus-visible { outline: 2px solid var(--cockpit-blue); outline-offset: 2px; }
+.member-focus-person { min-width: 0; display: flex; align-items: center; gap: 11px; }.member-focus-person>i { width: 38px; height: 38px; display: grid; flex: none; place-items: center; border-radius: 50%; background: var(--cockpit-blue-soft); color: var(--cockpit-blue); font-size: 13px; font-style: normal; font-weight: 700; }.member-focus-person strong,.member-focus-person small { display: block; }.member-focus-person strong { overflow: hidden; color: var(--kk-text); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }.member-focus-person small { margin-top: 4px; color: var(--kk-text-muted); font-size: 10px; }
+.member-focus-progress>span { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 9px; }.member-focus-progress>span b { color: var(--kk-text-secondary); font-size: 10px; }.member-focus-progress>span strong { color: var(--kk-text); font-size: 18px; font-variant-numeric: tabular-nums; }.member-focus-progress>i { height: 7px; display: block; overflow: hidden; border-radius: 8px; background: var(--kk-fill); }.member-focus-progress>i b { height: 100%; display: block; min-width: 2px; border-radius: inherit; background: var(--cockpit-blue); }
+.member-focus-stats { display: grid; grid-template-columns: repeat(4,1fr); }.member-focus-stats>span { display: grid; justify-items: center; gap: 4px; border-right: 1px solid var(--kk-card-border); }.member-focus-stats>span:last-child { border-right: 0; }.member-focus-stats b { color: var(--kk-text); font-size: 17px; font-variant-numeric: tabular-nums; }.member-focus-stats small { color: var(--kk-text-muted); font-size: 9px; }.member-focus-stats .danger b,.member-focus-stats .danger small { color: var(--cockpit-danger); }
+.member-focus-action { color: var(--cockpit-blue); font-size: 10px; font-weight: 650; white-space: nowrap; opacity: .72; }.member-focus-action b { margin-left: 3px; font-size: 17px; font-weight: 400; vertical-align: -1px; }.member-focus:hover .member-focus-action { opacity: 1; }
+@media(max-width:1000px){.member-focus{grid-template-columns:1fr 1.5fr;gap:20px}.member-focus-stats{grid-column:1 / -1}.member-focus-action{display:none}}
+@media(max-width:640px){.member-focus{grid-template-columns:1fr;padding:15px}.member-focus-progress,.member-focus-stats{grid-column:auto}.member-focus-stats>span{justify-items:start}.member-focus-person>i{width:34px;height:34px}}
+@media(max-width:900px){.period-filter{width:100%;margin-left:0}.period-filter :deep(.el-form-item__content){flex-wrap:wrap}.insight-grid{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}.metric-grid button:nth-child(3){border-right:1px solid var(--kk-card-border)}.metric-grid button:nth-child(even){border-right:0}.metric-grid button:nth-child(-n+2){border-bottom:1px solid var(--kk-card-border)}.decision-strip{grid-template-columns:1fr 1fr}.decision-strip button:nth-child(2){border-right:0}.decision-strip button:nth-child(-n+2){border-bottom:1px solid var(--kk-card-border)}.load-panel{margin-top:20px}}
+@media(max-width:560px){.cockpit{gap:16px}.metric-grid{grid-template-columns:1fr 1fr}.metric-grid button{padding:15px}.metric-grid strong{font-size:24px}.metric-grid small{white-space:normal}.decision-strip button{align-items:center;justify-content:flex-start;padding:12px}.decision-strip span{line-height:1.35}.page-card{padding:16px}.drill-list>button{display:block}.drill-list aside{margin-top:8px}}
 @media(max-width:900px){.member-stats-panel>.section-head{display:block}.member-summary{width:max-content;margin-top:12px}}
 @media(max-width:560px){.member-stats-panel{padding:16px}.member-summary{display:grid;grid-template-columns:1fr 1fr;width:100%}.member-summary span:nth-child(2){border-right:0}.member-summary span:nth-child(-n+2){border-bottom:1px solid var(--kk-card-border)}}
 
@@ -480,7 +541,7 @@ onBeforeUnmount(() => {
 .period-switcher :deep(.el-radio-button__inner) { min-height: 32px; display: grid; place-items: center; padding: 6px 14px; border: 0; border-radius: 7px !important; background: transparent; box-shadow: none !important; color: var(--kk-text-secondary); }
 .period-switcher :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) { background: var(--kk-card-bg); color: var(--cockpit-blue); box-shadow: 0 1px 4px rgba(15, 23, 42, .09) !important; }
 .period-switcher :deep(.el-date-editor) { width: 250px; margin-left: auto; }
-.cockpit-filter { display: grid; grid-template-columns: minmax(180px, 1.4fr) minmax(130px, .7fr) minmax(180px, 1fr) auto; align-items: end; gap: 14px; padding: 14px 16px; }
+.cockpit-filter { display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)) minmax(130px, .7fr) minmax(180px, 1fr) auto; align-items: end; gap: 14px; padding: 14px 16px; }
 .cockpit-filter :deep(.el-form-item) { min-width: 0; display: block; margin: 0; }
 .cockpit-filter :deep(.el-form-item__label) { height: auto; margin-bottom: 6px; color: var(--kk-text-muted); font-size: 11px; line-height: 1.2; }
 .cockpit-filter :deep(.el-form-item__content),.cockpit-filter :deep(.el-select),.cockpit-filter :deep(.el-input) { width: 100%; }
@@ -490,14 +551,13 @@ onBeforeUnmount(() => {
 .metric-grid button { position: relative; min-height: 142px; overflow: hidden; padding: 18px; border: 1px solid var(--kk-card-border) !important; border-radius: 14px; background: var(--kk-card-bg); box-shadow: 0 1px 2px rgba(15, 23, 42, .03); }
 .metric-grid button::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--cockpit-blue); opacity: .72; }
 .metric-grid button.metric-danger::before { background: var(--cockpit-danger); }
-.metric-grid button.metric-warning::before { background: var(--cockpit-warning); }
 .metric-grid button:hover { border-color: color-mix(in srgb, var(--cockpit-blue) 28%, var(--kk-card-border)) !important; background: var(--kk-card-bg); box-shadow: 0 8px 22px rgba(15, 23, 42, .075); transform: translateY(-2px); }
 .metric-grid span { color: var(--kk-text-secondary); font-size: 12px; font-weight: 650; }
 .metric-grid strong { margin: 12px 0 7px; font-size: 30px; letter-spacing: -.04em; }
 .metric-grid small { min-height: 31px; white-space: normal; }
 .metric-grid em { display: block; margin-top: 10px; color: var(--cockpit-blue); font-size: 10px; font-style: normal; font-weight: 650; opacity: 0; transform: translateX(-4px); transition: opacity 160ms ease-out, transform 160ms ease-out; }
 .metric-grid button:hover em,.metric-grid button:focus-visible em { opacity: 1; transform: translateX(0); }
-.metric-danger em { color: var(--cockpit-danger); }.metric-warning em { color: var(--cockpit-warning); }
+.metric-danger em { color: var(--cockpit-danger); }
 .decision-strip { grid-template-columns: 150px repeat(4, 1fr); align-items: stretch; overflow: hidden; border-radius: 12px; background: var(--kk-card-bg); }
 .decision-title { display: flex; flex-direction: column; justify-content: center; padding: 12px 16px; border-right: 1px solid var(--kk-card-border); background: var(--kk-fill); }
 .decision-title span { color: var(--kk-text); font-size: 12px; font-weight: 700; }.decision-title small { margin-top: 3px; color: var(--kk-text-muted); font-size: 10px; }
@@ -508,10 +568,9 @@ onBeforeUnmount(() => {
 .signal { width: 7px; height: 7px; flex: none; border-radius: 50%; background: #94a3b8; box-shadow: 0 0 0 4px rgba(148, 163, 184, .12); }
 .signal-blue { background: var(--cockpit-blue); box-shadow: 0 0 0 4px var(--cockpit-blue-soft); }.signal-orange { background: var(--cockpit-warning); box-shadow: 0 0 0 4px rgba(217, 119, 6, .1); }.signal-red { background: var(--cockpit-danger); box-shadow: 0 0 0 4px rgba(220, 38, 38, .09); }
 .page-card { border-radius: 14px; box-shadow: 0 1px 2px rgba(15, 23, 42, .03); }
-.risk-panel { border-left-width: 1px; }.risk-panel::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; border-radius: 14px 0 0 14px; background: var(--cockpit-danger); }
-.risk-row,.health-row,.load-row,.drill-list>button { border-radius: 8px; }
-.risk-row:hover,.health-row:hover,.load-row:hover,.drill-list>button:hover { background: var(--kk-fill); }
-.risk-row:focus-visible,.health-row:focus-visible,.load-row:focus-visible,.drill-list>button:focus-visible { outline: 2px solid var(--cockpit-blue); outline-offset: -2px; }
+.load-row,.drill-list>button { border-radius: 8px; }
+.load-row:hover,.drill-list>button:hover { background: var(--kk-fill); }
+.load-row:focus-visible,.drill-list>button:focus-visible { outline: 2px solid var(--cockpit-blue); outline-offset: -2px; }
 @media(max-width:1200px){
   .cockpit-filter{grid-template-columns:1fr 150px 1fr auto}.decision-strip{grid-template-columns:130px repeat(2,1fr)}.decision-title{grid-row:span 2}.decision-strip button:nth-of-type(2){border-right:0}.decision-strip button:nth-of-type(-n+2){border-bottom:1px solid var(--kk-card-border)}
 }
@@ -521,14 +580,14 @@ onBeforeUnmount(() => {
 @media(max-width:560px){
   .cockpit-hero{display:block}.scope-summary{margin-top:16px}.period-switcher{padding:12px}.control-label{width:100%}.period-switcher :deep(.el-radio-group){display:grid;grid-template-columns:repeat(3,1fr);width:100%}.cockpit-filter{grid-template-columns:1fr;padding:12px}.filter-actions{grid-column:auto}.metric-grid button{min-height:132px;padding:15px}.metric-grid em{display:none}.decision-strip{grid-template-columns:1fr}.decision-title{grid-column:auto}.decision-strip button{border-right:0;border-bottom:1px solid var(--kk-card-border)}
 }
-@media(prefers-reduced-motion:reduce){.cockpit *{scroll-behavior:auto !important}.metric-grid button,.metric-grid em,.risk-row,.health-row,.load-row{transition:none !important}.metric-grid button:hover{transform:none}}
+@media(prefers-reduced-motion:reduce){.cockpit *{scroll-behavior:auto !important}.metric-grid button,.metric-grid em,.load-row{transition:none !important}.metric-grid button:hover{transform:none}}
 
 /* Compact scope toolbar: filters support the dashboard instead of becoming a section. */
 .control-panel { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; min-height: 58px; overflow: visible; padding: 8px 10px; }
 .period-switcher { min-height: 40px; padding: 0 14px 0 6px; border-right: 1px solid var(--kk-card-border); border-bottom: 0; background: transparent; }
 .control-label { color: var(--kk-text-muted); font-size: 11px; }
 .period-switcher :deep(.el-radio-button__inner) { min-height: 30px; padding: 5px 12px; }
-.cockpit-filter { grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 10px; padding: 0 0 0 14px; }
+.cockpit-filter { grid-template-columns: repeat(4, minmax(0, 1fr)) auto; gap: 10px; padding: 0 0 0 14px; }
 .cockpit-filter :deep(.el-form-item) { display: flex; align-items: center; gap: 7px; }
 .cockpit-filter :deep(.el-form-item__label) { flex: none; margin: 0; padding: 0; color: var(--kk-text-muted); white-space: nowrap; }
 .cockpit-filter :deep(.el-form-item__content) { min-width: 0; }
@@ -561,45 +620,43 @@ onBeforeUnmount(() => {
 .metric-grid button { min-height: 112px; padding: 16px 17px 14px; border: 0 !important; border-right: 1px solid var(--kk-card-border) !important; border-radius: 0; background: transparent; box-shadow: none; }
 .metric-grid button:last-child { border-right: 0 !important; }
 .metric-grid button::before { inset: 14px auto 14px 0; width: 2px; border-radius: 2px; background: transparent; }
-.metric-grid button.metric-danger::before { background: var(--cockpit-danger); }.metric-grid button.metric-warning::before { background: var(--cockpit-warning); }
+.metric-grid button.metric-danger::before { background: var(--cockpit-danger); }
 .metric-grid button:hover { border-color: var(--kk-card-border) !important; background: rgba(24,24,27,.025); box-shadow: none; transform: none; }
 .metric-grid span { font-size: 11px; font-weight: 600; }.metric-grid strong { margin: 9px 0 5px; font-size: 32px; }.metric-grid small { min-height: auto; color: var(--kk-text-muted); font-size: 10px; }.metric-grid em { display: none; }
 .decision-strip { grid-template-columns: repeat(4,1fr); border-radius: 10px; background: rgba(255,255,255,.62); }
 .decision-title { padding: 10px 14px; background: rgba(24,24,27,.025); }.decision-strip button { min-height: 46px; padding: 8px 14px; }.decision-strip button b { font-size: 15px; }.signal { width: 6px; height: 6px; box-shadow: none; }
 .cockpit .page-card { padding: 18px 20px; border: 1px solid var(--kk-card-border); border-radius: 12px; background: rgba(255,255,255,.72); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
 .cockpit .page-card::after { display: none; }.cockpit .page-card:hover { border-color: var(--kk-card-border); box-shadow: none; }
-.risk-panel::before { display: none; }.risk-panel { border-left: 1px solid var(--kk-card-border); }
-.main-grid,.insight-grid { gap: 14px; }.main-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.insight-grid { gap: 14px; }
 .section-head { margin-bottom: 12px; }.section-head h3 { font-size: 15px; font-weight: 700; }.section-head p { font-size: 11px; }
-.main-grid .risk-panel,.main-grid .health-panel { padding: 15px 16px; }
-.main-grid .risk-panel .section-head,.main-grid .health-panel .section-head { margin-bottom: 8px; }
-.risk-row { grid-template-columns: 66px minmax(0,1fr) 86px; gap: 9px; min-height: 50px; padding: 7px 5px; }.health-row { grid-template-columns: minmax(0,1fr) auto 62px; gap: 8px; min-height: 50px; padding: 7px 4px; }
-.risk-row div strong,.risk-row aside strong,.health-row div strong { font-size: 12px; }.risk-row div span,.risk-row aside span { font-size: 10px; }.health-row p { font-size: 10px; }.health-row p b { font-size: 14px; }.health-row em { margin: 0 4px; }
-.main-grid .trend-chart { min-height: 118px; }.main-grid .trend-column>div { min-height: 84px; }.main-grid .trend-column button { width: 11px; }
-.risk-row:hover,.health-row:hover,.load-row:hover,.drill-list>button:hover { background: rgba(24,24,27,.028); }
-@media(max-width:1300px){
-  .metric-grid{grid-template-columns:repeat(4,1fr)}.metric-grid button:nth-child(4){border-right:0 !important}.metric-grid button:nth-child(-n+4){border-bottom:1px solid var(--kk-card-border) !important}
-}
+.load-row:hover,.drill-list>button:hover { background: rgba(24,24,27,.028); }
 @media(max-width:1200px){
   .decision-strip{grid-template-columns:repeat(2,1fr)}
 }
 @media(max-width:900px){
-  .cockpit-hero{min-height:0}.metric-grid{grid-template-columns:repeat(2,1fr)}.metric-grid button:nth-child(4){border-right:0 !important}.metric-grid button:nth-child(odd){border-right:1px solid var(--kk-card-border) !important}.metric-grid button:nth-child(even){border-right:0 !important}.metric-grid button:nth-child(-n+6){border-bottom:1px solid var(--kk-card-border) !important}.metric-grid button:last-child{border-right:0 !important}.decision-strip{grid-template-columns:1fr 1fr}
+  .cockpit-hero{min-height:0}.metric-grid{grid-template-columns:repeat(2,1fr)}.metric-grid button:nth-child(odd){border-right:1px solid var(--kk-card-border) !important}.metric-grid button:nth-child(even){border-right:0 !important}.metric-grid button:nth-child(-n+2){border-bottom:1px solid var(--kk-card-border) !important}.metric-grid button:last-child{border-right:0 !important}.decision-strip{grid-template-columns:1fr 1fr}
 }
 @media(max-width:560px){
   .cockpit{gap:12px}.cockpit-hero{padding-inline:2px}.hero-copy h1{font-size:25px}.metric-grid button{min-height:106px;padding:14px}.metric-grid strong{font-size:28px}.decision-strip{grid-template-columns:1fr}
 }
 
 .member-summary { gap: 6px; overflow: visible; border: 0; background: transparent; }.member-summary span { padding: 7px 10px; border: 0; border-radius: 8px; background: var(--kk-fill); }
-.member-chart-shell { position: relative; padding-top: 2px; }
-.member-chart-legend { display: flex; align-items: center; justify-content: flex-end; gap: 16px; margin: 0 0 10px; color: var(--kk-text-muted); font-size: 10px; }
-.member-chart-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }.member-chart-legend i { width: 9px; height: 9px; display: inline-block; border-radius: 2px; }.member-chart-legend i.done { background: #34c98f; }.member-chart-legend i.doing { background: #5b7cfa; }.member-chart-legend i.overdue { background: #ff6b6b; }
-.member-chart-scroll { overflow-x: auto; padding-bottom: 5px; scrollbar-width: thin; }
-.member-chart { position: relative; width: 100%; height: 304px; }
-.member-grid-lines { position: absolute; inset: 18px 0 66px; display: flex; flex-direction: column; justify-content: space-between; pointer-events: none; }.member-grid-lines i { display: block; border-top: 1px dashed rgba(100,116,139,.16); }
-.member-chart-groups { position: absolute; inset: 0; display: grid; }
-.member-chart-group { min-width: 0; display: grid; grid-template-rows: 238px auto auto; padding: 0 16px; border: 0; background: transparent; color: inherit; cursor: pointer; text-align: center; }.member-chart-group:hover { background: linear-gradient(to bottom, rgba(24,24,27,.025), transparent); }.member-chart-group:focus-visible { outline: 2px solid var(--cockpit-blue); outline-offset: -2px; }
-.member-bars { height: 220px; display: flex; align-self: end; align-items: flex-end; justify-content: center; gap: 6px; }.member-bars i { position: relative; width: 20px; min-height: 3px; display: block; border-radius: 4px 4px 1px 1px; transition: filter 140ms ease-out; }.member-chart-group:hover .member-bars i { filter: saturate(1.14) brightness(.96); }.member-bars i.done { background: #34c98f; }.member-bars i.doing { background: #5b7cfa; }.member-bars i.overdue { background: #ff6b6b; }.member-bars b { position: absolute; bottom: calc(100% + 3px); left: 50%; color: var(--kk-text-secondary); font-size: 9px; font-style: normal; font-weight: 600; font-variant-numeric: tabular-nums; transform: translateX(-50%); }
-.member-chart-group>strong { min-width: 0; overflow: hidden; margin-top: 9px; color: var(--kk-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.member-chart-group>small { margin-top: 3px; color: var(--kk-text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
 @media(max-width:720px){.member-summary{display:grid;grid-template-columns:1fr 1fr}.member-stats-panel{padding-inline:12px}}
+
+.task-detail-head { align-items: center; }
+.task-detail-head :deep(.el-radio-button__inner) { min-width: 92px; }
+.task-detail-head :deep(.el-radio-button b) { margin-left: 4px; font-variant-numeric: tabular-nums; }
+.task-detail-list { min-height: 128px; overflow-x: auto; scrollbar-width: thin; }
+.task-table-head,.task-table-row { min-width: 1040px; display: grid; grid-template-columns: minmax(240px,1.8fr) minmax(140px,.9fr) minmax(230px,1.3fr) 100px 126px 58px; align-items: center; column-gap: 18px; }
+.task-table-head { height: 38px; padding: 0 12px; border-block: 1px solid var(--kk-card-border); background: color-mix(in srgb, var(--kk-fill) 62%, transparent); color: var(--kk-text-muted); font-size: 10px; font-weight: 650; }
+.task-table-row { width: 100%; min-height: 62px; padding: 8px 12px; border: 0; border-bottom: 1px solid var(--kk-card-border); background: transparent; color: var(--kk-text-secondary); font-size: 11px; text-align: left; cursor: pointer; transition: background-color 140ms ease-out; }
+.task-table-row:hover { background: rgba(24,24,27,.028); }
+.task-table-row:focus-visible { outline: 2px solid var(--cockpit-blue); outline-offset: -2px; }
+.task-title-cell,.task-title-cell strong,.task-title-cell small { min-width: 0; display: block; }.task-title-cell strong { overflow: hidden; color: var(--kk-text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.task-title-cell small { margin-top: 4px; color: var(--kk-text-muted); font-size: 9px; opacity: 0; transform: translateX(-3px); transition: opacity 140ms ease-out, transform 140ms ease-out; }.task-table-row:hover .task-title-cell small,.task-table-row:focus-visible .task-title-cell small { opacity: 1; transform: none; }
+.task-project-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.task-owner-cell { min-width: 0; display: flex; align-items: center; gap: 8px; overflow: hidden; }.task-owner-cell i { width: 28px; height: 28px; display: grid; flex: none; place-items: center; border-radius: 50%; background: var(--kk-fill); color: var(--kk-text-secondary); font-size: 10px; font-style: normal; font-weight: 700; }.task-people-copy { min-width: 0; display: block; }.task-people-copy strong,.task-people-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.task-people-copy strong { color: var(--kk-text-secondary); font-size: 11px; font-weight: 600; }.task-people-copy small { margin-top: 3px; color: var(--kk-text-muted); font-size: 10px; }
+.task-status-cell { display: flex; }.task-due-cell { font-variant-numeric: tabular-nums; white-space: nowrap; }.task-due-cell.empty { color: var(--cockpit-warning); }.task-due-cell.overdue { color: var(--cockpit-danger); font-weight: 650; }.task-action-cell { color: var(--cockpit-blue); font-weight: 650; white-space: nowrap; opacity: .66; }.task-action-cell b { margin-left: 2px; font-size: 16px; font-weight: 400; vertical-align: -1px; }.task-table-row:hover .task-action-cell { opacity: 1; }
+.task-detail-list .el-pagination { justify-content: flex-end; margin-top: 16px; }
+@media(max-width:720px){
+  .task-detail-head{display:block}.task-detail-head :deep(.el-radio-group){width:100%;display:grid;grid-template-columns:repeat(3,1fr);margin-top:12px}.task-detail-head :deep(.el-radio-button__inner){width:100%;min-width:0}.task-detail-list{overflow:visible}.task-table-head{display:none}.task-table-row{min-width:0;grid-template-columns:1fr auto;gap:9px 16px;margin-bottom:10px;padding:13px;border:1px solid var(--kk-card-border);border-radius:10px}.task-title-cell{grid-column:1 / -1}.task-title-cell small{display:none}.task-project-cell{grid-column:1}.task-owner-cell{grid-column:1}.task-status-cell{grid-column:2;grid-row:2}.task-due-cell{grid-column:2;grid-row:3;align-self:center}.task-due-cell::before{content:'截止 ';color:var(--kk-text-muted);font-weight:400}.task-action-cell{display:none}
+}
 </style>

@@ -234,6 +234,29 @@ export const bizApi = {
   taskPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/task/page', method: 'get', params })
   },
+  projectResources(id: number) {
+    return request<any>({ url: `/project/${id}/resources`, method: 'get' })
+  },
+  projectTaskStats(id: number) {
+    return request<any>({ url: `/project/${id}/task-stats`, method: 'get' })
+  },
+  saveProjectLink(projectId: number, data: any) {
+    return request<any>({ url: `/project/${projectId}/links`, method: 'post', data })
+  },
+  deleteProjectLink(projectId: number, linkId: number) {
+    return request<void>({ url: `/project/${projectId}/links/${linkId}`, method: 'delete' })
+  },
+  uploadProjectResource(projectId: number, file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return request<any>({
+      url: `/project/${projectId}/files`, method: 'post', data: form,
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 10 * 60 * 1000,
+    })
+  },
+  deleteProjectResource(projectId: number, fileId: number) {
+    return request<void>({ url: `/project/${projectId}/files/${fileId}`, method: 'delete' })
+  },
   taskOrder(projectId?: number) {
     return request<number[]>({ url: '/task/order', method: 'get', params: { projectId } })
   },
