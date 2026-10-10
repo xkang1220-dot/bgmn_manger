@@ -6,6 +6,7 @@ type SubtaskItem = {
   title: string
   startDate?: string | null
   dueDate?: string | null
+  completedAt?: string | null
   status?: number
   assigneeName?: string | null
   overdue?: boolean
@@ -60,17 +61,29 @@ function dayMs(date: Date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
 }
 
+function currentDate() {
+  const today = new Date()
+  const month = String(today.getMonth() + 1).padStart(2, '0')
+  const day = String(today.getDate()).padStart(2, '0')
+  return `${today.getFullYear()}-${month}-${day}`
+}
+
+function displayEndDate(task: SubtaskItem) {
+  return task.completedAt || currentDate()
+}
+
 const datedTasks = computed(() => {
   return props.tasks
     .map((task) => {
       const start = parseDate(task.startDate) || parseDate(task.dueDate)
-      const end = parseDate(task.dueDate) || parseDate(task.startDate)
+      const endDate = displayEndDate(task)
+      const end = parseDate(endDate)
       if (!start || !end) return null
       const startMs = dayMs(start)
       const endMs = Math.max(dayMs(end), startMs)
-      return { ...task, startMs, endMs }
+      return { ...task, endDate, startMs, endMs }
     })
-    .filter(Boolean) as Array<SubtaskItem & { startMs: number; endMs: number }>
+    .filter(Boolean) as Array<SubtaskItem & { endDate: string; startMs: number; endMs: number }>
 })
 
 const undatedTasks = computed(() =>
@@ -97,6 +110,11 @@ const range = computed(() => {
     || completedMs != null
   if (finished && completedMs && dayMs(completedMs) < today) {
     max = dayMs(completedMs)
+  }
+
+  // 子任务缺少完成时间时会延伸到今天，时间轴范围也必须完整容纳该日期。
+  if (datedTasks.value.length) {
+    max = Math.max(max, ...datedTasks.value.map((task) => task.endMs))
   }
 
   if (max < min) max = min
@@ -185,7 +203,7 @@ function barStyle(task: { startMs: number; endMs: number }) {
                   <span class="gantt-meta">
                     <em>{{ task.assigneeName || '未指定' }}</em>
                     <i>{{ statusMap[task.status ?? 0] }}</i>
-                    <i class="is-date">{{ formatDate(task.startDate) }} — {{ formatDate(task.dueDate) }}</i>
+                    <i class="is-date">{{ formatDate(task.startDate) }} — {{ formatDate(task.endDate) }}</i>
                   </span>
                 </button>
                 <div class="gantt-track">
@@ -194,13 +212,13 @@ function barStyle(task: { startMs: number; endMs: number }) {
                     class="gantt-bar"
                     :class="[`is-status-${task.status ?? 0}`, { 'is-overdue': task.overdue }]"
                     :style="barStyle(task)"
-                    :title="`${task.title}\n开始 ${formatDate(task.startDate)}\n结束 ${formatDate(task.dueDate)}`"
+                    :title="`${task.title}\n开始 ${formatDate(task.startDate)}\n结束 ${formatDate(task.endDate)}`"
                     @click="emit('open', task)"
                   >
                     <span class="gantt-bar__range">
                       <i>{{ formatShort(task.startDate) }}</i>
                       <em>—</em>
-                      <i>{{ formatShort(task.dueDate) }}</i>
+                      <i>{{ formatShort(task.endDate) }}</i>
                     </span>
                   </button>
                 </div>

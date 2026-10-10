@@ -21,7 +21,7 @@ public interface PmTaskService extends IService<PmTask> {
                                      Integer priority, Long participantId, String title, Boolean overdue,
                                      String dashboardCategory, Long dashboardOwnerId,
                                      String dashboardFrom, String dashboardTo,
-                                     String periodFrom, String periodTo);
+                                     String periodFrom, String periodTo, boolean taskTree);
 
     PmTask getDetail(Long id);
 
