@@ -759,6 +759,7 @@ function commentAttachmentUrl(file: any, preview = false) {
           <el-descriptions-item label="项目">{{ detail.projectName || '—' }}</el-descriptions-item>
           <el-descriptions-item v-if="detail.parentTaskId" label="父任务">{{ detail.parentTaskTitle || `任务 ${detail.parentTaskId}` }}</el-descriptions-item>
           <el-descriptions-item label="负责人">{{ detail.assigneeName || '未指定' }}</el-descriptions-item>
+          <el-descriptions-item label="持有人">{{ detail.holderName || '未指定' }}</el-descriptions-item>
           <el-descriptions-item label="参与人员">
             {{ detail.participantNames?.length ? detail.participantNames.join('、') : '无' }}
           </el-descriptions-item>

@@ -7,7 +7,6 @@ import { ArrowRight, Expand, Fold, Rank } from '@element-plus/icons-vue'
 import { bizApi } from '@/api/biz'
 import { useUserStore } from '@/stores/user'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
-import TaskTimeline from '@/components/task/TaskTimeline.vue'
 import CompanyTaskShareDialog from '@/components/task/CompanyTaskShareDialog.vue'
 import { companyTaskShareApi, type CompanyTaskShareOption } from '@/api/companyTaskShare'
 
@@ -82,8 +81,6 @@ const taskDrawerAction = ref<TaskDrawerAction>('view')
 const listLoading = ref(false)
 const shareOpen = ref(false)
 const shareCompanies = ref<CompanyTaskShareOption[]>([])
-type TaskViewMode = 'timeline' | 'details'
-const taskViewMode = ref<TaskViewMode>('details')
 const projectNavCollapsed = ref(false)
 const taskOrder = ref<Array<number | string>>([])
 const draggingTaskId = ref<number | string | null>(null)
@@ -220,18 +217,6 @@ function taskContentPreview(content?: string) {
   return document.body.textContent?.trim() || ''
 }
 
-function selectTaskView(mode: TaskViewMode, moveFocus = false) {
-  taskViewMode.value = mode
-  if (moveFocus) document.getElementById(`task-view-tab-${mode}`)?.focus()
-}
-
-function onTaskViewKeydown(event: KeyboardEvent) {
-  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-  event.preventDefault()
-  const mode = event.key === 'ArrowLeft' || event.key === 'Home' ? 'details' : 'timeline'
-  selectTaskView(mode, true)
-}
-
 type ProjectNavItem = {
   id: number
   label: string
@@ -340,12 +325,19 @@ function resetQuery() {
   load()
 }
 
+const isAllTasksView = computed(() => query.status === undefined && !query.overdue)
+
 function filterByStatus(status?: number) {
   query.status = status
   query.statuses = undefined
   query.overdue = undefined
   query.page = 1
   load()
+}
+
+function selectMyTasksView() {
+  if (!isAllTasksView.value) return
+  filterByStatus(0)
 }
 
 function filterOverdue() {
@@ -467,32 +459,26 @@ onUnmounted(() => {
       </div>
 
       <div class="task-view-toolbar">
-        <div class="task-view-switcher" role="tablist" aria-label="任务展示方式">
+        <div class="task-view-switcher" role="tablist" aria-label="任务范围">
           <button
-            id="task-view-tab-details"
             type="button"
             role="tab"
-            :aria-selected="taskViewMode === 'details'"
-            aria-controls="task-view-panel-details"
-            :tabindex="taskViewMode === 'details' ? 0 : -1"
-            :class="{ 'is-active': taskViewMode === 'details' }"
-            @click="selectTaskView('details')"
-            @keydown="onTaskViewKeydown"
+            :aria-selected="isAllTasksView"
+            :tabindex="isAllTasksView ? 0 : -1"
+            :class="{ 'is-active': isAllTasksView }"
+            @click="filterByStatus()"
           >
-            我的任务明细
+            全部任务
           </button>
           <button
-            id="task-view-tab-timeline"
             type="button"
             role="tab"
-            :aria-selected="taskViewMode === 'timeline'"
-            aria-controls="task-view-panel-timeline"
-            :tabindex="taskViewMode === 'timeline' ? 0 : -1"
-            :class="{ 'is-active': taskViewMode === 'timeline' }"
-            @click="selectTaskView('timeline')"
-            @keydown="onTaskViewKeydown"
+            :aria-selected="!isAllTasksView"
+            :tabindex="isAllTasksView ? -1 : 0"
+            :class="{ 'is-active': !isAllTasksView }"
+            @click="selectMyTasksView"
           >
-            任务时间轴
+            我的任务
           </button>
         </div>
         <div class="page-actions">
@@ -532,26 +518,10 @@ onUnmounted(() => {
       </aside>
 
       <div class="task-workspace-main">
-      <div
-        v-show="taskViewMode === 'timeline'"
-        id="task-view-panel-timeline"
-        role="tabpanel"
-        aria-labelledby="task-view-tab-timeline"
-        class="task-view-panel task-view-panel--timeline"
-      >
-        <TaskTimeline :tasks="orderedList" :loading="listLoading" @open="open" />
-      </div>
-
-      <div
-        v-show="taskViewMode === 'details'"
-        id="task-view-panel-details"
-        role="tabpanel"
-        aria-labelledby="task-view-tab-details"
-        class="task-view-panel task-view-panel--details"
-      >
+      <div class="task-view-panel task-view-panel--details">
         <div class="details-toolbar">
           <nav class="delivery-tabs" aria-label="任务交付状态">
-            <button type="button" :class="{ 'is-active': query.status === 0 && !query.overdue }" @click="filterByStatus(0)">我的待办</button>
+            <button type="button" :class="{ 'is-active': query.status === 0 && !query.overdue }" @click="filterByStatus(0)">待办</button>
             <button type="button" :class="{ 'is-active': query.status === 1 && !query.overdue }" @click="filterByStatus(1)">进行中</button>
             <button type="button" :class="{ 'is-active': query.overdue }" @click="filterOverdue">已逾期</button>
             <button type="button" :class="{ 'is-active': query.status === 4 && !query.overdue }" @click="filterByStatus(4)">待确认完成</button>
@@ -1183,11 +1153,6 @@ onUnmounted(() => {
   min-height: 0;
   height: 100%;
   overflow: hidden;
-}
-.task-view-panel--timeline {
-  padding-top: 14px;
-  overflow: auto;
-  overscroll-behavior: contain;
 }
 .task-view-panel--details {
   overflow: hidden;
