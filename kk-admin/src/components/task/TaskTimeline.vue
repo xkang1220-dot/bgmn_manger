@@ -6,6 +6,7 @@ type TimelineTask = {
   title: string
   projectName?: string | null
   assigneeName?: string | null
+  holderName?: string | null
   startDate?: string | null
   dueDate?: string | null
   status?: number
@@ -69,6 +70,7 @@ function scheduleText(task: TimelineTask) {
             <span v-if="task.projectName" class="card-project" :title="task.projectName">{{ task.projectName }}</span>
             <span class="card-schedule">{{ scheduleText(task) }}</span>
             <span class="card-owner">负责人：{{ task.assigneeName || '未指定' }}</span>
+            <span class="card-owner">持有人：{{ task.holderName || '未指定' }}</span>
             <span v-if="task.overdue" class="overdue-text">已逾期</span>
           </button>
         </li>

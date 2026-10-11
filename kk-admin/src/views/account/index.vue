@@ -7,8 +7,8 @@ import { sysApi } from '@/api/system'
 import { workflowApi } from '@/api/workflow'
 import { approvalFlowTip } from '@/utils/approvalTip'
 import { useUserStore } from '@/stores/user'
-import WalletBoardCharts from '@/components/wallet/WalletBoardCharts.vue'
 import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
+import AccountWorkbenchCharts from '@/components/wallet/AccountWorkbenchCharts.vue'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -22,6 +22,18 @@ const companies = ref<any[]>([])
 const projects = ref<any[]>([])
 const walletBoard = ref<any>(null)
 const boardPeriod = ref<'daily' | 'monthly'>('daily')
+type StatsPeriodKey = 'THIS_MONTH' | 'LAST_MONTH' | 'CUSTOM'
+const statsPeriod = ref<StatsPeriodKey>('THIS_MONTH')
+const customStatsPeriod = ref<[string, string] | undefined>()
+const periodIn = ref(0)
+const periodOut = ref(0)
+const periodSources = ref<Array<{ bizType: string; amount: number }>>([])
+const statsPeriodOptions: Array<{ label: string; value: StatsPeriodKey }> = [
+  { label: '本月', value: 'THIS_MONTH' },
+  { label: '上月', value: 'LAST_MONTH' },
+  { label: '自定义', value: 'CUSTOM' },
+]
+const accountTab = ref<'workbench' | 'ledger'>('workbench')
 const freezeDrawer = ref(false)
 const ledgerQuery = reactive({
   page: 1,
@@ -36,6 +48,13 @@ const ledgerQuery = reactive({
 })
 
 const reimburseDialog = ref(false)
+const leaveDialog = ref(false)
+const leaveSubmitting = ref(false)
+const leaveForm = reactive({
+  companyId: undefined as number | undefined,
+  dateRange: [] as string[],
+  reason: '',
+})
 const withdrawDialog = ref(false)
 const balanceApplyDialog = ref(false)
 const reimburseForm = reactive({
@@ -208,9 +227,19 @@ function dayKey(d: Date | string) {
 const selectedDay = computed(() => dayKey(calendarDate.value))
 const todayKey = computed(() => dayKey(new Date()))
 
-const dayTasks = computed(() =>
+const dayStartingTasks = computed(() =>
+  calendarTasks.value.filter((t) => String(t.startDate || '').startsWith(selectedDay.value)),
+)
+
+const dayDueTasks = computed(() =>
   calendarTasks.value.filter((t) => String(t.dueDate || '').startsWith(selectedDay.value)),
 )
+
+const dayTasks = computed(() => {
+  const rows = new Map<number | string, any>()
+  for (const task of [...dayStartingTasks.value, ...dayDueTasks.value]) rows.set(task.id, task)
+  return [...rows.values()]
+})
 
 const dayLeaves = computed(() =>
   myLeaves.value.filter((r) => String(r.leaveDate || '').startsWith(selectedDay.value)),
@@ -230,12 +259,100 @@ const monthLeaveCount = computed(() => {
 const tasksByDay = computed(() => {
   const map: Record<string, number> = {}
   for (const t of calendarTasks.value) {
-    const key = String(t.dueDate || '').slice(0, 10)
-    if (!key) continue
-    map[key] = (map[key] || 0) + 1
+    const keys = new Set([
+      String(t.startDate || '').slice(0, 10),
+      String(t.dueDate || '').slice(0, 10),
+    ].filter(Boolean))
+    for (const key of keys) map[key] = (map[key] || 0) + 1
   }
   return map
 })
+
+function taskDayLabel(task: any) {
+  const starts = String(task.startDate || '').startsWith(selectedDay.value)
+  const ends = String(task.dueDate || '').startsWith(selectedDay.value)
+  if (starts && ends) return '当日开始并截止'
+  return starts ? '当日开始' : '当日截止'
+}
+
+function openLeaveApply(start = selectedDay.value, end = start) {
+  const from = start <= end ? start : end
+  const to = start <= end ? end : start
+  leaveForm.companyId = companies.value.length === 1 ? Number(companies.value[0].id) : undefined
+  leaveForm.dateRange = [from, to]
+  leaveForm.reason = ''
+  leaveDialog.value = true
+}
+
+const calDragStart = ref('')
+const calDragEnd = ref('')
+const calDragging = ref(false)
+const calDragMoved = ref(false)
+
+function dayInRange(day: string, start: string, end: string) {
+  if (!day || !start || !end) return false
+  const from = start <= end ? start : end
+  const to = start <= end ? end : start
+  return day >= from && day <= to
+}
+
+const calDragHighlight = computed(() => {
+  if (!calDragging.value || !calDragStart.value || !calDragEnd.value) return null
+  return { start: calDragStart.value, end: calDragEnd.value }
+})
+
+function onCalDayPointerDown(day: string, e: PointerEvent) {
+  if (!canViewLeave.value || e.button !== 0) return
+  calDragging.value = true
+  calDragMoved.value = false
+  calDragStart.value = day
+  calDragEnd.value = day
+  window.addEventListener('pointerup', onCalDragPointerUp)
+  window.addEventListener('pointercancel', onCalDragPointerUp)
+}
+
+function onCalDayPointerEnter(day: string) {
+  if (!calDragging.value || !canViewLeave.value) return
+  if (day !== calDragStart.value) calDragMoved.value = true
+  calDragEnd.value = day
+}
+
+function onCalDragPointerUp() {
+  window.removeEventListener('pointerup', onCalDragPointerUp)
+  window.removeEventListener('pointercancel', onCalDragPointerUp)
+  if (!calDragging.value) return
+  const start = calDragStart.value
+  const end = calDragEnd.value
+  const moved = calDragMoved.value
+  calDragging.value = false
+  calDragMoved.value = false
+  calDragStart.value = ''
+  calDragEnd.value = ''
+  if (!moved || !start || !end || !canViewLeave.value) return
+  openLeaveApply(start, end)
+}
+
+async function submitLeaveApply() {
+  if (!leaveForm.companyId) return void ElMessage.warning('请选择所属公司')
+  if (leaveForm.dateRange.length !== 2) return void ElMessage.warning('请选择请假日期')
+  if (!leaveForm.reason.trim()) return void ElMessage.warning('请填写请假事由')
+  leaveSubmitting.value = true
+  try {
+    await bizApi.submitLeave({
+      companyId: leaveForm.companyId,
+      startDate: leaveForm.dateRange[0],
+      endDate: leaveForm.dateRange[1],
+      reason: leaveForm.reason.trim(),
+    })
+    ElMessage.success('请假申请已提交')
+    leaveDialog.value = false
+    await loadLeaves()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '请假申请提交失败')
+  } finally {
+    leaveSubmitting.value = false
+  }
+}
 
 const leaveByDay = computed(() => {
   const map: Record<string, number> = {}
@@ -250,13 +367,16 @@ const leaveByDay = computed(() => {
 function cellClass(day: string) {
   const n = tasksByDay.value[day] || 0
   const leave = !!leaveByDay.value[day]
-  if (!n && !leave) return ''
+  const range = calDragHighlight.value
+  const inRange = !!(range && dayInRange(day, range.start, range.end))
+  if (!n && !leave && !inRange) return ''
   const overdue = n > 0 && calendarTasks.value.some(
     (t) => String(t.dueDate || '').startsWith(day) && (t.overdue || Number(t.status) === 0 || Number(t.status) === 1) && day < todayKey.value,
   )
   const parts = []
   if (n) parts.push(overdue ? 'has-task overdue' : 'has-task')
   if (leave) parts.push('has-leave')
+  if (inRange) parts.push('is-drag-range')
   return parts.join(' ')
 }
 
@@ -455,6 +575,93 @@ async function loadBalance() {
 }
 
 let boardLoadSeq = 0
+let periodStatsSeq = 0
+
+function formatStatsDate(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+const statsPeriodBounds = computed(() => {
+  const now = new Date()
+  if (statsPeriod.value === 'CUSTOM') {
+    if (!customStatsPeriod.value || customStatsPeriod.value.length !== 2) return undefined
+    return { from: customStatsPeriod.value[0], to: customStatsPeriod.value[1] }
+  }
+  if (statsPeriod.value === 'LAST_MONTH') {
+    const from = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+    const to = new Date(now.getFullYear(), now.getMonth(), 0)
+    return { from: formatStatsDate(from), to: formatStatsDate(to) }
+  }
+  const from = new Date(now.getFullYear(), now.getMonth(), 1)
+  return { from: formatStatsDate(from), to: formatStatsDate(now) }
+})
+
+async function loadPeriodStats() {
+  const seq = ++periodStatsSeq
+  const bounds = statsPeriodBounds.value
+  if (!bounds) {
+    periodIn.value = 0
+    periodOut.value = 0
+    periodSources.value = []
+    return
+  }
+  try {
+    let page = 1
+    const pageSize = 200
+    let total = Infinity
+    let inSum = 0
+    let outSum = 0
+    const sourceSums = new Map<string, number>()
+    while ((page - 1) * pageSize < total) {
+      const res = await bizApi.myWalletLedger({
+        page,
+        pageSize,
+        startTime: `${bounds.from} 00:00:00`,
+        endTime: `${bounds.to} 23:59:59`,
+      })
+      if (seq !== periodStatsSeq) return
+      const list = res.list || []
+      total = Number(res.total) || 0
+      for (const row of list) {
+        const amt = Number(row?.amount) || 0
+        if (amt > 0) {
+          inSum += amt
+          const bizType = String(row?.bizType || 'OTHER')
+          sourceSums.set(bizType, (sourceSums.get(bizType) || 0) + amt)
+        }
+        else if (amt < 0) outSum += Math.abs(amt)
+      }
+      if (!list.length) break
+      page += 1
+      if (page > 50) break
+    }
+    if (seq !== periodStatsSeq) return
+    periodIn.value = inSum
+    periodOut.value = outSum
+    periodSources.value = [...sourceSums.entries()]
+      .map(([bizType, amount]) => ({ bizType, amount }))
+      .sort((a, b) => b.amount - a.amount)
+  } catch {
+    if (seq !== periodStatsSeq) return
+    periodIn.value = 0
+    periodOut.value = 0
+    periodSources.value = []
+  }
+}
+
+function changeStatsPeriod(value: StatsPeriodKey) {
+  statsPeriod.value = value
+  if (value === 'CUSTOM' && !statsPeriodBounds.value) {
+    periodIn.value = 0
+    periodOut.value = 0
+    return
+  }
+  void loadPeriodStats()
+}
+
+function changeCustomStatsPeriod() {
+  if (statsPeriod.value === 'CUSTOM') void loadPeriodStats()
+}
 
 async function loadBoard() {
   const seq = ++boardLoadSeq
@@ -465,6 +672,7 @@ async function loadBoard() {
     if (data?.withdrawTaxRate != null) {
       withdrawTaxRate.value = Number(data.withdrawTaxRate)
     }
+    await loadPeriodStats()
   } catch {
     if (seq !== boardLoadSeq) return
     walletBoard.value = null
@@ -491,11 +699,6 @@ async function openFreezeDetail() {
 function openFreezeItem(row: any) {
   freezeDrawer.value = false
   if (row?.link) router.push(row.link)
-}
-
-async function onBoardPeriod(period: 'daily' | 'monthly') {
-  boardPeriod.value = period
-  await loadBoard()
 }
 
 async function loadLedger() {
@@ -1113,7 +1316,10 @@ onMounted(async () => {
 
   loading.value = true
   try {
-    const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadPanelTasks(true), loadProjects(), loadLeaves()]
+    const jobs: Promise<unknown>[] = [loadApprovals(), loadTasks(), loadProjects(), loadLeaves()]
+    if (canViewLeave.value && !canSeeWallet.value) {
+      jobs.push(sysApi.myCompanies().then((rows) => { companies.value = rows || [] }).catch(() => { companies.value = [] }))
+    }
     if (canSeeWallet.value) {
       jobs.push(
         (async () => {
@@ -1135,7 +1341,6 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
-  bindPanelListObserver()
 })
 
 watch(taskPanelTab, () => {
@@ -1162,12 +1367,14 @@ watch(
 onUnmounted(() => {
   if (welcomeClockTimer) clearInterval(welcomeClockTimer)
   panelListObserver?.disconnect()
+  window.removeEventListener('pointerup', onCalDragPointerUp)
+  window.removeEventListener('pointercancel', onCalDragPointerUp)
 })
 </script>
 
 <template>
   <div v-loading="loading" class="account">
-    <section class="page-card welcome">
+    <header class="welcome">
       <div class="welcome__text">
         <h2 class="welcome-title">{{ welcomeTimePhrase }}，{{ welcomeName }}</h2>
         <p class="welcome__meta">
@@ -1183,14 +1390,28 @@ onUnmounted(() => {
       <div v-if="!canSeeWallet" class="welcome__aside">
         <el-button type="primary" @click="openReimburse">去发起报销</el-button>
       </div>
-    </section>
+    </header>
 
     <section class="page-card hub-panel">
       <div class="sec-head hub-panel__head">
-        <div>
-          <h3>工作台</h3>
+        <div class="hub-panel__tabs" role="tablist" aria-label="个人中心内容">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="accountTab === 'workbench'"
+            :class="{ 'is-active': accountTab === 'workbench' }"
+            @click="accountTab = 'workbench'"
+          >工作台</button>
+          <button
+            v-if="canSeeWallet"
+            type="button"
+            role="tab"
+            :aria-selected="accountTab === 'ledger'"
+            :class="{ 'is-active': accountTab === 'ledger' }"
+            @click="accountTab = 'ledger'"
+          >流水明细</button>
         </div>
-        <div class="hub-panel__shortcuts">
+        <div v-show="accountTab === 'workbench'" class="hub-panel__shortcuts">
           <div class="hub-panel__group">
             <span class="hub-panel__group-label">业务</span>
             <div class="hub-panel__actions">
@@ -1227,7 +1448,7 @@ onUnmounted(() => {
               <button
                 v-if="canSeeWallet"
                 type="button"
-                class="hub-chip hub-chip--violet"
+                class="hub-chip hub-chip--amber"
                 @click="openWithdraw"
               >
                 <span class="hub-chip__icon" aria-hidden="true">
@@ -1241,74 +1462,49 @@ onUnmounted(() => {
       </div>
 
       <template v-if="canSeeWallet">
-        <div v-if="walletBoard" class="hub-panel__board">
-          <div class="hub-panel__metrics">
-            <div class="hub-metric hub-metric--indigo">
-              <div class="hub-metric__body">
-                <span>余额</span>
-                <b>¥ {{ fmt(walletBoard.balance) }}</b>
-              </div>
-              <el-icon class="hub-metric__glyph" :size="40"><Wallet /></el-icon>
-            </div>
-            <div
-              class="hub-metric hub-metric--amber"
-              :class="{ 'is-clickable': Number(walletBoard.frozen) > 0 }"
-              :role="Number(walletBoard.frozen) > 0 ? 'button' : undefined"
-              :tabindex="Number(walletBoard.frozen) > 0 ? 0 : undefined"
-              @click="Number(walletBoard.frozen) > 0 && openFreezeDetail()"
-              @keyup.enter="Number(walletBoard.frozen) > 0 && openFreezeDetail()"
-            >
-              <div class="hub-metric__body">
-                <span>冻结</span>
-                <b>¥ {{ fmt(walletBoard.frozen) }}</b>
-                <em v-if="Number(walletBoard.frozen) > 0" class="metric-hint">查看明细</em>
-              </div>
-              <el-icon class="hub-metric__glyph" :size="40"><Lock /></el-icon>
-            </div>
-            <div class="hub-metric hub-metric--cyan">
-              <div class="hub-metric__body">
-                <span>可用</span>
-                <b>¥ {{ fmt(walletBoard.available) }}</b>
-              </div>
-              <el-icon class="hub-metric__glyph" :size="40"><Coin /></el-icon>
-            </div>
-            <div class="hub-metric hub-metric--violet">
-              <div class="hub-metric__body">
-                <span>本月入账</span>
-                <b class="in">¥ {{ fmt(walletBoard.monthIn) }}</b>
-              </div>
-              <el-icon class="hub-metric__glyph" :size="40"><TrendCharts /></el-icon>
-            </div>
-            <div class="hub-metric hub-metric--rose">
-              <div class="hub-metric__body">
-                <span>本月出账</span>
-                <b class="out">¥ {{ fmt(walletBoard.monthOut) }}</b>
-              </div>
-              <el-icon class="hub-metric__glyph" :size="40"><CreditCard /></el-icon>
-            </div>
-            <div v-if="Number(walletBoard.pendingConfirmCount) > 0" class="hub-metric hub-metric--amber">
-              <div class="hub-metric__body">
-                <span>待确认</span>
-                <b>{{ walletBoard.pendingConfirmCount }}</b>
-              </div>
-              <el-icon class="hub-metric__glyph" :size="40"><Warning /></el-icon>
-            </div>
+        <div v-show="accountTab === 'workbench'" v-if="walletBoard" class="hub-panel__board">
+          <div class="hub-panel__period" aria-label="统计周期">
+            <span class="hub-panel__period-label">周期</span>
+            <nav class="hub-period-tabs" role="tablist" aria-label="本月、上月或自定义周期">
+              <button
+                v-for="item in statsPeriodOptions"
+                :key="item.value"
+                type="button"
+                role="tab"
+                :aria-selected="statsPeriod === item.value"
+                :class="{ 'is-active': statsPeriod === item.value }"
+                @click="changeStatsPeriod(item.value)"
+              >{{ item.label }}</button>
+            </nav>
+            <el-date-picker
+              v-if="statsPeriod === 'CUSTOM'"
+              v-model="customStatsPeriod"
+              class="hub-panel__period-picker"
+              type="daterange"
+              unlink-panels
+              value-format="YYYY-MM-DD"
+              range-separator="至"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              :clearable="false"
+              @change="changeCustomStatsPeriod"
+            />
           </div>
           <div class="hub-panel__charts">
-            <WalletBoardCharts
-              :period="boardPeriod"
+            <AccountWorkbenchCharts
               :balance="walletBoard.balance"
-              :frozen="walletBoard.frozen"
               :available="walletBoard.available"
-              :trend="walletBoard.trend"
-              :source-breakdown="walletBoard.sourceBreakdown"
+              :frozen="walletBoard.frozen"
+              :income="periodIn"
+              :expense="periodOut"
+              :source-breakdown="periodSources"
               :biz-label="bizLabel"
-              @update:period="onBoardPeriod"
+              @open-freeze="openFreezeDetail"
             />
           </div>
         </div>
 
-        <div class="hub-panel__ledger-block">
+        <div v-show="accountTab === 'ledger'" class="hub-panel__ledger-block">
           <div class="hub-panel__ledger-head">
             <h4>流水明细</h4>
             <p>按时间、金额或摘要核对到账与扣款</p>
@@ -1441,8 +1637,8 @@ onUnmounted(() => {
       </template>
     </section>
 
-    <div class="task-cal-row">
-      <div class="task-panel-slot">
+    <div v-show="accountTab === 'workbench'" class="task-cal-row">
+      <div v-if="false" class="task-panel-slot" aria-hidden="true">
       <section class="page-card task-panel">
         <div class="sec-head">
           <div>
@@ -1589,15 +1785,16 @@ onUnmounted(() => {
       </div>
 
       <section class="page-card cal-section">
-        <div class="sec-head">
+        <div class="sec-head cal-section__head">
           <div>
             <h3>任务与考勤日历</h3>
             <p class="sec-tip">
-              点日期查看当天任务
-              <template v-if="canViewLeave">；橙色标记为已通过请假。本月请假 {{ monthLeaveCount }} 天（无记录视为全勤）</template>
+              点日期查看当天开始和截止的任务
+              <template v-if="canViewLeave">；按住拖选日期可申请请假。橙色标记为已通过请假。本月请假 {{ monthLeaveCount }} 天（无记录视为全勤）</template>
             </p>
           </div>
           <div class="sec-head-actions">
+            <el-button v-if="canViewLeave" plain type="warning" @click="openLeaveApply()">申请请假</el-button>
             <el-radio-group
               v-if="showTaskScopeToggle"
               v-model="taskScope"
@@ -1607,20 +1804,16 @@ onUnmounted(() => {
               <el-radio-button value="mine">我的</el-radio-button>
               <el-radio-button value="all">全部</el-radio-button>
             </el-radio-group>
-            <el-button
-              v-if="userStore.hasPermission('project:task:list')"
-              plain
-              type="primary"
-              @click="router.push('/project/task')"
-            >
-              去任务管理
-            </el-button>
           </div>
         </div>
         <div class="cal-wrap">
-          <el-calendar v-model="calendarDate">
+          <el-calendar v-model="calendarDate" :class="{ 'is-leave-drag': canViewLeave && calDragging }">
             <template #date-cell="{ data }">
-              <div :class="['cell', cellClass(data.day)]">
+              <div
+                :class="['cell', cellClass(data.day)]"
+                @pointerdown="onCalDayPointerDown(data.day, $event)"
+                @pointerenter="onCalDayPointerEnter(data.day)"
+              >
                 <span class="day-num">{{ data.day.split('-')[2] }}</span>
                 <em v-if="tasksByDay[data.day]" class="dot">{{ tasksByDay[data.day] }}</em>
                 <i v-if="leaveByDay[data.day]" class="leave-mark" title="请假" />
@@ -1639,6 +1832,11 @@ onUnmounted(() => {
                 <em>已记考勤</em>
               </div>
             </template>
+            <div class="day-task-summary" aria-label="当日任务统计">
+              <span><b>{{ dayStartingTasks.length }}</b> 项开始</span>
+              <span><b>{{ dayDueTasks.length }}</b> 项截止</span>
+              <span v-if="canViewLeave"><b>{{ dayLeaves.length ? '请假' : '正常' }}</b> 考勤</span>
+            </div>
             <h5 class="day-sub">任务</h5>
             <div
               v-for="t in dayTasks"
@@ -1648,15 +1846,36 @@ onUnmounted(() => {
             >
               <div>
                 <b>{{ t.title }}</b>
-                <span>{{ t.projectName || '—' }} · {{ t.participantNames?.length ? `参与人 ${t.participantNames.join('、')}` : '无参与人' }}</span>
+                <span>{{ taskDayLabel(t) }} · {{ t.projectName || '—' }} · {{ t.participantNames?.length ? `参与人 ${t.participantNames.join('、')}` : '无参与人' }}</span>
               </div>
               <em :class="{ overdue: t.overdue }">{{ t.statusLabel || t.status || '—' }}</em>
             </div>
-            <div v-if="!dayTasks.length && !(canViewLeave && dayLeaves.length)" class="empty">这一天没有到期任务</div>
+            <div v-if="!dayTasks.length && !(canViewLeave && dayLeaves.length)" class="empty">这一天没有开始或截止任务</div>
           </div>
         </div>
       </section>
     </div>
+
+    <el-dialog v-model="leaveDialog" title="请假申请" width="min(480px, calc(100vw - 24px))" :close-on-click-modal="false">
+      <el-form label-width="88px">
+        <el-form-item label="所属公司" required>
+          <el-select v-model="leaveForm.companyId" filterable placeholder="选择公司" style="width: 100%">
+            <el-option v-for="company in companies" :key="company.id" :label="company.name" :value="Number(company.id)" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="请假日期" required>
+          <el-date-picker v-model="leaveForm.dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至"
+            start-placeholder="开始日期" end-placeholder="结束日期" unlink-panels style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="请假事由" required>
+          <el-input v-model="leaveForm.reason" type="textarea" :rows="4" maxlength="300" show-word-limit placeholder="请填写请假事由" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="leaveDialog = false">取消</el-button>
+        <el-button type="primary" :loading="leaveSubmitting" @click="submitLeaveApply">提交审批</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="reimburseDialog" title="个人报销" width="480px" @closed="voucherFiles = []">
       <p class="sec-tip" style="margin: 0 0 12px">财务回执并由你确认到账后，只从公司总账扣款；个人钱包余额不变。收款方式用于线下打款。</p>
@@ -1927,9 +2146,14 @@ onUnmounted(() => {
 
 <style scoped>
 .account {
+  --account-inset-bg: rgba(255, 255, 255, 0.28);
+  --account-inset-border: rgba(255, 255, 255, 0.58);
+  --account-divider: rgba(24, 24, 27, 0.06);
+  --account-seg-bg: rgba(255, 255, 255, 0.24);
+  --account-seg-active: rgba(255, 255, 255, 0.78);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
 }
 
 .hub-panel {
@@ -1940,10 +2164,10 @@ onUnmounted(() => {
 
 .hub-panel__head {
   align-items: center;
-  gap: 16px;
+  gap: 14px 18px;
   margin-bottom: 0;
-  padding-bottom: 14px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--account-divider);
 }
 
 .hub-panel__shortcuts {
@@ -1956,25 +2180,81 @@ onUnmounted(() => {
   min-width: 0;
 }
 
+.hub-panel__tabs,
+.hub-period-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--account-inset-border);
+  border-radius: 12px;
+  background: var(--account-seg-bg);
+  min-width: 0;
+}
+
+.hub-panel__tabs button,
+.hub-period-tabs button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--kk-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s var(--kk-ease), background-color 0.15s var(--kk-ease), box-shadow 0.15s var(--kk-ease);
+}
+
+.hub-period-tabs button {
+  min-height: 30px;
+  padding: 0 12px;
+  font-weight: 550;
+}
+
+.hub-panel__tabs button.is-active,
+.hub-period-tabs button.is-active {
+  background: var(--account-seg-active);
+  color: var(--kk-text);
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.06);
+}
+
+.hub-panel__tabs button:hover:not(.is-active),
+.hub-period-tabs button:hover:not(.is-active) {
+  color: var(--kk-text);
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.hub-panel__tabs button:focus-visible,
+.hub-period-tabs button:focus-visible {
+  outline: 2px solid var(--kk-primary);
+  outline-offset: 2px;
+}
+
 .hub-panel__group {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 
 .hub-panel__group-label {
   flex-shrink: 0;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 650;
   color: var(--kk-text-muted);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
 }
 
 .hub-panel__group-divider {
   width: 1px;
-  height: 28px;
-  background: rgba(0, 0, 0, 0.08);
+  height: 26px;
+  background: var(--account-divider);
   flex-shrink: 0;
 }
 
@@ -1990,15 +2270,15 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  height: 40px;
-  padding: 0 14px 0 8px;
+  height: 38px;
+  padding: 0 13px 0 7px;
   border: 1px solid var(--kk-glass-border);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.42);
+  background: rgba(255, 255, 255, 0.4);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
   color: inherit;
   cursor: pointer;
-  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  transition: background 0.15s var(--kk-ease), box-shadow 0.15s var(--kk-ease), transform 0.15s var(--kk-ease);
 }
 
 .hub-chip::before {
@@ -2007,7 +2287,7 @@ onUnmounted(() => {
   left: 0;
   top: 0;
   bottom: 0;
-  width: 36px;
+  width: 34px;
   border-radius: 12px 0 0 12px;
   opacity: 0.22;
   pointer-events: none;
@@ -2027,15 +2307,15 @@ onUnmounted(() => {
 .hub-chip__icon {
   position: relative;
   z-index: 1;
-  width: 28px;
-  height: 28px;
-  border-radius: 9px;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: rgba(255, 255, 255, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.85);
 }
 
 .hub-chip__badge {
@@ -2077,108 +2357,30 @@ onUnmounted(() => {
 .hub-panel__board {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
-.hub-panel__metrics {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.hub-metric {
-  position: relative;
-  overflow: hidden;
+.hub-panel__period {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-  min-height: 92px;
-  padding: 16px 14px 16px 16px;
-  border-radius: var(--kk-radius-sm, 14px);
-  background: rgba(255, 255, 255, 0.42);
-  border: 1px solid var(--kk-glass-border);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03), 0 8px 22px rgba(0, 0, 0, 0.03);
-  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.15s ease;
-}
-
-.hub-metric::before {
-  content: "";
-  position: absolute;
-  right: -20px;
-  top: 50%;
-  width: 88px;
-  height: 88px;
-  border-radius: 50%;
-  transform: translateY(-50%);
-  filter: blur(28px);
-  opacity: 0.22;
-  pointer-events: none;
-}
-
-.hub-metric:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
-}
-
-.hub-metric__body {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  gap: 10px 12px;
   min-width: 0;
 }
 
-.hub-metric__body span {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--kk-text-secondary);
+.hub-panel__period-label {
+  flex: none;
+  color: var(--kk-text-muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
 }
 
-.hub-metric__body b {
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  font-variant-numeric: tabular-nums;
-  color: var(--kk-text);
-  line-height: 1.15;
-  white-space: nowrap;
-}
-
-.hub-metric__glyph {
-  position: relative;
-  z-index: 1;
-  flex-shrink: 0;
-  margin-right: -2px;
-}
-
-.hub-metric--indigo::before { background: #d4d4d8; }
-.hub-metric--cyan::before { background: #a5f3fc; }
-.hub-metric--violet::before { background: #ddd6fe; }
-.hub-metric--amber::before { background: #fde68a; }
-.hub-metric--rose::before { background: #fecdd3; }
-
-.hub-metric--indigo .hub-metric__glyph { color: var(--kk-primary); }
-.hub-metric--cyan .hub-metric__glyph { color: #0891b2; }
-.hub-metric--violet .hub-metric__glyph { color: #7c3aed; }
-.hub-metric--amber .hub-metric__glyph { color: #d97706; }
-.hub-metric--rose .hub-metric__glyph { color: #e11d48; }
-
-.hub-metric.is-clickable {
-  cursor: pointer;
-}
-
-.hub-metric.is-clickable:hover {
-  background: rgba(255, 255, 255, 0.55);
-}
-
-.hub-metric .metric-hint {
-  font-size: 11px;
-  font-style: normal;
-  color: var(--el-color-primary);
-  font-weight: 400;
+.hub-panel__period-picker,
+.hub-panel__period :deep(.hub-panel__period-picker.el-date-editor) {
+  width: 260px !important;
+  max-width: 100%;
+  flex: 0 0 260px;
 }
 
 .hub-panel__charts {
@@ -2188,7 +2390,7 @@ onUnmounted(() => {
 .hub-panel__ledger-block {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   padding-top: 2px;
 }
 
@@ -2196,7 +2398,7 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 8px 12px;
+  gap: 6px 12px;
 }
 
 .hub-panel__ledger-head h4 {
@@ -2223,8 +2425,8 @@ onUnmounted(() => {
   scrollbar-gutter: stable;
   padding: 4px;
   border-radius: var(--kk-radius-sm, 14px);
-  border: 1px solid rgba(255, 255, 255, 0.62);
-  background: rgba(255, 255, 255, 0.22);
+  border: 1px solid var(--account-inset-border);
+  background: var(--account-inset-bg);
 }
 
 .hub-panel__ledger :deep(.el-table) {
@@ -2241,8 +2443,8 @@ onUnmounted(() => {
 
 .task-cal-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
-  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
   align-items: stretch;
 }
 
@@ -2276,7 +2478,7 @@ onUnmounted(() => {
   margin-bottom: 14px;
   flex-shrink: 0;
   padding-bottom: 12px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  border-bottom: 1px solid var(--account-divider);
 }
 
 .task-panel__body {
@@ -2661,9 +2863,9 @@ onUnmounted(() => {
   justify-content: space-between;
   margin-bottom: 14px;
   padding: 12px 14px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.42);
-  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: var(--kk-radius-sm, 14px);
+  background: var(--account-inset-bg);
+  border: 1px solid var(--account-inset-border);
 }
 .freeze-head span {
   color: var(--kk-text-secondary);
@@ -2760,7 +2962,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
+  gap: 16px 20px;
+  padding: 2px 2px 0;
 }
 
 .welcome__text {
@@ -2769,8 +2972,8 @@ onUnmounted(() => {
 
 .welcome-title {
   margin: 0;
-  font-size: 26px;
-  font-weight: 700;
+  font-size: 24px;
+  font-weight: 600;
   letter-spacing: -0.03em;
   line-height: 1.2;
   color: var(--kk-text);
@@ -2781,7 +2984,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   font-size: 13px;
   font-weight: 500;
   color: var(--kk-text-secondary);
@@ -2808,6 +3011,13 @@ onUnmounted(() => {
   margin-bottom: 14px;
 }
 
+.cal-section__head {
+  align-items: center;
+  margin-bottom: 0;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--account-divider);
+}
+
 .sec-head-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2821,12 +3031,14 @@ onUnmounted(() => {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--kk-text);
 }
 
 .sec-tip {
   margin: 4px 0 0;
   font-size: 13px;
+  line-height: 1.45;
   color: var(--kk-text-secondary);
 }
 
@@ -2848,9 +3060,15 @@ onUnmounted(() => {
   color: var(--kk-primary-dark);
 }
 
+.cal-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
 .cal-wrap {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(240px, 1fr);
+  grid-template-columns: minmax(0, 1.55fr) minmax(240px, 1fr);
   gap: 16px;
   align-items: stretch;
 }
@@ -2861,7 +3079,7 @@ onUnmounted(() => {
 
 .cal-section :deep(.el-calendar__header) {
   padding: 0 0 12px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  border-bottom: 1px solid var(--account-divider);
 }
 
 .cal-section :deep(.el-calendar__body) {
@@ -2874,7 +3092,12 @@ onUnmounted(() => {
 }
 
 .cal-section :deep(.el-calendar-table td) {
-  border-color: rgba(0, 0, 0, 0.04);
+  border-color: rgba(24, 24, 27, 0.04);
+}
+
+.cal-section :deep(.el-calendar-table thead th) {
+  color: var(--kk-text-muted);
+  font-weight: 600;
 }
 
 .cell {
@@ -2882,11 +3105,12 @@ onUnmounted(() => {
   min-height: 44px;
   padding: 4px 6px;
   position: relative;
+  border-radius: 8px;
+  transition: background 0.15s var(--kk-ease);
 }
 
 .cell.has-task {
   background: rgba(24, 24, 27, 0.08);
-  border-radius: 8px;
   font-weight: 600;
   color: var(--kk-primary);
 }
@@ -2897,14 +3121,29 @@ onUnmounted(() => {
 }
 
 .cell.has-leave {
-  border-radius: 8px;
-  box-shadow: inset 0 0 0 1.5px rgba(180, 83, 9, 0.45);
+  box-shadow: inset 0 0 0 1.5px rgba(180, 83, 9, 0.4);
 }
 
 .cell.has-leave:not(.has-task) {
   background: rgba(245, 158, 11, 0.12);
   color: #b45309;
   font-weight: 600;
+}
+
+.cal-section :deep(.el-calendar.is-leave-drag) {
+  user-select: none;
+  cursor: crosshair;
+}
+
+.cal-section :deep(.el-calendar.is-leave-drag .el-calendar-day) {
+  cursor: crosshair;
+}
+
+.cell.is-drag-range {
+  background: rgba(24, 24, 27, 0.12) !important;
+  color: var(--kk-primary);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(24, 24, 27, 0.22);
 }
 
 .day-num { font-size: 13px; }
@@ -2938,8 +3177,8 @@ onUnmounted(() => {
 }
 
 .day-panel {
-  background: rgba(255, 255, 255, 0.28);
-  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: var(--account-inset-bg);
+  border: 1px solid var(--account-inset-border);
   border-radius: var(--kk-radius-sm);
   padding: 16px;
   min-height: 280px;
@@ -2950,8 +3189,9 @@ onUnmounted(() => {
 .day-sub {
   margin: 12px 0 8px;
   font-size: 12px;
-  font-weight: 600;
-  color: #64748b;
+  font-weight: 650;
+  color: var(--kk-text-muted);
+  letter-spacing: 0.04em;
 }
 
 .day-panel > .day-sub:first-of-type {
@@ -2965,7 +3205,33 @@ onUnmounted(() => {
 .day-panel h4 {
   margin: 0 0 10px;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 650;
+  color: var(--kk-text);
+}
+
+.day-task-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0 14px;
+}
+
+.day-task-summary span {
+  padding: 9px 8px;
+  border: 1px solid var(--account-inset-border);
+  border-radius: 10px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--kk-text-muted);
+  background: rgba(255, 255, 255, 0.36);
+}
+
+.day-task-summary b {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 15px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
   color: var(--kk-text);
 }
 
@@ -2977,10 +3243,11 @@ onUnmounted(() => {
   gap: 12px;
   align-items: center;
   padding: 10px 0;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  border-bottom: 1px solid var(--account-divider);
   cursor: pointer;
 }
 
+.row:last-child { border-bottom: 0; }
 .row:hover b { color: var(--kk-primary); }
 .row b { display: block; font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row span { display: block; font-size: 12px; color: var(--kk-text-muted); margin-top: 2px; }
@@ -3008,10 +3275,6 @@ onUnmounted(() => {
     align-items: stretch;
   }
 
-  .hub-panel__metrics {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .task-cal-row { grid-template-columns: 1fr; }
   .task-panel-slot {
     min-height: 420px;
@@ -3036,6 +3299,12 @@ onUnmounted(() => {
 }
 
 @media (max-width: 640px) {
+  .account {
+    gap: 14px;
+  }
+  .welcome-title {
+    font-size: 22px;
+  }
   .task-panel__item--priority {
     grid-template-columns: 22px 72px minmax(0, 1fr);
   }
@@ -3047,27 +3316,48 @@ onUnmounted(() => {
     text-align: left;
   }
   .hub-panel__head {
-    align-items: flex-start;
+    flex-direction: column;
+    align-items: stretch;
   }
   .hub-panel__shortcuts {
     justify-content: flex-start;
     width: 100%;
   }
-  .hub-panel__metrics {
-    grid-template-columns: 1fr 1fr;
+  .hub-panel__period {
+    width: 100%;
   }
-  .hub-metric__body b {
-    font-size: 17px;
+  .hub-period-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    flex: 1;
+  }
+  .hub-period-tabs button {
+    width: 100%;
+  }
+  .hub-panel__period-picker,
+  .hub-panel__period :deep(.hub-panel__period-picker.el-date-editor) {
+    width: 260px !important;
+    flex: 0 0 260px;
+  }
+  .day-task-summary {
+    grid-template-columns: 1fr;
   }
 }
 
 @media (prefers-reduced-transparency: reduce) {
+  .account {
+    --account-inset-bg: #fff;
+    --account-inset-border: var(--kk-card-border);
+    --account-seg-bg: #f4f4f5;
+    --account-seg-active: #fff;
+  }
+
   .filter-bar,
   .day-panel,
   .hub-panel__board,
-  .hub-metric,
   .hub-chip,
-  .hub-panel__ledger {
+  .hub-panel__ledger,
+  .day-task-summary span {
     background: #fff;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;

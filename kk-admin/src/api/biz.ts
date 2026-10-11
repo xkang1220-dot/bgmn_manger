@@ -184,11 +184,17 @@ export const bizApi = {
   projectPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/project/page', method: 'get', params })
   },
+  projectOrder() {
+    return request<number[]>({ url: '/project/order', method: 'get' })
+  },
+  saveProjectOrder(itemIds: number[]) {
+    return request<void>({ url: '/project/order', method: 'put', data: { itemIds } })
+  },
   projectList() {
     return request<any[]>({ url: '/project/list', method: 'get' })
   },
-  taskManagementProjects() {
-    return request<any[]>({ url: '/project/task-options', method: 'get' })
+  taskManagementProjects(scope: 'mine' | 'all' = 'mine') {
+    return request<any[]>({ url: '/project/task-options', method: 'get', params: { scope } })
   },
   myProjects() {
     return request<any[]>({ url: '/project/mine', method: 'get' })
@@ -227,6 +233,35 @@ export const bizApi = {
   },
   taskPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/task/page', method: 'get', params })
+  },
+  projectResources(id: number) {
+    return request<any>({ url: `/project/${id}/resources`, method: 'get' })
+  },
+  projectTaskStats(id: number) {
+    return request<any>({ url: `/project/${id}/task-stats`, method: 'get' })
+  },
+  saveProjectLink(projectId: number, data: any) {
+    return request<any>({ url: `/project/${projectId}/links`, method: 'post', data })
+  },
+  deleteProjectLink(projectId: number, linkId: number) {
+    return request<void>({ url: `/project/${projectId}/links/${linkId}`, method: 'delete' })
+  },
+  uploadProjectResource(projectId: number, file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return request<any>({
+      url: `/project/${projectId}/files`, method: 'post', data: form,
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 10 * 60 * 1000,
+    })
+  },
+  deleteProjectResource(projectId: number, fileId: number) {
+    return request<void>({ url: `/project/${projectId}/files/${fileId}`, method: 'delete' })
+  },
+  taskOrder(projectId?: number) {
+    return request<number[]>({ url: '/task/order', method: 'get', params: { projectId } })
+  },
+  saveTaskOrder(projectId: number | undefined, itemIds: Array<number | string>) {
+    return request<void>({ url: '/task/order', method: 'put', data: { scopeId: projectId, itemIds } })
   },
   managementTaskPage(params: Record<string, unknown>) {
     return request<PageResult<any>>({ url: '/task/management/page', method: 'get', params })
@@ -268,8 +303,8 @@ export const bizApi = {
   }) {
     return request<any>({ url: '/task/management/dashboard', method: 'get', params: params || {} })
   },
-  taskDetail(id: number) {
-    return request<any>({ url: `/task/${id}`, method: 'get' })
+  taskDetail(id: number, scope?: 'mine' | 'all') {
+    return request<any>({ url: `/task/${id}`, method: 'get', params: { scope } })
   },
   saveTask(data: any, isEdit: boolean) {
     return request<void>({ url: '/task', method: isEdit ? 'put' : 'post', data })
@@ -303,7 +338,7 @@ export const bizApi = {
   taskFlows(taskId: number) {
     return request<any[]>({ url: `/task/${taskId}/flows`, method: 'get' })
   },
-  transferTask(taskId: number, data: { assigneeId: number; remark?: string; imageFileIds?: number[] }) {
+  transferTask(taskId: number, data: { holderId: number; remark?: string; imageFileIds?: number[] }) {
     return request<void>({ url: `/task/${taskId}/transfer`, method: 'put', data })
   },
   uploadTaskImage(file: File) {
@@ -385,6 +420,9 @@ export const bizApi = {
   },
   myLeave(params?: { companyId?: number; start?: string; end?: string }) {
     return request<any[]>({ url: '/hr/leave/mine', method: 'get', params })
+  },
+  submitLeave(data: { companyId: number; startDate: string; endDate: string; reason: string }) {
+    return request<any>({ url: '/hr/leave/mine', method: 'post', data })
   },
   attendance(params: { start?: string; end?: string }) {
     return request<any[]>({ url: '/hr/leave/attendance', method: 'get', params })

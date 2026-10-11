@@ -1,20 +1,22 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Link, Plus } from '@element-plus/icons-vue'
+import { Link } from '@element-plus/icons-vue'
 import type { UploadFile, UploadProps } from 'element-plus'
 import { bizApi } from '@/api/biz'
 import { useUserStore } from '@/stores/user'
 import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 import RichTextEditor from '@/components/common/RichTextEditor.vue'
+import SubtaskTimeline from '@/components/task/SubtaskTimeline.vue'
 
 const props = defineProps<{
   modelValue: boolean
   taskId?: number | null
   /** 从列表操作栏打开时要直接执行的动作 */
-  initialAction?: 'view' | 'edit' | 'transfer' | 'close'
+  initialAction?: 'view' | 'edit' | 'transfer' | 'close' | 'subtask'
   /** 新建时默认项目 */
   defaultProjectId?: number | null
+  taskScope?: 'mine' | 'all'
 }>()
 
 const emit = defineEmits<{
@@ -47,6 +49,23 @@ const creatableProjects = computed(() => {
     return !(scale === 'MAJOR' && !project.parentId)
   })
 })
+
+const selectedProject = computed(() =>
+  projects.value.find((project) => Number(project.id) === Number(form.projectId)),
+)
+
+/** 任务报酬仅对重点 / 重大（含重大下的小项目）展示 */
+const showTaskReward = computed(() => {
+  if (!isTaskManager.value) return false
+  const project = selectedProject.value
+  if (!project) return false
+  const scale = String(project.scale || '').toUpperCase()
+  if (scale === 'KEY' || scale === 'MAJOR') return true
+  if (project.parentId == null) return false
+  const parent = projects.value.find((item) => Number(item.id) === Number(project.parentId))
+  const parentScale = String(parent?.scale || '').toUpperCase()
+  return parentScale === 'MAJOR' || parentScale === 'KEY'
+})
 const candidateUsers = ref<any[]>([])
 const candidateProjectId = ref<number | undefined>(undefined)
 const detail = ref<any>(null)
@@ -64,20 +83,23 @@ const previewIsVideo = ref(false)
 const transferDialog = ref(false)
 const transferring = ref(false)
 const transferForm = reactive({
-  assigneeId: undefined as number | undefined,
+  holderId: undefined as number | undefined,
   remark: '',
   imageFileIds: [] as number[],
 })
 const transferImages = ref<any[]>([])
 const transferUploading = ref(false)
 const detailPane = ref('comments')
-const pendingAction = ref<'view' | 'edit' | 'transfer' | 'close'>('view')
+const subtaskParentTitle = ref('')
+const pendingAction = ref<'view' | 'edit' | 'transfer' | 'close' | 'subtask'>('view')
 
 const form = reactive<any>({
   id: undefined,
   title: '',
   projectId: undefined,
+  parentTaskId: undefined,
   assigneeId: undefined,
+  holderId: undefined,
   participantIds: [] as number[],
   status: 0,
   priority: 2,
@@ -99,13 +121,19 @@ const statusType: Record<number, '' | 'success' | 'warning' | 'info' | 'danger'>
   4: 'warning',
 }
 
+function hasUnfinishedChildren(task: any = detail.value) {
+  return (task?.children || []).some((child: any) => child.status !== 2)
+}
+
 function emptyForm() {
   const selfId = userStore.user?.id as number | undefined
   return {
     id: undefined,
     title: '',
     projectId: props.defaultProjectId != null ? Number(props.defaultProjectId) : undefined,
+    parentTaskId: undefined,
     assigneeId: selfId,
+    holderId: selfId,
     participantIds: selfId != null ? [selfId] : ([] as number[]),
     status: 0,
     priority: 2,
@@ -128,11 +156,18 @@ function imageUrl(file: { id?: number; url?: string }) {
   return url || ''
 }
 
-function isVideoFile(file: { contentType?: string; name?: string; originalName?: string; url?: string }) {
-  const type = file.contentType || ''
+function isVideoFile(file: { contentType?: string; type?: string; name?: string; originalName?: string; url?: string }) {
+  const type = file.contentType || file.type || ''
   if (type.startsWith('video/')) return true
   const name = file.originalName || file.name || file.url || ''
   return /\.(mp4|webm|mov|m4v|avi|mkv)(\?|$)/i.test(name)
+}
+
+function isImageFile(file: { contentType?: string; type?: string; name?: string; originalName?: string; url?: string }) {
+  const type = file.contentType || file.type || ''
+  if (type.startsWith('image/')) return true
+  const name = file.originalName || file.name || file.url || ''
+  return /\.(png|jpe?g|gif|webp|bmp|svg|ico|heic|avif)(\?|$)/i.test(name)
 }
 
 function toUploadFile(file: any): UploadFile {
@@ -178,7 +213,7 @@ async function loadDetail(id: number) {
       projects.value = (await bizApi.taskManagementProjects()) || []
     }
     const [full, commentList, flowList] = await Promise.all([
-      bizApi.taskDetail(id),
+      bizApi.taskDetail(id, props.taskScope),
       bizApi.taskComments(id),
       bizApi.taskFlows(id),
     ])
@@ -205,9 +240,11 @@ async function loadDetail(id: number) {
   if (action === 'edit') editing.value = true
   else if (action === 'transfer') await openTransfer()
   else if (action === 'close') await closeTask()
+  else if (action === 'subtask') await startSubtask()
 }
 
 async function openCreate() {
+  subtaskParentTitle.value = ''
   detail.value = null
   Object.assign(form, emptyForm())
   imageFileList.value = []
@@ -264,6 +301,7 @@ async function loadProjectCandidates(projectId?: number) {
   }
   candidateUsers.value = [...map.values()]
   if (form.assigneeId == null && d.ownerId != null) form.assigneeId = Number(d.ownerId)
+  if (form.holderId == null && d.ownerId != null) form.holderId = Number(d.ownerId)
   candidateProjectId.value = projectId
   const have = new Set(candidateUsers.value.map((u) => Number(u.id)))
   const ids = form.participantIds || []
@@ -321,6 +359,29 @@ async function ensureOptions() {
   await loadProjectCandidates(form.projectId)
 }
 
+async function startSubtask() {
+  if (!detail.value?.id) return
+  const parent = detail.value.parentTaskId
+    ? { id: detail.value.parentTaskId, title: detail.value.parentTaskTitle, projectId: detail.value.projectId }
+    : detail.value
+  Object.assign(form, emptyForm(), {
+    projectId: parent.projectId,
+    parentTaskId: parent.id,
+  })
+  subtaskParentTitle.value = parent.title || `任务 ${parent.id}`
+  detail.value = null
+  comments.value = []
+  flows.value = []
+  imageFileList.value = []
+  editing.value = true
+  isNew.value = true
+  await ensureOptions()
+}
+
+function openChildTask(task: { id: number }) {
+  void loadDetail(Number(task.id))
+}
+
 watch(
   () => form.projectId,
   async (pid) => {
@@ -331,11 +392,13 @@ watch(
         candidateUsers.value.filter(isEligibleCandidate).map((u) => Number(u.id)),
       )
       form.participantIds = (form.participantIds || []).filter((id: number) => allowed.has(Number(id)))
+      if (form.holderId != null && !allowed.has(Number(form.holderId))) form.holderId = undefined
       const selfId = userStore.user?.id
       if (selfId != null && allowed.has(Number(selfId)) && !form.participantIds.includes(selfId)) {
         form.participantIds = [...form.participantIds, selfId]
       }
     }
+    if (!showTaskReward.value) form.taskReward = undefined
   },
 )
 
@@ -379,7 +442,11 @@ async function save() {
     ElMessage.warning('请选择任务负责人')
     return
   }
-  if (isTaskManager.value && form.taskReward != null && Number(form.taskReward) < 0) {
+  if (!form.holderId) {
+    ElMessage.warning('请选择任务持有人')
+    return
+  }
+  if (showTaskReward.value && form.taskReward != null && Number(form.taskReward) < 0) {
     ElMessage.warning('任务报酬不能小于 0')
     return
   }
@@ -391,19 +458,29 @@ async function save() {
     ElMessage.warning('参与人须为项目负责人或项目参与人，请先移除无效人员')
     return
   }
+  if (!eligibleIds.has(Number(form.holderId))) {
+    ElMessage.warning('持有人须为项目负责人或项目参与人')
+    return
+  }
   syncImageFileIds()
   saving.value = true
   try {
     const payload = { ...form }
+    // 新建任务统一从“待办”开始；后续状态流转从列表“更多”操作进入并二次确认。
+    if (isNew.value) payload.status = 0
     // 去掉仅展示用字段，避免污染请求体
     delete payload.assigneeName
+    delete payload.holderName
     delete payload.canTransfer
     delete payload.canEdit
     delete payload.participantNames
     delete payload.projectName
+    delete payload.parentTaskTitle
+    delete payload.children
     delete payload.overdue
     delete payload.images
     if (!isTaskManager.value) delete payload.taskReward
+    else if (!showTaskReward.value) payload.taskReward = null
     await bizApi.saveTask(payload, !isNew.value && !!form.id)
     ElMessage.success('保存成功')
     emit('saved')
@@ -420,6 +497,10 @@ async function save() {
 async function closeTask() {
   if (!form.id || closing.value) return
   if (detail.value?.status === 3) return
+  if (hasUnfinishedChildren()) {
+    ElMessage.warning('请先完成所有子任务，再关闭父任务')
+    return
+  }
   let reason = ''
   try {
     const { value } = await ElMessageBox.prompt('关闭后状态为「已关闭」，任务不会删除。请填写关闭原因。', '关闭任务', {
@@ -451,6 +532,10 @@ async function closeTask() {
 
 async function reviewCompletion(approved: boolean) {
   if (!detail.value?.id || reviewing.value) return
+  if (approved && hasUnfinishedChildren()) {
+    ElMessage.warning('请先完成所有子任务，再确认完成父任务')
+    return
+  }
   let remark = ''
   try {
     if (approved) {
@@ -481,7 +566,7 @@ async function reviewCompletion(approved: boolean) {
 
 async function openTransfer() {
   await loadProjectCandidates(form.projectId || detail.value?.projectId)
-  transferForm.assigneeId = undefined
+  transferForm.holderId = undefined
   transferForm.remark = ''
   transferForm.imageFileIds = []
   transferImages.value = []
@@ -498,8 +583,8 @@ function onTransferDialogClose() {
 }
 
 const transferCandidates = computed(() => {
-  const joined = new Set((detail.value?.participantIds || []).map((id: number) => Number(id)))
-  return candidateUsers.value.filter((u) => isEligibleCandidate(u) && !joined.has(Number(u.id)))
+  const currentHolderId = Number(detail.value?.holderId)
+  return candidateUsers.value.filter((u) => isEligibleCandidate(u) && Number(u.id) !== currentHolderId)
 })
 
 async function onUploadTransferImage(options: any) {
@@ -519,14 +604,14 @@ async function onUploadTransferImage(options: any) {
 
 async function submitTransfer() {
   if (!form.id) return
-  if (!transferForm.assigneeId) {
+  if (!transferForm.holderId) {
     ElMessage.warning('请选择移交对象')
     return
   }
   transferring.value = true
   try {
     await bizApi.transferTask(form.id, {
-      assigneeId: transferForm.assigneeId,
+      holderId: transferForm.holderId,
       remark: transferForm.remark || undefined,
       imageFileIds: transferForm.imageFileIds.length ? transferForm.imageFileIds : undefined,
     })
@@ -540,19 +625,17 @@ async function submitTransfer() {
 }
 
 async function onUploadImage(options: any) {
+  if (imageFileList.value.length >= 9) {
+    ElMessage.warning('最多上传 9 个附件')
+    options.onError?.(new Error('附件数量超限'))
+    return
+  }
   uploading.value = true
   try {
     const file = await bizApi.uploadTaskImage(options.file)
-    options.onSuccess?.(file)
-    await nextTick()
-    const item = imageFileList.value.find((f) => f.uid === options.file.uid) as (UploadFile & { contentType?: string }) | undefined
-    if (item) {
-      item.url = imageUrl(file)
-      item.uid = file.id
-      item.name = file.originalName || item.name
-      item.contentType = file.contentType
-    }
+    imageFileList.value.push(toUploadFile(file))
     syncImageFileIds()
+    options.onSuccess?.(file)
     ElMessage.success('附件上传成功')
   } catch (e: any) {
     ElMessage.error(e.message || '附件上传失败')
@@ -564,14 +647,7 @@ async function onUploadImage(options: any) {
 
 const MAX_ATTACH_MB = 500
 
-const beforeImageUpload: UploadProps['beforeUpload'] = (file) => {
-  const name = file.name || ''
-  const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name)
-  const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|m4v|avi|mkv)$/i.test(name)
-  if (!isImage && !isVideo) {
-    ElMessage.warning('仅支持上传图片或视频')
-    return false
-  }
+const beforeAttachUpload: UploadProps['beforeUpload'] = (file) => {
   if (file.size / 1024 / 1024 > MAX_ATTACH_MB) {
     ElMessage.warning(`单个附件不能超过 ${MAX_ATTACH_MB}MB`)
     return false
@@ -594,12 +670,19 @@ async function onRemoveImage(uploadFile: UploadFile) {
 }
 
 function onPreviewImage(uploadFile: UploadFile) {
-  previewUrl.value = uploadFile.url || ''
-  previewIsVideo.value = isVideoFile({
+  const meta = {
     contentType: (uploadFile as any).contentType,
     name: uploadFile.name,
     url: uploadFile.url,
-  })
+  }
+  if (!isImageFile(meta) && !isVideoFile(meta)) {
+    const href = uploadFile.url || (uploadFile.uid != null ? `/api/file/download/${uploadFile.uid}` : '')
+    if (href) window.open(href, '_blank', 'noopener')
+    else ElMessage.info('该文件类型暂不支持预览，请下载后查看')
+    return
+  }
+  previewUrl.value = uploadFile.url || ''
+  previewIsVideo.value = isVideoFile(meta)
   previewVisible.value = true
 }
 
@@ -666,16 +749,14 @@ function commentAttachmentUrl(file: any, preview = false) {
   <el-drawer
     v-model="visible"
     :title="isNew ? '新建任务' : editing ? '编辑任务' : '任务详情'"
-    size="min(680px, 100vw)"
+    size="min(820px, 100vw)"
     class="task-drawer"
     destroy-on-close
     append-to-body
   >
     <template #header>
       <div class="drawer-heading">
-        <span class="drawer-heading__eyebrow">TASK MANAGEMENT</span>
         <h2>{{ isNew ? '新建任务' : editing ? '编辑任务' : '任务详情' }}</h2>
-        <p v-if="editing">补全任务信息，让协作目标和交付节点更清晰。</p>
       </div>
     </template>
     <div v-loading="loading" class="task-detail">
@@ -692,7 +773,9 @@ function commentAttachmentUrl(file: any, preview = false) {
 
         <el-descriptions :column="1" border class="detail-desc">
           <el-descriptions-item label="项目">{{ detail.projectName || '—' }}</el-descriptions-item>
+          <el-descriptions-item v-if="detail.parentTaskId" label="父任务">{{ detail.parentTaskTitle || `任务 ${detail.parentTaskId}` }}</el-descriptions-item>
           <el-descriptions-item label="负责人">{{ detail.assigneeName || '未指定' }}</el-descriptions-item>
+          <el-descriptions-item label="持有人">{{ detail.holderName || '未指定' }}</el-descriptions-item>
           <el-descriptions-item label="参与人员">
             {{ detail.participantNames?.length ? detail.participantNames.join('、') : '无' }}
           </el-descriptions-item>
@@ -733,11 +816,9 @@ function commentAttachmentUrl(file: any, preview = false) {
           </div>
         </div>
 
-        <div class="detail-actions">
-          <template v-if="userStore.hasPermission('project:task:confirm') && detail.status === 4">
-            <el-button type="success" :loading="reviewing" @click="reviewCompletion(true)">确认完成</el-button>
-            <el-button type="danger" plain :disabled="reviewing" @click="reviewCompletion(false)">驳回</el-button>
-          </template>
+        <div v-if="userStore.hasPermission('project:task:confirm') && detail.status === 4" class="detail-actions">
+          <el-button type="success" :loading="reviewing" @click="reviewCompletion(true)">确认完成</el-button>
+          <el-button type="danger" plain :disabled="reviewing" @click="reviewCompletion(false)">驳回</el-button>
         </div>
 
         <div class="section comments">
@@ -783,8 +864,23 @@ function commentAttachmentUrl(file: any, preview = false) {
               </div>
             </el-tab-pane>
 
-            <el-tab-pane :label="`流转${flows.length ? ` (${flows.length})` : ''}`" name="flows">
-              <ol v-if="flows.length" class="flow-timeline" aria-label="任务流转记录">
+            <el-tab-pane
+              v-if="!detail.parentTaskId"
+              :label="`子任务${detail.children?.length ? ` (${detail.children.length})` : ''}`"
+              name="subtasks"
+            >
+              <SubtaskTimeline
+                :tasks="detail.children || []"
+                :parent-start-date="detail.startDate"
+                :parent-started-at="detail.startedAt"
+                :parent-completed-at="detail.completedAt"
+                :parent-status="detail.status"
+                @open="openChildTask"
+              />
+            </el-tab-pane>
+
+            <el-tab-pane :label="`操作记录${flows.length ? ` (${flows.length})` : ''}`" name="flows">
+              <ol v-if="flows.length" class="flow-timeline" aria-label="任务操作记录">
                 <li v-for="f in flows" :key="f.id" class="flow-entry">
                   <span class="flow-dot" aria-hidden="true" />
                   <article class="flow-card">
@@ -797,6 +893,7 @@ function commentAttachmentUrl(file: any, preview = false) {
                       <time class="flow-time" :datetime="f.createTime">{{ fmtTime(f.createTime) }}</time>
                     </header>
                     <div class="flow-summary">{{ f.summary }}</div>
+                    <div v-if="f.taskTitle && f.taskId !== detail.id" class="flow-task-name">关联任务：{{ f.taskTitle }}</div>
                     <div v-if="f.remark" class="flow-remark">
                       <span class="flow-remark-label">说明</span>
                       <span>{{ f.remark }}</span>
@@ -810,7 +907,7 @@ function commentAttachmentUrl(file: any, preview = false) {
                   </article>
                 </li>
               </ol>
-              <div v-else class="comment-empty">暂无流转记录</div>
+              <div v-else class="comment-empty">暂无操作记录</div>
             </el-tab-pane>
           </el-tabs>
         </div>
@@ -822,10 +919,13 @@ function commentAttachmentUrl(file: any, preview = false) {
           <section class="form-section form-section--primary">
             <div class="form-section__head">
               <span class="form-section__index">01</span>
-              <div><h3>基本信息</h3><p>明确任务目标及所属项目</p></div>
+              <h3>基本信息</h3>
             </div>
             <el-form-item label="任务标题" required class="title-field">
-              <el-input v-model="form.title" size="large" placeholder="例如：完成十月运营数据复盘" maxlength="128" show-word-limit />
+              <el-input v-model="form.title" size="large" placeholder="请输入任务标题" maxlength="128" show-word-limit />
+            </el-form-item>
+            <el-form-item v-if="form.parentTaskId" label="父任务">
+              <el-input :model-value="subtaskParentTitle" disabled />
             </el-form-item>
             <el-form-item label="所属项目" required>
               <ProjectCascadeSelect
@@ -839,18 +939,22 @@ function commentAttachmentUrl(file: any, preview = false) {
                 :clearable="false"
                 :disabled="!!defaultProjectId && isNew"
               />
-              <span class="field-help">选择项目后，将自动加载该项目的可选成员。</span>
             </el-form-item>
           </section>
 
           <section class="form-section">
             <div class="form-section__head">
               <span class="form-section__index">02</span>
-              <div><h3>协作与进度</h3><p>安排负责人、参与成员和当前状态</p></div>
+              <h3>协作与进度</h3>
             </div>
             <div class="form-grid">
               <el-form-item label="负责人" required>
                 <el-select v-model="form.assigneeId" filterable placeholder="选择唯一交付责任人" style="width: 100%">
+                  <el-option v-for="u in candidateUsers.filter(isEligibleCandidate)" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="持有人" required>
+                <el-select v-model="form.holderId" filterable placeholder="选择唯一持有人" style="width: 100%">
                   <el-option v-for="u in candidateUsers.filter(isEligibleCandidate)" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
                 </el-select>
               </el-form-item>
@@ -867,11 +971,10 @@ function commentAttachmentUrl(file: any, preview = false) {
                 </el-radio-group>
               </el-form-item>
               <el-form-item label="任务状态">
-                <el-radio-group v-model="form.status" class="option-cards">
-                  <el-radio-button :value="0">待办</el-radio-button>
-                  <el-radio-button :value="1">进行中</el-radio-button>
-                  <el-radio-button :value="2">完成</el-radio-button>
-                </el-radio-group>
+                <el-tag :type="statusType[isNew ? 0 : form.status]" effect="light">
+                  {{ statusMap[isNew ? 0 : form.status] || '待办' }}
+                </el-tag>
+                <span v-if="isNew" class="field-help">新建任务默认保存为待办</span>
               </el-form-item>
             </div>
           </section>
@@ -879,7 +982,7 @@ function commentAttachmentUrl(file: any, preview = false) {
           <section class="form-section">
             <div class="form-section__head">
               <span class="form-section__index">03</span>
-              <div><h3>计划与交付</h3><p>设置周期，并补充任务说明</p></div>
+              <h3>计划与交付</h3>
             </div>
             <div class="form-grid">
               <el-form-item label="开始日期">
@@ -889,55 +992,39 @@ function commentAttachmentUrl(file: any, preview = false) {
                 <el-date-picker v-model="form.dueDate" value-format="YYYY-MM-DD" placeholder="选择截止日期" style="width: 100%" :disabled-date="disableDueDate" />
               </el-form-item>
             </div>
-            <el-form-item v-if="isTaskManager" label="任务报酬">
+            <el-form-item v-if="showTaskReward" label="任务报酬">
               <el-input-number v-model="form.taskReward" :min="0" :max="999999999999.99" :precision="2" :step="100" controls-position="right" placeholder="请输入任务报酬" style="width: 100%" />
-              <span class="field-help">仅任务管理员可查看和调整，最多保留两位小数。</span>
             </el-form-item>
             <el-form-item label="任务描述">
-              <RichTextEditor v-model="form.content" :min-height="150" placeholder="补充任务背景、交付标准或注意事项…" />
+              <RichTextEditor v-model="form.content" :min-height="150" placeholder="请输入任务描述" />
             </el-form-item>
             <el-form-item label="相关附件" class="attachment-field">
-            <el-upload
-              v-model:file-list="imageFileList"
-              list-type="picture-card"
-              accept="image/*,video/*"
-              :limit="9"
-              :http-request="onUploadImage"
-              :before-upload="beforeImageUpload"
-              :on-remove="onRemoveImage"
-              :on-preview="onPreviewImage"
-            >
-              <div class="upload-trigger">
-                <el-icon><Plus /></el-icon>
-                <div><strong>添加附件</strong><span>点击选择图片或视频</span></div>
-              </div>
-              <template #file="{ file }">
-                <div class="attach-card">
-                  <video
-                    v-if="isVideoFile(file as any)"
-                    class="attach-card__media"
-                    :src="file.url"
-                    muted
-                    preload="metadata"
-                  />
-                  <img v-else class="attach-card__media" :src="file.url" alt="" />
-                  <span class="attach-card__actions">
-                    <span class="attach-card__btn" @click.stop="onPreviewImage(file)">预览</span>
-                    <span class="attach-card__btn is-danger" @click.stop="handleAttachRemove(file)">删除</span>
-                  </span>
+              <div v-if="imageFileList.length" class="pending-attachments">
+                <div v-for="file in imageFileList" :key="file.uid" class="pending-attachment">
+                  <a href="javascript:;" @click.prevent="onPreviewImage(file)">
+                    <el-icon><Link /></el-icon>
+                    <span>{{ file.name || `附件 ${file.uid}` }}</span>
+                  </a>
+                  <el-button link type="danger" size="small" @click="handleAttachRemove(file)">移除</el-button>
                 </div>
-              </template>
-            </el-upload>
-            <div class="upload-tip">支持图片、视频，单个不超过 {{ MAX_ATTACH_MB }}MB，最多 9 个</div>
+              </div>
+              <div class="form-attach-actions">
+                <el-upload
+                  :show-file-list="false"
+                  :http-request="onUploadImage"
+                  :before-upload="beforeAttachUpload"
+                  :disabled="uploading || imageFileList.length >= 9"
+                >
+                  <el-button :loading="uploading" plain>上传附件</el-button>
+                </el-upload>
+                <span class="attachment-tip">不限格式，最多 9 个，单个不超过 {{ MAX_ATTACH_MB }}MB</span>
+              </div>
             </el-form-item>
           </section>
         </el-form>
         <div class="form-actions">
-          <span class="form-actions__hint"><i aria-hidden="true" />带星号的项目为必填项</span>
-          <div>
-            <el-button @click="cancelEdit">取消</el-button>
-            <el-button type="primary" :loading="saving" @click="save">{{ isNew ? '创建任务' : '保存修改' }}</el-button>
-          </div>
+          <el-button @click="cancelEdit">取消</el-button>
+          <el-button type="primary" :loading="saving" @click="save">{{ isNew ? '创建任务' : '保存修改' }}</el-button>
         </div>
       </template>
     </div>
@@ -955,7 +1042,7 @@ function commentAttachmentUrl(file: any, preview = false) {
     <el-dialog v-model="transferDialog" title="移交任务" width="420px" append-to-body @close="onTransferDialogClose">
       <el-form label-width="84px">
         <el-form-item label="移交给" required>
-          <el-select v-model="transferForm.assigneeId" filterable placeholder="移交给项目负责人或参与人" style="width: 100%">
+          <el-select v-model="transferForm.holderId" filterable placeholder="选择新的任务持有人" style="width: 100%">
             <el-option
               v-for="u in transferCandidates"
               :key="u.id"
@@ -963,14 +1050,14 @@ function commentAttachmentUrl(file: any, preview = false) {
               :value="u.id"
             />
           </el-select>
-          <div v-if="!transferCandidates.length" class="transfer-empty-hint">项目内可选人员均已是任务参与人，无需移交</div>
+          <div v-if="!transferCandidates.length" class="transfer-empty-hint">暂无其他可选持有人</div>
         </el-form-item>
         <el-form-item label="说明">
           <el-input v-model="transferForm.remark" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="可选，写明移交原因" />
         </el-form-item>
         <el-form-item label="附件">
-          <el-upload :show-file-list="false" :http-request="onUploadTransferImage" :before-upload="beforeImageUpload" accept="image/*,video/*">
-            <el-button :loading="transferUploading">上传图片/视频</el-button>
+          <el-upload :show-file-list="false" :http-request="onUploadTransferImage" :before-upload="beforeAttachUpload">
+            <el-button :loading="transferUploading">上传附件</el-button>
           </el-upload>
           <div v-if="transferImages.length" class="flow-images" style="margin-top: 8px">
             <template v-for="(img, i) in transferImages" :key="img.id || i">
@@ -1001,18 +1088,28 @@ function commentAttachmentUrl(file: any, preview = false) {
 </template>
 
 <style scoped>
-:global(.task-drawer) {
-  --task-accent: var(--el-color-primary, #2563eb);
-  --task-border: #e5eaf2;
-  --task-muted: #64748b;
-  background: #f6f8fb;
+:global(.task-drawer.el-drawer) {
+  --task-accent: var(--kk-primary);
+  --task-border: rgba(24, 24, 27, 0.08);
+  --task-muted: var(--kk-text-muted);
+  background: var(--kk-glass-overlay-bg);
+  -webkit-backdrop-filter: var(--kk-glass-overlay-blur);
+  backdrop-filter: var(--kk-glass-overlay-blur);
+  border-radius: var(--kk-radius-lg) 0 0 var(--kk-radius-lg);
+  box-shadow:
+    0 0 0 100vmax rgba(24, 24, 27, 0.12),
+    var(--kk-glass-shadow);
+}
+
+:global(.el-overlay:has(.task-drawer)) {
+  background: transparent !important;
 }
 
 :global(.task-drawer .el-drawer__header) {
   margin: 0;
-  padding: 22px 28px 18px;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
-  background: rgba(255, 255, 255, 0.92);
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--task-border);
+  background: rgba(255, 255, 255, 0.35);
 }
 
 :global(.task-drawer .el-drawer__body) {
@@ -1020,99 +1117,80 @@ function commentAttachmentUrl(file: any, preview = false) {
 }
 
 :global(.task-drawer .el-drawer__close-btn) {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   border-radius: 10px;
-  transition: background-color 0.18s ease, color 0.18s ease;
+  color: var(--kk-text-muted);
+  transition: background-color 0.15s var(--kk-ease), color 0.15s var(--kk-ease);
 }
 
 :global(.task-drawer .el-drawer__close-btn:hover) {
-  color: var(--task-accent);
-  background: #eff6ff;
-}
-
-.drawer-heading__eyebrow {
-  display: block;
-  margin-bottom: 4px;
-  color: var(--el-color-primary, #2563eb);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+  color: var(--kk-text);
+  background: rgba(24, 24, 27, 0.06);
 }
 
 .drawer-heading h2 {
   margin: 0;
-  color: #0f172a;
-  font-size: 21px;
+  color: var(--kk-text);
+  font-size: 20px;
   font-weight: 700;
   line-height: 1.35;
 }
 
-.drawer-heading p {
-  margin: 4px 0 0;
-  color: #64748b;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
 .task-detail {
   min-height: 200px;
-  padding: 24px 28px 0;
+  padding: 20px 24px 0;
 }
 
 .task-form {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
 .form-section {
-  padding: 20px;
-  border: 1px solid #e5eaf2;
-  border-radius: 14px;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.025);
+  padding: 18px 20px;
+  border: 1px solid var(--kk-glass-border);
+  border-radius: var(--kk-radius);
+  background: var(--kk-glass-bg);
+  box-shadow: var(--kk-glass-shadow);
+  -webkit-backdrop-filter: var(--kk-glass-blur);
+  backdrop-filter: var(--kk-glass-blur);
 }
 
 .form-section--primary {
-  border-top: 3px solid var(--el-color-primary, #2563eb);
+  border-top: 3px solid var(--kk-primary);
 }
 
 .form-section__head {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 18px;
+  margin-bottom: 16px;
 }
 
 .form-section__index {
   display: inline-flex;
-  flex: 0 0 34px;
+  flex: 0 0 32px;
   align-items: center;
   justify-content: center;
-  height: 34px;
-  border-radius: 10px;
-  color: var(--el-color-primary, #2563eb);
-  background: var(--el-color-primary-light-9, #eff6ff);
+  height: 32px;
+  border-radius: 9px;
+  color: var(--kk-text);
+  background: rgba(24, 24, 27, 0.06);
   font-size: 11px;
   font-weight: 700;
 }
 
 .form-section__head h3 {
   margin: 0;
-  color: #172033;
+  color: var(--kk-text);
   font-size: 15px;
-  font-weight: 700;
-}
-
-.form-section__head p {
-  margin: 2px 0 0;
-  color: #94a3b8;
-  font-size: 12px;
+  font-weight: 650;
 }
 
 .task-form :deep(.el-form-item) {
-  margin-bottom: 18px;
+  margin-bottom: 16px;
 }
 
 .task-form :deep(.el-form-item:last-child) {
@@ -1127,7 +1205,7 @@ function commentAttachmentUrl(file: any, preview = false) {
   height: auto;
   margin-bottom: 7px;
   padding: 0;
-  color: #334155;
+  color: var(--kk-text-secondary);
   font-size: 13px;
   font-weight: 600;
   line-height: 1.4;
@@ -1136,34 +1214,32 @@ function commentAttachmentUrl(file: any, preview = false) {
 .task-form :deep(.el-input__wrapper),
 .task-form :deep(.el-select__wrapper) {
   min-height: 40px;
-  border-radius: 9px;
-  box-shadow: 0 0 0 1px #dce3ed inset;
-  transition: box-shadow 0.18s ease;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 0 0 1px rgba(24, 24, 27, 0.1) inset;
+  transition: box-shadow 0.15s var(--kk-ease);
 }
 
 .task-form :deep(.el-input__wrapper:hover),
 .task-form :deep(.el-select__wrapper:hover) {
-  box-shadow: 0 0 0 1px #aebbd0 inset;
+  box-shadow: 0 0 0 1px rgba(24, 24, 27, 0.18) inset;
 }
 
 .task-form :deep(.el-input__wrapper.is-focus),
 .task-form :deep(.el-select__wrapper.is-focused) {
-  box-shadow: 0 0 0 2px var(--el-color-primary-light-5, #93c5fd) inset;
+  box-shadow: 0 0 0 2px rgba(24, 24, 27, 0.22) inset;
 }
 
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 16px;
+  column-gap: 14px;
 }
 
 .field-help {
-  display: block;
-  width: 100%;
-  margin-top: 7px;
-  color: #94a3b8;
+  margin-left: 8px;
+  color: var(--kk-text-muted);
   font-size: 12px;
-  line-height: 1.45;
 }
 
 .option-cards {
@@ -1176,10 +1252,30 @@ function commentAttachmentUrl(file: any, preview = false) {
   width: 100%;
   min-height: 40px;
   padding: 11px 8px;
+  border-radius: 0;
+}
+
+.option-cards :deep(.el-radio-button:first-child .el-radio-button__inner) {
+  border-radius: 10px 0 0 10px;
+}
+
+.option-cards :deep(.el-radio-button:last-child .el-radio-button__inner) {
+  border-radius: 0 10px 10px 0;
 }
 
 .attachment-field :deep(.el-form-item__content) {
   display: block;
+}
+
+.attachment-field .pending-attachments {
+  margin: 0 0 10px;
+}
+
+.form-attach-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
 }
 
 .task-form :deep(.project-cascade),
@@ -1191,6 +1287,7 @@ function commentAttachmentUrl(file: any, preview = false) {
 .task-form :deep(.project-cascade) {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .task-form :deep(.project-cascade .el-select:only-child) {
@@ -1201,100 +1298,27 @@ function commentAttachmentUrl(file: any, preview = false) {
   width: 100% !important;
 }
 
-.attachment-field :deep(.el-upload-list--picture-card) {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  width: 100%;
-}
-
-.attachment-field :deep(.el-upload-list--picture-card .el-upload-list__item) {
-  width: 100%;
-  height: 104px;
-  margin: 0;
-  border-radius: 10px;
-}
-
-.attachment-field :deep(.el-upload--picture-card) {
-  width: 100%;
-  height: 104px;
-  border-radius: 10px;
-  background: #f8fafc;
-  transition: border-color 0.18s ease, background-color 0.18s ease;
-}
-
-.attachment-field :deep(.el-upload--picture-card:hover) {
-  border-color: var(--el-color-primary, #2563eb);
-  background: var(--el-color-primary-light-9, #eff6ff);
-}
-
-.upload-trigger {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  color: #64748b;
-}
-
-.upload-trigger > .el-icon {
-  flex: 0 0 auto;
-  font-size: 22px;
-}
-
-.upload-trigger div {
-  display: flex;
-  align-items: flex-start;
-  flex-direction: column;
-  line-height: 1.35;
-}
-
-.upload-trigger strong {
-  color: #334155;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.upload-trigger span {
-  margin-top: 2px;
-  color: #94a3b8;
-  font-size: 11px;
-}
-
 .form-actions {
   position: sticky;
   z-index: 5;
   bottom: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin: 20px -28px 0;
-  padding: 16px 28px;
-  border-top: 1px solid rgba(226, 232, 240, 0.95);
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.04);
-  backdrop-filter: blur(12px);
-}
-
-.form-actions__hint {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #94a3b8;
-  font-size: 12px;
-}
-
-.form-actions__hint i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #ef4444;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 18px -24px 0;
+  padding: 14px 24px;
+  border-top: 1px solid var(--task-border);
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow: 0 -8px 24px rgba(24, 24, 27, 0.04);
+  -webkit-backdrop-filter: saturate(180%) blur(16px);
+  backdrop-filter: saturate(180%) blur(16px);
 }
 
 .form-actions :deep(.el-button) {
   min-width: 92px;
   min-height: 40px;
-  border-radius: 9px;
+  border-radius: 10px;
 }
 
 .detail-head {
@@ -1379,53 +1403,6 @@ function commentAttachmentUrl(file: any, preview = false) {
   background: #0f172a;
 }
 
-.upload-tip {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #94a3b8;
-  line-height: 1.4;
-}
-
-.attach-card {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  border-radius: 6px;
-  background: #0f172a;
-}
-.attach-card__media {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.attach-card__actions {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  background: rgba(15, 23, 42, 0.55);
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-.attach-card:hover .attach-card__actions {
-  opacity: 1;
-}
-.attach-card__btn {
-  color: #fff;
-  font-size: 12px;
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.16);
-}
-.attach-card__btn.is-danger:hover {
-  background: rgba(239, 68, 68, 0.85);
-}
-
 .detail-actions {
   display: flex;
   gap: 8px;
@@ -1486,10 +1463,25 @@ function commentAttachmentUrl(file: any, preview = false) {
 
 .comment-attachments, .pending-attachments { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .comment-attachment, .pending-attachment { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.comment-attachment { width: fit-content; max-width: 100%; color: #409eff; text-decoration: none; }
-.comment-attachment span, .pending-attachment a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pending-attachment { justify-content: space-between; padding: 5px 8px; border-radius: 6px; background: #f8fafc; font-size: 13px; }
-.pending-attachment a { color: #475569; }
+.comment-attachment { width: fit-content; max-width: 100%; color: var(--kk-text); text-decoration: none; }
+.comment-attachment span, .pending-attachment a span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pending-attachment {
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(24, 24, 27, 0.06);
+  background: rgba(255, 255, 255, 0.55);
+  font-size: 13px;
+}
+.pending-attachment a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--kk-text-secondary);
+  text-decoration: none;
+}
+.pending-attachment a:hover { color: var(--kk-text); }
 
 .comment-empty {
   font-size: 13px;
@@ -1618,6 +1610,7 @@ function commentAttachmentUrl(file: any, preview = false) {
   overflow-wrap: anywhere;
 }
 
+.flow-task-name { margin-top: 6px; color: var(--kk-text-muted); font-size: 12px; }
 .flow-remark {
   display: flex;
   gap: 8px;
@@ -1675,22 +1668,13 @@ function commentAttachmentUrl(file: any, preview = false) {
     grid-template-columns: 1fr;
   }
 
-  .attachment-field :deep(.el-upload-list--picture-card) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .form-actions {
-    align-items: stretch;
-    flex-direction: column;
-    margin-right: -14px;
-    margin-left: -14px;
-    padding: 12px 14px max(12px, env(safe-area-inset-bottom));
-  }
-
-  .form-actions > div {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
     gap: 10px;
+    margin-right: -14px;
+    margin-left: -14px;
+    padding: 12px 14px max(12px, env(safe-area-inset-bottom));
   }
 
   .form-actions :deep(.el-button) {

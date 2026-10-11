@@ -225,14 +225,31 @@ CREATE TABLE pm_project_member (
     deleted     TINYINT       DEFAULT 0
 ) COMMENT='项目参与人分成';
 
+CREATE TABLE pm_project_link (
+    id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+    project_id  BIGINT       NOT NULL,
+    type        VARCHAR(16)  NOT NULL COMMENT 'REPOSITORY/WEBSITE',
+    title       VARCHAR(128) NOT NULL,
+    url         VARCHAR(1000) NOT NULL,
+    remark      VARCHAR(500) DEFAULT NULL,
+    create_time DATETIME     DEFAULT CURRENT_TIMESTAMP,
+    update_time DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    create_by   BIGINT       DEFAULT NULL,
+    update_by   BIGINT       DEFAULT NULL,
+    deleted     TINYINT      DEFAULT 0,
+    KEY idx_project_type (project_id, type)
+) COMMENT='项目仓库及网站链接';
+
 CREATE TABLE pm_task (
     id          BIGINT PRIMARY KEY AUTO_INCREMENT,
     project_id  BIGINT        NOT NULL,
+    parent_task_id BIGINT      DEFAULT NULL COMMENT '父任务ID，为空表示顶层任务',
     title       VARCHAR(128)  NOT NULL,
     content     VARCHAR(1000) DEFAULT NULL,
     status      TINYINT       DEFAULT 0 COMMENT '0待办 1进行中 2已完成 3已取消',
     priority    TINYINT       DEFAULT 2 COMMENT '1高 2中 3低',
     assignee_id BIGINT        DEFAULT NULL,
+    holder_id   BIGINT        DEFAULT NULL COMMENT '任务持有人（项目参与人员，单选）',
     start_date  DATE          DEFAULT NULL,
     due_date    DATE          DEFAULT NULL,
     progress    TINYINT       DEFAULT 0 COMMENT '完成进度0-100',
@@ -240,8 +257,21 @@ CREATE TABLE pm_task (
     update_time DATETIME      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     create_by   BIGINT        DEFAULT NULL,
     update_by   BIGINT        DEFAULT NULL,
-    deleted     TINYINT       DEFAULT 0
+    deleted     TINYINT       DEFAULT 0,
+    KEY idx_parent_task_id (parent_task_id),
+    KEY idx_task_holder (holder_id)
 ) COMMENT='任务';
+
+CREATE TABLE pm_user_item_order (
+    id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+    user_id     BIGINT      NOT NULL,
+    scope_type  VARCHAR(16) NOT NULL COMMENT 'PROJECT/TASK',
+    scope_id    BIGINT      NOT NULL DEFAULT 0 COMMENT '任务所属项目，0表示全部；项目排序固定为0',
+    item_id     BIGINT      NOT NULL,
+    sort_no     INT         NOT NULL,
+    UNIQUE KEY uk_user_scope_item (user_id, scope_type, scope_id, item_id),
+    KEY idx_user_scope_sort (user_id, scope_type, scope_id, sort_no)
+) COMMENT='用户个人项目及任务排序';
 
 CREATE TABLE pm_task_member (
     id      BIGINT PRIMARY KEY AUTO_INCREMENT,

@@ -79,6 +79,12 @@ public class PmProject extends BaseEntity {
 
     private String description;
 
+    /** 项目网站地址 */
+    private String websiteUrl;
+
+    /** GitLab / Git 仓库地址 */
+    private String repositoryUrl;
+
     @TableField(exist = false)
     private String ownerName;
 

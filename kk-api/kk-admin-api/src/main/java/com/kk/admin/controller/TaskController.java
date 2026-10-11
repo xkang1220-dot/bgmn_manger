@@ -5,10 +5,12 @@ import cn.dev33.satoken.annotation.SaCheckRole;
 import cn.dev33.satoken.annotation.SaMode;
 import cn.dev33.satoken.stp.StpUtil;
 import com.kk.biz.entity.PmTask;
+import com.kk.biz.dto.ItemOrderRequest;
 import com.kk.biz.entity.PmTaskComment;
 import com.kk.biz.entity.PmTaskFlow;
 import com.kk.biz.entity.SysFile;
 import com.kk.biz.service.PmTaskService;
+import com.kk.biz.service.UserItemOrderService;
 import com.kk.common.result.PageResult;
 import com.kk.common.result.Result;
 import lombok.Data;
@@ -25,6 +27,22 @@ import java.util.Map;
 public class TaskController {
 
     private final PmTaskService taskService;
+    private final UserItemOrderService userItemOrderService;
+
+    @GetMapping("/order")
+    @SaCheckPermission("project:task:list")
+    public Result<List<Long>> order(Long projectId) {
+        return Result.ok(userItemOrderService.getOrder(
+                StpUtil.getLoginIdAsLong(), UserItemOrderService.TASK, projectId));
+    }
+
+    @PutMapping("/order")
+    @SaCheckPermission("project:task:list")
+    public Result<Void> saveOrder(@RequestBody ItemOrderRequest request) {
+        userItemOrderService.saveOrder(
+                StpUtil.getLoginIdAsLong(), UserItemOrderService.TASK, request.getScopeId(), request.getItemIds());
+        return Result.ok();
+    }
 
     @GetMapping("/page")
     @SaCheckPermission("project:task:list")
@@ -44,10 +62,12 @@ public class TaskController {
             @RequestParam(defaultValue = "10") long pageSize,
             Long projectId, Integer status, String statuses,
             Integer priority, Long participantId, String title, Boolean overdue, String dashboardCategory,
-            Long dashboardOwnerId, String dashboardFrom, String dashboardTo, String periodFrom, String periodTo) {
+            Long dashboardOwnerId, String dashboardFrom, String dashboardTo, String periodFrom, String periodTo,
+            Boolean taskTree, String scope) {
         return Result.ok(PageResult.of(taskService.pageManagementTasks(
                 page, pageSize, projectId, status, statuses, priority, participantId, title, overdue,
-                dashboardCategory, dashboardOwnerId, dashboardFrom, dashboardTo, periodFrom, periodTo)));
+                dashboardCategory, dashboardOwnerId, dashboardFrom, dashboardTo, periodFrom, periodTo,
+                Boolean.TRUE.equals(taskTree), scope)));
     }
 
     @GetMapping("/board")
@@ -104,8 +124,8 @@ public class TaskController {
 
     @GetMapping("/{id}")
     @SaCheckPermission("project:task:list")
-    public Result<PmTask> detail(@PathVariable Long id) {
-        return Result.ok(taskService.getDetail(id));
+    public Result<PmTask> detail(@PathVariable Long id, String scope) {
+        return Result.ok(taskService.getDetail(id, scope));
     }
 
     @PostMapping
@@ -190,7 +210,7 @@ public class TaskController {
     @PutMapping("/{id}/transfer")
     @SaCheckPermission("project:task:add")
     public Result<Void> transfer(@PathVariable Long id, @RequestBody TransferRequest request) {
-        taskService.transfer(id, request.getAssigneeId(), request.getRemark(), request.getImageFileIds());
+        taskService.transfer(id, request.getHolderId(), request.getRemark(), request.getImageFileIds());
         return Result.ok();
     }
 
@@ -216,7 +236,7 @@ public class TaskController {
 
     @Data
     public static class TransferRequest {
-        private Long assigneeId;
+        private Long holderId;
         private String remark;
         private List<Long> imageFileIds;
     }

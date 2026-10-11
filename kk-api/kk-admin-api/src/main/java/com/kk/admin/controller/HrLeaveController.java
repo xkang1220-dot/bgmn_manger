@@ -33,6 +33,16 @@ public class HrLeaveController {
         return Result.ok(leaveService.listMine(companyId, start, end));
     }
 
+    @PostMapping("/mine")
+    @SaCheckPermission("hr:leave:mine")
+    public Result<Map<String, Object>> submitMine(@RequestBody Map<String, Object> body) {
+        Long companyId = body.get("companyId") == null ? null : Long.valueOf(String.valueOf(body.get("companyId")));
+        LocalDate startDate = parseDate(body.get("startDate"));
+        LocalDate endDate = parseDate(body.get("endDate"));
+        String reason = body.get("reason") == null ? null : String.valueOf(body.get("reason"));
+        return Result.ok(leaveService.submitMine(companyId, startDate, endDate, reason));
+    }
+
     @GetMapping("/attendance")
     @SaCheckPermission("hr:attendance:list")
     public Result<List<HrLeaveRecord>> attendance(

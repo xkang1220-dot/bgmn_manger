@@ -113,18 +113,30 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
     }
 
     @Override
-    public List<PmProject> listTaskManagementOptions() {
+    public List<PmProject> listTaskManagementOptions(String scope) {
         long userId = StpUtil.getLoginIdAsLong();
         LambdaQueryWrapper<PmProject> wrapper = new LambdaQueryWrapper<PmProject>()
                 .and(w -> w.isNull(PmProject::getApproveStatus).or().eq(PmProject::getApproveStatus, 1));
-        if (!dataScopeService.isGlobalAdmin(userId) && !StpUtil.hasPermission("project:task:confirm")) {
-            Set<Long> projectIds = memberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
+        Set<Long> projectIds;
+        if ("all".equalsIgnoreCase(scope)) {
+            projectIds = memberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
                             .eq(PmProjectMember::getUserId, userId)
                             .select(PmProjectMember::getProjectId))
                     .stream()
                     .map(PmProjectMember::getProjectId)
                     .filter(Objects::nonNull)
                     .collect(Collectors.toSet());
+        } else {
+            projectIds = taskMapper.selectList(new LambdaQueryWrapper<PmTask>()
+                            .and(w -> w.eq(PmTask::getAssigneeId, userId).or().eq(PmTask::getHolderId, userId))
+                            .select(PmTask::getProjectId))
+                    .stream()
+                    .map(PmTask::getProjectId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+        }
+        if ("all".equalsIgnoreCase(scope)) {
+            // “全部任务”中，项目负责人可以进入自己负责的项目并查看全部任务。
             list(new LambdaQueryWrapper<PmProject>()
                             .eq(PmProject::getOwnerId, userId)
                             .select(PmProject::getId))
@@ -132,18 +144,22 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
                     .map(PmProject::getId)
                     .filter(Objects::nonNull)
                     .forEach(projectIds::add);
-            if (!projectIds.isEmpty()) {
-                List<PmProject> related = list(new LambdaQueryWrapper<PmProject>()
-                        .and(w -> w.in(PmProject::getId, projectIds).or().in(PmProject::getParentId, projectIds))
-                        .select(PmProject::getId, PmProject::getParentId));
-                related.stream().map(PmProject::getId).filter(Objects::nonNull).forEach(projectIds::add);
-                related.stream().map(PmProject::getParentId).filter(Objects::nonNull).forEach(projectIds::add);
-            }
-            if (projectIds.isEmpty()) {
-                wrapper.eq(PmProject::getId, -1L);
-            } else {
-                wrapper.in(PmProject::getId, projectIds);
-            }
+        }
+        // 子项目命中时补入其父项目，仅用于完整展示左侧层级；不反向放大到其它子项目。
+        if (!projectIds.isEmpty()) {
+            list(new LambdaQueryWrapper<PmProject>()
+                            .in(PmProject::getId, projectIds)
+                            .isNotNull(PmProject::getParentId)
+                            .select(PmProject::getParentId))
+                    .stream()
+                    .map(PmProject::getParentId)
+                    .filter(Objects::nonNull)
+                    .forEach(projectIds::add);
+        }
+        if (projectIds.isEmpty()) {
+            wrapper.eq(PmProject::getId, -1L);
+        } else {
+            wrapper.in(PmProject::getId, projectIds);
         }
         wrapper.orderByDesc(PmProject::getId);
         List<PmProject> projects = list(wrapper);
@@ -215,7 +231,7 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         assertCanView(project, StpUtil.getLoginIdAsLong());
         fillExtras(List.of(project));
         maskFinanceFields(project);
-        project.setMembers(loadMembers(id));
+        project.setMembers(loadMembersWithTasks(id));
         return project;
     }
 
@@ -557,6 +573,12 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
             case "MEMBER" -> "变更成员";
             case "STATUS" -> "变更状态";
             case "SCALE" -> "变更规模";
+            case "TASK_CREATE" -> "新建任务";
+            case "TASK_UPDATE" -> "修改任务";
+            case "TASK_COMPLETE" -> "完成任务";
+            case "RESOURCE_CREATE" -> "新增项目资料";
+            case "RESOURCE_UPDATE" -> "编辑项目资料";
+            case "RESOURCE_DELETE" -> "删除项目资料";
             default -> action;
         };
     }
@@ -817,6 +839,40 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
                 .eq(PmProjectMember::getProjectId, projectId)
                 .orderByAsc(PmProjectMember::getId));
         fillMembers(members);
+        return members;
+    }
+
+    private List<PmProjectMember> loadMembersWithTasks(Long projectId) {
+        List<PmProjectMember> members = loadMembers(projectId);
+        if (members.isEmpty()) {
+            return members;
+        }
+        List<PmTask> tasks = taskMapper.selectList(new LambdaQueryWrapper<PmTask>()
+                .eq(PmTask::getProjectId, projectId)
+                .select(PmTask::getId, PmTask::getTitle, PmTask::getAssigneeId));
+        Set<Long> taskIds = tasks.stream().map(PmTask::getId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<Long, Set<Long>> usersByTask = new HashMap<>();
+        for (PmTask task : tasks) {
+            Set<Long> users = usersByTask.computeIfAbsent(task.getId(), key -> new HashSet<>());
+            if (task.getAssigneeId() != null) users.add(task.getAssigneeId());
+        }
+        if (!taskIds.isEmpty()) {
+            for (PmTaskMember row : taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
+                    .in(PmTaskMember::getTaskId, taskIds))) {
+                if (row.getTaskId() != null && row.getUserId() != null) {
+                    usersByTask.computeIfAbsent(row.getTaskId(), key -> new HashSet<>()).add(row.getUserId());
+                }
+            }
+        }
+        for (PmProjectMember member : members) {
+            List<String> titles = tasks.stream()
+                    .filter(task -> usersByTask.getOrDefault(task.getId(), Set.of()).contains(member.getUserId()))
+                    .map(PmTask::getTitle)
+                    .filter(StringUtils::hasText)
+                    .toList();
+            member.setTaskTitles(titles);
+            member.setTaskCount(titles.size());
+        }
         return members;
     }
 
