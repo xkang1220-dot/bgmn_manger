@@ -1,26 +1,17 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+const props = defineProps<{
+  balance?: number
+  available?: number
+  frozen?: number
+  income?: number
+  expense?: number
+  sourceBreakdown?: Array<{ bizType?: string; amount?: number }>
+  bizLabel: (value?: string) => string
+}>()
+
 const emit = defineEmits<{ 'open-freeze': [] }>()
-
-/** 先全部用 mock 填满图表，后续接接口再替换 */
-const MOCK_COMPOSE = [
-  { key: 'SETTLE', label: '项目分成', amount: 28600, color: '#0d9488' },
-  { key: 'SALARY', label: '工资', amount: 18400, color: '#2563eb' },
-  { key: 'REIMBURSE', label: '报销到账', amount: 6200, color: '#d97706' },
-  { key: 'OTHER', label: '其他来源', amount: 3800, color: '#64748b' },
-]
-
-const MOCK_ASSET = {
-  total: 48600,
-  available: 39200,
-  frozen: 9400,
-}
-
-const MOCK_FLOW = {
-  income: 26800,
-  expense: 12400,
-}
 
 const COLORS = {
   available: '#0d9488',
@@ -29,6 +20,8 @@ const COLORS = {
   income: '#0d9488',
   expense: '#e11d48',
 }
+
+const COMPOSE_COLORS = ['#0d9488', '#2563eb', '#d97706', '#dc2626', '#64748b', '#0891b2', '#ca8a04']
 
 function money(v: unknown) {
   const n = Number(v)
@@ -85,22 +78,34 @@ function donutPaths(
     .filter((p): p is { key: string; color: string; d: string; evenodd: boolean } => !!p)
 }
 
-const composeTotal = computed(() => MOCK_COMPOSE.reduce((s, x) => s + x.amount, 0))
 const composeSlices = computed(() => {
-  const total = composeTotal.value || 1
-  return MOCK_COMPOSE.map((s) => ({ ...s, pct: (s.amount / total) * 100 }))
+  const rows = (props.sourceBreakdown || [])
+    .map((row, index) => ({
+      key: String(row.bizType || 'OTHER'),
+      label: props.bizLabel(row.bizType),
+      amount: money(row.amount),
+      color: COMPOSE_COLORS[index % COMPOSE_COLORS.length],
+    }))
+    .filter((row) => row.amount > 0)
+  const total = rows.reduce((sum, row) => sum + row.amount, 0) || 1
+  return rows.map((row) => ({ ...row, pct: (row.amount / total) * 100 }))
 })
-const composePaths = computed(() => donutPaths(MOCK_COMPOSE, 70, 70, 58, 38))
+const composeTotal = computed(() => composeSlices.value.reduce((s, x) => s + x.amount, 0))
+const composePaths = computed(() => donutPaths(composeSlices.value, 70, 70, 58, 38))
 
-const assetTotal = computed(() => MOCK_ASSET.total)
+const assetTotal = computed(() => {
+  const balance = money(props.balance)
+  if (props.balance != null) return balance
+  return money(props.available) + money(props.frozen)
+})
 const assetSlices = computed(() => [
-  { key: 'available', label: '可提现金额', amount: MOCK_ASSET.available, color: COLORS.available },
-  { key: 'frozen', label: '冻结金额', amount: MOCK_ASSET.frozen, color: COLORS.frozen },
-])
+  { key: 'available', label: '可提现金额', amount: money(props.available), color: COLORS.available },
+  { key: 'frozen', label: '冻结金额', amount: money(props.frozen), color: COLORS.frozen },
+].filter((row) => row.amount > 0))
 const assetPaths = computed(() => donutPaths(assetSlices.value, 70, 70, 58, 38))
 
-const income = computed(() => MOCK_FLOW.income)
-const expense = computed(() => MOCK_FLOW.expense)
+const income = computed(() => money(props.income))
+const expense = computed(() => money(props.expense))
 const flowNet = computed(() => income.value - expense.value)
 const flowMax = computed(() => Math.max(income.value, expense.value, 1))
 const incomeBarW = computed(() => `${(income.value / flowMax.value) * 100}%`)

@@ -27,6 +27,7 @@ const statsPeriod = ref<StatsPeriodKey>('THIS_MONTH')
 const customStatsPeriod = ref<[string, string] | undefined>()
 const periodIn = ref(0)
 const periodOut = ref(0)
+const periodSources = ref<Array<{ bizType: string; amount: number }>>([])
 const statsPeriodOptions: Array<{ label: string; value: StatsPeriodKey }> = [
   { label: '本月', value: 'THIS_MONTH' },
   { label: '上月', value: 'LAST_MONTH' },
@@ -601,12 +602,7 @@ async function loadPeriodStats() {
   if (!bounds) {
     periodIn.value = 0
     periodOut.value = 0
-    return
-  }
-  // 本月直接用看板接口口径，避免再扫一遍流水
-  if (statsPeriod.value === 'THIS_MONTH' && walletBoard.value) {
-    periodIn.value = Number(walletBoard.value.monthIn) || 0
-    periodOut.value = Number(walletBoard.value.monthOut) || 0
+    periodSources.value = []
     return
   }
   try {
@@ -615,6 +611,7 @@ async function loadPeriodStats() {
     let total = Infinity
     let inSum = 0
     let outSum = 0
+    const sourceSums = new Map<string, number>()
     while ((page - 1) * pageSize < total) {
       const res = await bizApi.myWalletLedger({
         page,
@@ -627,7 +624,11 @@ async function loadPeriodStats() {
       total = Number(res.total) || 0
       for (const row of list) {
         const amt = Number(row?.amount) || 0
-        if (amt > 0) inSum += amt
+        if (amt > 0) {
+          inSum += amt
+          const bizType = String(row?.bizType || 'OTHER')
+          sourceSums.set(bizType, (sourceSums.get(bizType) || 0) + amt)
+        }
         else if (amt < 0) outSum += Math.abs(amt)
       }
       if (!list.length) break
@@ -637,10 +638,14 @@ async function loadPeriodStats() {
     if (seq !== periodStatsSeq) return
     periodIn.value = inSum
     periodOut.value = outSum
+    periodSources.value = [...sourceSums.entries()]
+      .map(([bizType, amount]) => ({ bizType, amount }))
+      .sort((a, b) => b.amount - a.amount)
   } catch {
     if (seq !== periodStatsSeq) return
     periodIn.value = 0
     periodOut.value = 0
+    periodSources.value = []
   }
 }
 
@@ -1486,7 +1491,16 @@ onUnmounted(() => {
             />
           </div>
           <div class="hub-panel__charts">
-            <AccountWorkbenchCharts @open-freeze="openFreezeDetail" />
+            <AccountWorkbenchCharts
+              :balance="walletBoard.balance"
+              :available="walletBoard.available"
+              :frozen="walletBoard.frozen"
+              :income="periodIn"
+              :expense="periodOut"
+              :source-breakdown="periodSources"
+              :biz-label="bizLabel"
+              @open-freeze="openFreezeDetail"
+            />
           </div>
         </div>
 

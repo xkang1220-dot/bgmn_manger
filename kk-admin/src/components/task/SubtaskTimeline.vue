@@ -27,6 +27,7 @@ const emit = defineEmits<{ open: [task: SubtaskItem] }>()
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const DAY_WIDTH = 48
+const TRAILING_DAYS = 2
 
 const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭', 4: '待确认完成' }
 const statusLegend = [
@@ -120,6 +121,9 @@ const range = computed(() => {
     max = Math.max(max, ...datedTasks.value.map((task) => task.endMs))
   }
 
+  // 时间轴在最后一项后保留少量日期，避免任务条紧贴右侧边界。
+  max += TRAILING_DAYS * DAY_MS
+
   if (max < min) max = min
   const days = Math.max(1, Math.round((max - min) / DAY_MS) + 1)
   return { min, max, days }
@@ -132,18 +136,11 @@ const trackWidth = computed(() => {
 
 const rows = computed(() => datedTasks.value)
 
-const tickStep = computed(() => {
-  const days = range.value?.days ?? 0
-  if (days <= 16) return 1
-  if (days <= 45) return 2
-  if (days <= 90) return 7
-  return 14
-})
-
 const ticks = computed(() => {
   if (!range.value) return [] as Array<{ label: string; left: number; width: number }>
   const { min, days } = range.value
-  const step = tickStep.value
+  // 横向可滚动，日期逐日显示，避免抽样刻度看起来像中间缺失日期。
+  const step = 1
   const out: Array<{ label: string; left: number; width: number }> = []
   for (let i = 0; i < days; i += step) {
     const date = new Date(min + i * DAY_MS)
@@ -344,7 +341,8 @@ function barStyle(task: { startMs: number; endMs: number }) {
 .gantt-canvas {
   --day-width: 48px;
   min-width: 100%;
-  padding: 12px 16px 16px;
+  /* 横向尺寸由 trackWidth 精确控制，避免当天刻度之后再多出内边距。 */
+  padding: 12px 0 16px;
 }
 .gantt-axis {
   position: sticky;
