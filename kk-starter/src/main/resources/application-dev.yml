@@ -13,18 +13,19 @@ spring:
       max-request-size: 100MB
   data:
     redis:
-      host: ${REDIS_HOST:127.0.0.1}
+      host: ${REDIS_HOST:192.168.110.110}
       port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:}
+      password: ${REDIS_PASSWORD:LrhiaBMY8oRdzKP4TDdN}
       timeout: 3s
       repositories:
         enabled: false
   datasource:
     type: com.alibaba.druid.pool.DruidDataSource
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://127.0.0.1:3306/kk_manager_bgmn_doc_v1?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=GMT%2B8
+    url: jdbc:mysql://192.168.110.110:3306/kk_manager_bgmn_doc_v1?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=GMT%2B8
+#    url: jdbc:mysql://127.0.0.1:3306/kk_manager_bgmn_doc_v1?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=GMT%2B8
     username: root
-    password: 123456
+    password: uF6H0hQHq6e9dDpWvdj1
     druid:
       initial-size: 5
       min-idle: 5
