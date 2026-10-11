@@ -380,6 +380,12 @@ function hasUnfinishedChildren(row: any) {
   return (row.children || []).some((child: any) => child.status !== 2)
 }
 
+function isParentPending(row: any) {
+  if (!isSubtaskRow(row)) return false
+  const parent = list.value.find((item) => Number(item.id) === Number(row.parentTaskId))
+  return Number(parent?.status) === 0
+}
+
 function canEditTask(row: any) {
   return userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3
 }
@@ -425,6 +431,10 @@ const taskStatusActions: Record<number, { title: string; verb: string; success: 
 
 async function changeTaskStatus(row: any, status: 0 | 1 | 2) {
   if (Number(row.status) === status) return
+  if ((status === 1 || status === 2) && isParentPending(row)) {
+    ElMessage.warning('父任务为待办时，子任务不能开始或完成')
+    return
+  }
   if (status === 2 && hasUnfinishedChildren(row)) {
     ElMessage.warning('请先完成所有子任务，再完成父任务')
     return
@@ -748,8 +758,8 @@ onUnmounted(() => {
                     <el-dropdown-item v-if="canCreateSubtask(row)" command="subtask">子任务</el-dropdown-item>
                     <el-dropdown-item v-if="canEditTask(row)" command="edit">编辑</el-dropdown-item>
                     <el-dropdown-item v-if="canTransferTask(row)" command="transfer">移交</el-dropdown-item>
-                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="start" divided :disabled="row.status === 1">开始任务</el-dropdown-item>
-                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="complete" :disabled="row.status === 2 || hasUnfinishedChildren(row)">完成任务</el-dropdown-item>
+                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="start" divided :disabled="row.status === 1 || isParentPending(row)">开始任务</el-dropdown-item>
+                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="complete" :disabled="row.status === 2 || hasUnfinishedChildren(row) || isParentPending(row)">完成任务</el-dropdown-item>
                     <el-dropdown-item v-if="canChangeTaskStatus(row)" command="pause" :disabled="row.status === 0">暂停任务</el-dropdown-item>
                     <el-dropdown-item v-if="canCloseTask(row)" command="close" divided>关闭</el-dropdown-item>
                     <el-dropdown-item v-if="canReviewTask(row)" command="review-pass" divided>确认完成</el-dropdown-item>
