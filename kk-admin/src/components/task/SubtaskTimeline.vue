@@ -4,6 +4,7 @@ import { computed } from 'vue'
 type SubtaskItem = {
   id: number
   title: string
+  createTime?: string | null
   startDate?: string | null
   dueDate?: string | null
   completedAt?: string | null
@@ -76,19 +77,20 @@ function displayEndDate(task: SubtaskItem) {
 const datedTasks = computed(() => {
   return props.tasks
     .map((task) => {
-      const start = parseDate(task.startDate) || parseDate(task.dueDate)
+      const startDate = task.createTime
+      const start = parseDate(startDate)
       const endDate = displayEndDate(task)
       const end = parseDate(endDate)
       if (!start || !end) return null
       const startMs = dayMs(start)
       const endMs = Math.max(dayMs(end), startMs)
-      return { ...task, endDate, startMs, endMs }
+      return { ...task, startDate, endDate, startMs, endMs }
     })
     .filter(Boolean) as Array<SubtaskItem & { endDate: string; startMs: number; endMs: number }>
 })
 
 const undatedTasks = computed(() =>
-  props.tasks.filter((task) => !parseDate(task.startDate) && !parseDate(task.dueDate)),
+  props.tasks.filter((task) => !parseDate(task.createTime)),
 )
 
 const range = computed(() => {
@@ -230,7 +232,7 @@ function barStyle(task: { startMs: number; endMs: number }) {
       </div>
 
       <div v-if="undatedTasks.length" class="undated-block">
-        <div class="undated-title">未设置计划时间（{{ undatedTasks.length }}）</div>
+        <div class="undated-title">创建时间缺失（{{ undatedTasks.length }}）</div>
         <button
           v-for="task in undatedTasks"
           :key="task.id"
@@ -247,7 +249,7 @@ function barStyle(task: { startMs: number; endMs: number }) {
       </div>
 
       <div v-if="!rows.length && undatedTasks.length" class="subtask-empty is-soft">
-        子任务尚未设置开始 / 结束时间，无法绘制时间线
+        子任务缺少创建时间，无法绘制时间线
       </div>
     </template>
   </div>

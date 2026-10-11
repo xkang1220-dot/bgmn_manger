@@ -969,8 +969,14 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             assertParticipantsEligible(existing.getProjectId(), task.getParticipantIds());
         }
         if (Integer.valueOf(2).equals(task.getStatus())) {
+            if (!Integer.valueOf(2).equals(existing.getStatus())) {
+                assertParentStartedBeforeChildProgress(existing);
+            }
             assertChildrenCompletedBeforeFinish(existing);
             task.setStatus(completionTargetStatus(task.getTaskReward()));
+        } else if (Integer.valueOf(1).equals(task.getStatus())
+                && !Integer.valueOf(1).equals(existing.getStatus())) {
+            assertParentStartedBeforeChildProgress(existing);
         }
         validateDateRange(task);
         task.setContent(cleanTaskContent(task.getContent()));
@@ -1128,6 +1134,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (status == 2 || status == 3) {
             assertChildrenCompletedBeforeFinish(existing);
         }
+        if (status == 1 || status == 2) {
+            assertParentStartedBeforeChildProgress(existing);
+        }
         int targetStatus = status == 2 ? completionTargetStatus(existing.getTaskReward()) : status;
         PmTask update = new PmTask();
         update.setId(id);
@@ -1172,6 +1181,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             throw new BusinessException("审核说明不能超过 500 字");
         }
         if (approved) {
+            assertParentStartedBeforeChildProgress(existing);
             assertChildrenCompletedBeforeFinish(existing);
         }
         PmTask update = new PmTask();
@@ -1443,6 +1453,20 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 .ne(PmTask::getStatus, 2));
         if (unfinished > 0) {
             throw new BusinessException("请先完成所有子任务，再完成或关闭父任务");
+        }
+    }
+
+    /** 父任务仍为待办时，子任务不能先于父任务开始或完成。 */
+    private void assertParentStartedBeforeChildProgress(PmTask task) {
+        if (task == null || task.getParentTaskId() == null) {
+            return;
+        }
+        PmTask parent = getById(task.getParentTaskId());
+        if (parent == null) {
+            throw new BusinessException("父任务不存在");
+        }
+        if (Integer.valueOf(0).equals(parent.getStatus())) {
+            throw new BusinessException("父任务为待办时，子任务不能开始或完成");
         }
     }
 
