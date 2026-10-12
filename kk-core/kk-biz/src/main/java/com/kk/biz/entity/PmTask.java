@@ -57,6 +57,10 @@ public class PmTask extends BaseEntity {
 
     private LocalDateTime completedAt;
 
+    /** 按配置工作时间并扣除员工下班区间后的有效耗时（秒）。 */
+    @TableField(exist = false)
+    private Long workDurationSeconds;
+
     private LocalDateTime lastActivityAt;
 
     /** NORMAL / WARNING / DANGER */

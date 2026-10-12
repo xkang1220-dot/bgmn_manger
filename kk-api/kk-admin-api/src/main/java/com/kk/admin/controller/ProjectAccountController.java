@@ -33,7 +33,6 @@ public class ProjectAccountController {
     }
 
     @GetMapping("/{projectId}")
-    @SaCheckPermission("finance:project:list")
     public Result<FinProjectAccount> detail(@PathVariable Long projectId) {
         return Result.ok(projectAccountService.getByProjectId(projectId));
     }

@@ -168,6 +168,38 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         return projects;
     }
 
+    @Override
+    public List<PmProject> listTaskDashboardOptions() {
+        // MyBatis-Plus 会自动排除逻辑删除的任务；状态不限，尚未开始、进行中、已完成、已关闭均计入。
+        Set<Long> projectIds = taskMapper.selectList(new LambdaQueryWrapper<PmTask>()
+                        .isNotNull(PmTask::getProjectId)
+                        .select(PmTask::getProjectId))
+                .stream()
+                .map(PmTask::getProjectId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        if (projectIds.isEmpty()) {
+            return List.of();
+        }
+
+        // 重大项目通常只作为父级外壳；子项目有任务时补入父项目，保证驾驶舱项目树结构完整。
+        list(new LambdaQueryWrapper<PmProject>()
+                        .in(PmProject::getId, projectIds)
+                        .isNotNull(PmProject::getParentId)
+                        .select(PmProject::getParentId))
+                .stream()
+                .map(PmProject::getParentId)
+                .filter(Objects::nonNull)
+                .forEach(projectIds::add);
+
+        List<PmProject> projects = list(new LambdaQueryWrapper<PmProject>()
+                .in(PmProject::getId, projectIds)
+                .orderByDesc(PmProject::getId));
+        fillExtras(projects);
+        projects.forEach(this::maskFinanceFields);
+        return projects;
+    }
+
     /** 下拉可选：含小项目（任务/配薪等）；重大外壳仍返回，由调用方过滤 */
     private List<PmProject> listSelectable(Long userId) {
         if (userId == null) {

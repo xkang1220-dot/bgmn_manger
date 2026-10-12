@@ -66,15 +66,15 @@ kk:
       provider: rustfs
       prefix: kk-files
       ledger-voucher-prefix: ledger-vouchers
-      max-size-mb: 100
+      max-size-mb: 500
       local:
-        base-path: ./uploads
+        base-path: ${KK_FILE_LOCAL_PATH:./uploads}
       rustfs:
-        endpoint: http://95.40.182.55:9000
-        access-key: ${RUSTFS_ACCESS_KEY:KO0VN5qHsKcQqib0biEy}
-        secret-key: ${RUSTFS_SECRET_KEY:F6XqqjKuiBs3MepQHngFDXd5483tPAGHrgAMAArT}
-        bucket: kk-manager
-        domain: http://95.40.182.55:9000
+        endpoint: ${RUSTFS_ENDPOINT:http://59.110.33.84:9000}
+        access-key: rustfsadmin
+        secret-key: hjinrisYwDcPApsmb0WN
+        bucket: ${RUSTFS_BUCKET:kk-manager}
+        domain: ${RUSTFS_DOMAIN:http://59.110.33.84:9000}
   totp:
     issuer: KK Manager
     secret-master-key: ${TOTP_MASTER_KEY:KkTotp~SecretKey2026!ChangeMe}

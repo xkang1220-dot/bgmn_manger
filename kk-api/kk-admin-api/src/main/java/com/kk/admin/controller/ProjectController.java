@@ -1,6 +1,7 @@
 package com.kk.admin.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.annotation.SaCheckRole;
 import cn.dev33.satoken.annotation.SaMode;
 import cn.dev33.satoken.stp.StpUtil;
 import com.kk.biz.dto.ApprovalSubmitRequest;
@@ -83,6 +84,12 @@ public class ProjectController {
     @SaCheckPermission("project:task:list")
     public Result<List<PmProject>> taskOptions(String scope) {
         return Result.ok(projectService.listTaskManagementOptions(scope));
+    }
+
+    @GetMapping("/task-dashboard-options")
+    @SaCheckRole("task_manager")
+    public Result<List<PmProject>> taskDashboardOptions() {
+        return Result.ok(projectService.listTaskDashboardOptions());
     }
 
     /** 个人中心：只返回当前用户负责或参与的项目 */

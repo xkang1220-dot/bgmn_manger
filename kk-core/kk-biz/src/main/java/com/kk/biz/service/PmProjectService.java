@@ -21,6 +21,9 @@ public interface PmProjectService extends IService<PmProject> {
     /** 任务管理页项目树：mine 按可见任务反推；all 包含参与项目及本人负责项目。 */
     java.util.List<PmProject> listTaskManagementOptions(String scope);
 
+    /** 任务驾驶舱项目树：返回所有至少包含一条未删除任务的项目，并补齐其父项目。 */
+    java.util.List<PmProject> listTaskDashboardOptions();
+
     /** 重大项目下的未删小项目 */
     java.util.List<PmProject> listChildren(Long parentId);
 

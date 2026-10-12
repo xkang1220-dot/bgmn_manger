@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import KkLogoMark from '@/components/KkLogoMark.vue'
 import TicketSubmitDialog from '@/components/ticket/TicketSubmitDialog.vue'
 import { notificationApi, type NotificationItem } from '@/api/notification'
+import { workStatusApi } from '@/api/workStatus'
 import type { MenuInfo } from '@/api/types'
 import {
   createNotificationSocket,
@@ -16,6 +18,8 @@ const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 const ticketSubmitOpen = ref(false)
+const isWorking = ref(true)
+const workStatusLoading = ref(false)
 
 const canSubmitTicket = computed(() => userStore.hasPermission('ticket:submit'))
 
@@ -252,7 +256,32 @@ async function logout() {
   await userStore.logout()
 }
 
+async function loadWorkStatus() {
+  try {
+    const status = await workStatusApi.status()
+    isWorking.value = status.working
+  } catch {
+    // 状态接口异常时保留默认上班状态，不阻塞其它页面功能。
+  }
+}
+
+async function changeWorkStatus(command: 'clock-in' | 'clock-out') {
+  if (workStatusLoading.value) return
+  workStatusLoading.value = true
+  try {
+    const status = command === 'clock-out'
+      ? await workStatusApi.clockOut()
+      : await workStatusApi.clockIn()
+    isWorking.value = status.working
+    window.dispatchEvent(new CustomEvent('work-status-changed', { detail: status }))
+    ElMessage.success(command === 'clock-out' ? '已下班，暂停累计任务时长' : '已上班，恢复累计任务时长')
+  } finally {
+    workStatusLoading.value = false
+  }
+}
+
 onMounted(() => {
+  loadWorkStatus()
   loadUnread()
   pollTimer = setInterval(loadUnread, 30000)
   noticeSocket = createNotificationSocket({
@@ -321,10 +350,25 @@ onUnmounted(() => {
           <h1 class="page-heading">{{ pageTitle }}</h1>
         </div>
         <div class="header-right">
-          <button type="button" class="user-chip" title="账号资料" @click="go('/account/profile')">
-            <span class="avatar">{{ userInitial }}</span>
-            <span class="user-name">{{ userStore.nickname }}</span>
-          </button>
+          <el-dropdown trigger="hover" placement="bottom-end" @command="changeWorkStatus">
+            <button
+              type="button"
+              class="user-chip"
+              :class="{ 'is-off-work': !isWorking }"
+              :aria-label="`${userStore.nickname}，当前${isWorking ? '上班' : '下班'}，悬浮或点击切换状态`"
+            >
+              <span class="avatar">{{ userInitial }}</span>
+              <span class="user-name">{{ userStore.nickname }}</span>
+              <span class="work-state-dot" :class="{ 'is-off': !isWorking }" aria-hidden="true" />
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item :command="isWorking ? 'clock-out' : 'clock-in'" :disabled="workStatusLoading">
+                  {{ isWorking ? '下班' : '上班' }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <span class="header-split" aria-hidden="true" />
           <div class="header-actions">
             <button
@@ -727,6 +771,25 @@ onUnmounted(() => {
 
 .user-chip:hover {
   background: var(--kk-side-hover);
+}
+
+.user-chip:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+}
+
+.work-state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #22c55e;
+  box-shadow: 0 0 0 2px #dcfce7;
+}
+
+.work-state-dot.is-off {
+  background: #a1a1aa;
+  box-shadow: 0 0 0 2px #f4f4f5;
 }
 
 .avatar {

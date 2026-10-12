@@ -22,13 +22,13 @@ const listOwnerId = ref<number | undefined>()
 const listFrom = ref<string | undefined>()
 const listTo = ref<string | undefined>()
 const filters = reactive({ participantId: undefined as number | undefined })
-type PeriodKey = 'THIS_MONTH' | 'LAST_MONTH' | 'THIS_QUARTER' | 'LAST_QUARTER' | 'THIS_YEAR' | 'CUSTOM'
-const period = ref<PeriodKey>('THIS_MONTH')
+type PeriodKey = 'TODAY' | 'THIS_WEEK' | 'LAST_WEEK' | 'THIS_MONTH' | 'LAST_MONTH' | 'CUSTOM'
+const period = ref<PeriodKey>('TODAY')
 const customPeriod = ref<[string, string] | undefined>()
 const periodOptions: Array<{ label: string; value: PeriodKey }> = [
-  { label: '本月', value: 'THIS_MONTH' }, { label: '上月', value: 'LAST_MONTH' },
-  { label: '本季度', value: 'THIS_QUARTER' }, { label: '上季度', value: 'LAST_QUARTER' },
-  { label: '本年', value: 'THIS_YEAR' }, { label: '自定义', value: 'CUSTOM' },
+  { label: '当日', value: 'TODAY' }, { label: '本周', value: 'THIS_WEEK' },
+  { label: '上周', value: 'LAST_WEEK' }, { label: '本月', value: 'THIS_MONTH' },
+  { label: '上月', value: 'LAST_MONTH' }, { label: '自定义', value: 'CUSTOM' },
 ]
 let filterTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -72,20 +72,18 @@ const periodBounds = computed(() => {
       ? { from: customPeriod.value[0], to: addDays(customPeriod.value[1], 1) }
       : undefined
   }
-  if (period.value === 'THIS_YEAR') {
-    from = new Date(now.getFullYear(), 0, 1)
-    to = new Date(now.getFullYear() + 1, 0, 1)
+  if (period.value === 'TODAY') {
+    from = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    to = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+  } else if (period.value === 'THIS_WEEK' || period.value === 'LAST_WEEK') {
+    const mondayOffset = (now.getDay() + 6) % 7
+    const weekOffset = period.value === 'LAST_WEEK' ? -7 : 0
+    from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - mondayOffset + weekOffset)
+    to = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 7)
   } else {
-    const quarterMonth = Math.floor(now.getMonth() / 3) * 3
     const monthOffset = period.value === 'LAST_MONTH' ? -1 : 0
-    const quarterOffset = period.value === 'LAST_QUARTER' ? -3 : 0
-    if (period.value === 'THIS_QUARTER' || period.value === 'LAST_QUARTER') {
-      from = new Date(now.getFullYear(), quarterMonth + quarterOffset, 1)
-      to = new Date(from.getFullYear(), from.getMonth() + 3, 1)
-    } else {
-      from = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1)
-      to = new Date(from.getFullYear(), from.getMonth() + 1, 1)
-    }
+    from = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1)
+    to = new Date(from.getFullYear(), from.getMonth() + 1, 1)
   }
   return { from: formatDate(from), to: formatDate(to) }
 })
@@ -103,7 +101,7 @@ const browserProjectTaskCounts = computed(() => {
   return map
 })
 const browserProjectItems = computed<BrowserProjectItem[]>(() => {
-  const visible = projects.value.filter((project) => ![2, 3].includes(Number(project.status)))
+  const visible = projects.value
   const childrenByParent = new Map<number, any[]>()
   visible.forEach((project) => {
     if (!project.parentId) return
@@ -180,14 +178,43 @@ const memberChartRows = computed(() => filteredMemberTaskStats.value.map((item: 
 })))
 const memberChartMax = computed(() => Math.max(1, ...memberChartRows.value.flatMap((item: any) => [item.done, item.doing, item.overdue])))
 const memberChartMinWidth = computed(() => Math.max(720, memberChartRows.value.length * 112))
+const employeeDurationRows = computed(() => (dashboard.value.employeeDurationStats || []).map((item: any) => ({
+  ...item,
+  durationSeconds: Number(item.durationSeconds || 0),
+  completedDurationSeconds: Number(item.completedDurationSeconds || 0),
+  incompleteDurationSeconds: Number(item.incompleteDurationSeconds || 0),
+  completedTasks: Number(item.completedTasks || 0),
+  incompleteTasks: Number(item.incompleteTasks || 0),
+  timedTasks: Number(item.timedTasks || 0),
+})))
+const employeeDurationMax = computed(() => Math.max(1, ...employeeDurationRows.value.map((item: any) => item.durationSeconds)))
+const employeeDurationTotal = computed(() => employeeDurationRows.value.reduce(
+  (sum: number, item: any) => sum + item.durationSeconds, 0,
+))
 function memberInitial(name: string) {
   return (name || '?').trim().slice(0, 1).toUpperCase()
+}
+
+function formatDuration(seconds: number) {
+  const totalMinutes = Math.max(0, Math.round(Number(seconds || 0) / 60))
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (hours && minutes) return `${hours}小时${minutes}分钟`
+  if (hours) return `${hours}小时`
+  return `${minutes}分钟`
 }
 
 const selectedUserName = computed(() => {
   if (filters.participantId == null) return '全部成员'
   const user = users.value.find(item => Number(item.id) === Number(filters.participantId))
   return user?.nickname || user?.username || '当前成员'
+})
+const browserEmptyText = computed(() => {
+  const taskLabel = browserTab.value === 'all' ? '任务' : `${browserActiveTabLabel.value}任务`
+  if (filters.participantId != null && browserProjectId.value == null) {
+    return `${selectedUserName.value}作为负责人或持有人暂无${taskLabel}`
+  }
+  return `${selectedUserName.value} · ${browserSelectedLabel.value}暂无${taskLabel}`
 })
 function buildFilterParams() {
   const params: Record<string, unknown> = {}
@@ -275,7 +302,7 @@ watch(
 
 function reset() {
   filters.participantId = undefined
-  period.value = 'THIS_MONTH'
+  period.value = 'TODAY'
   customPeriod.value = undefined
   browserProjectId.value = undefined
   browserTab.value = 'all'
@@ -361,7 +388,7 @@ async function refreshAfterTaskSaved() {
 
 onMounted(async () => {
   const [projectOptions, userOptions] = await Promise.all([
-    bizApi.taskManagementProjects(),
+    bizApi.taskDashboardProjects(),
     sysApi.userList(),
   ])
   projects.value = projectOptions
@@ -458,6 +485,9 @@ onBeforeUnmount(() => {
                 <span class="browser-task-top">
                   <em class="browser-prio" :class="`is-p${task.priority || 2}`">{{ priorityMap[task.priority] || '中' }}</em>
                   <em v-if="task.overdue" class="browser-overdue">逾期</em>
+                  <em v-if="![2, 3].includes(Number(task.status))" class="browser-incomplete">
+                    未完成
+                  </em>
                 </span>
                 <strong>{{ task.title }}</strong>
                 <small>
@@ -467,12 +497,44 @@ onBeforeUnmount(() => {
                 </small>
               </button>
               <p v-if="!browserActiveTasks.length && !browserLoading" class="browser-type-empty">
-                {{ selectedUserName }} · {{ browserSelectedLabel }}暂无{{ browserTab === 'all' ? '任务' : `${browserActiveTabLabel}任务` }}
+                {{ browserEmptyText }}
               </p>
             </div>
           </div>
         </div>
       </div>
+    </section>
+
+    <section class="page-card duration-stats-panel glass-panel" aria-labelledby="duration-stats-title">
+      <div class="section-head">
+        <div>
+          <h3 id="duration-stats-title">员工任务耗时统计</h3>
+          <p class="section-description">任务执行区间与查询周期相交即纳入；耗时按任务自身完整执行区间计算</p>
+        </div>
+        <div v-if="employeeDurationRows.length" class="duration-summary" aria-label="员工任务耗时概览">
+          <span><b>{{ employeeDurationRows.length }}</b> 位员工</span>
+          <span><b>{{ formatDuration(employeeDurationTotal) }}</b> 累计耗时</span>
+        </div>
+      </div>
+      <div class="duration-legend" aria-label="耗时类型说明">
+        <span><i class="completed" />已完成任务耗时</span>
+        <span><i class="incomplete" />未完成任务耗时（从实际开始计算至当前时间）</span>
+      </div>
+      <ol v-if="employeeDurationRows.length" class="duration-ranking" aria-label="员工任务耗时排名">
+        <li v-for="item in employeeDurationRows" :key="item.memberId">
+          <span class="duration-rank" :class="`is-${Math.min(item.rank, 4)}`">{{ item.rank }}</span>
+          <span class="duration-person">
+            <i aria-hidden="true">{{ memberInitial(item.memberName) }}</i>
+            <span><strong>{{ item.memberName }}</strong><small>{{ item.timedTasks }} 项任务计入耗时<span v-if="item.incompleteTasks"> · {{ item.incompleteTasks }} 项未完成</span></small></span>
+          </span>
+          <span class="duration-bar" aria-hidden="true">
+            <i class="completed" :style="{ width: `${item.completedDurationSeconds / employeeDurationMax * 100}%` }" />
+            <i class="incomplete" :style="{ width: `${item.incompleteDurationSeconds / employeeDurationMax * 100}%` }" />
+          </span>
+          <strong class="duration-value">{{ formatDuration(item.durationSeconds) }}</strong>
+        </li>
+      </ol>
+      <el-empty v-else description="暂无员工任务耗时数据" :image-size="64" />
     </section>
 
     <section class="page-card member-stats-panel glass-panel">
@@ -848,7 +910,8 @@ onBeforeUnmount(() => {
 .browser-task-card:focus-visible { outline: 2px solid var(--cockpit-ink); outline-offset: 1px; }
 .browser-task-top { display: flex; align-items: center; gap: 6px; }
 .browser-prio,
-.browser-overdue {
+.browser-overdue,
+.browser-incomplete {
   padding: 1px 7px;
   border-radius: 999px;
   font-size: 10px;
@@ -860,6 +923,7 @@ onBeforeUnmount(() => {
 .browser-prio.is-p2 { background: #fef3c7; color: #b45309; }
 .browser-prio.is-p3 { background: #f4f4f5; color: #71717a; }
 .browser-overdue { background: #fee2e2; color: #b91c1c; }
+.browser-incomplete { background: #ffedd5; color: #c2410c; }
 .browser-task-card > strong {
   overflow: hidden;
   color: var(--kk-text);
@@ -1135,6 +1199,135 @@ onBeforeUnmount(() => {
 }
 .member-focus-stats .danger b,
 .member-focus-stats .danger small { color: var(--cockpit-danger); }
+.section-description {
+  margin: 5px 0 0;
+  color: var(--kk-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.duration-summary {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  color: var(--kk-text-muted);
+  font-size: 12px;
+}
+.duration-summary b {
+  margin-right: 3px;
+  color: var(--kk-text);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.duration-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 14px;
+  color: var(--kk-text-muted);
+  font-size: 11px;
+}
+.duration-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.duration-legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+}
+.duration-legend i.completed { background: #3f3f46; }
+.duration-legend i.incomplete { background: #f59e0b; }
+.duration-ranking {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.duration-ranking li {
+  display: grid;
+  grid-template-columns: 30px minmax(140px, 220px) minmax(180px, 1fr) minmax(90px, auto);
+  align-items: center;
+  gap: 14px;
+  min-height: 58px;
+  padding: 9px 14px;
+  border: 1px solid rgba(24, 24, 27, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.38);
+}
+.duration-rank {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  background: rgba(24, 24, 27, 0.06);
+  color: var(--kk-text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.duration-rank.is-1 { color: #92400e; background: #fef3c7; }
+.duration-rank.is-2 { color: #475569; background: #e2e8f0; }
+.duration-rank.is-3 { color: #9a3412; background: #ffedd5; }
+.duration-person {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.duration-person > i {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--cockpit-ink);
+  color: #fff;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+}
+.duration-person > span { min-width: 0; }
+.duration-person strong,
+.duration-person small { display: block; }
+.duration-person strong {
+  overflow: hidden;
+  color: var(--kk-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.duration-person small {
+  margin-top: 3px;
+  color: var(--kk-text-muted);
+  font-size: 10px;
+}
+.duration-bar {
+  height: 8px;
+  display: flex;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(24, 24, 27, 0.06);
+}
+.duration-bar i {
+  height: 100%;
+  display: block;
+  flex: none;
+}
+.duration-bar i.completed { background: linear-gradient(90deg, #18181b, #52525b); }
+.duration-bar i.incomplete { background: #f59e0b; }
+.duration-value {
+  color: var(--kk-text);
+  font-size: 13px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .drill-list { min-height: 120px; }
 .drill-list > button {
   width: 100%;
@@ -1210,6 +1403,19 @@ onBeforeUnmount(() => {
     display: grid;
     grid-template-columns: 1fr 1fr;
     width: 100%;
+  }
+  .duration-summary {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+  .duration-ranking li {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    gap: 10px;
+  }
+  .duration-bar {
+    grid-column: 2 / -1;
+    grid-row: 2;
   }
   .member-focus {
     grid-template-columns: 1fr;

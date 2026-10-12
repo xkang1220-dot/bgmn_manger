@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Link } from '@element-plus/icons-vue'
 import type { UploadFile, UploadProps } from 'element-plus'
@@ -8,6 +8,7 @@ import { useUserStore } from '@/stores/user'
 import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
 import RichTextEditor from '@/components/common/RichTextEditor.vue'
 import SubtaskTimeline from '@/components/task/SubtaskTimeline.vue'
+import { workStatusApi, type WorkStatus } from '@/api/workStatus'
 
 const props = defineProps<{
   modelValue: boolean
@@ -35,6 +36,7 @@ const loading = ref(false)
 const saving = ref(false)
 const closing = ref(false)
 const reviewing = ref(false)
+const isWorking = ref(true)
 const editing = ref(false)
 const isNew = ref(false)
 const isTaskManager = computed(() => userStore.hasPermission('project:task:add'))
@@ -93,6 +95,16 @@ const detailPane = ref('comments')
 const subtaskParentTitle = ref('')
 const pendingAction = ref<'view' | 'edit' | 'transfer' | 'close' | 'subtask'>('view')
 
+const completedDurationRows = computed(() => {
+  if (!detail.value) return []
+  return [detail.value, ...(detail.value.children || [])]
+    .filter((task: any) => task.status === 2 && task.workDurationSeconds != null)
+})
+
+const totalWorkDurationSeconds = computed(() =>
+  completedDurationRows.value.reduce((total: number, task: any) => total + Number(task.workDurationSeconds || 0), 0),
+)
+
 const form = reactive<any>({
   id: undefined,
   title: '',
@@ -132,8 +144,10 @@ function emptyForm() {
     title: '',
     projectId: props.defaultProjectId != null ? Number(props.defaultProjectId) : undefined,
     parentTaskId: undefined,
-    assigneeId: selfId,
-    holderId: selfId,
+    // 人员下拉依赖所属项目的候选人列表。未选择项目时不预填用户 ID，
+    // 否则 el-select 找不到对应 option，会直接把原始 ID 显示在输入框中。
+    assigneeId: undefined,
+    holderId: undefined,
     participantIds: selfId != null ? [selfId] : ([] as number[]),
     status: 0,
     priority: 2,
@@ -191,6 +205,27 @@ function syncImageFileIds() {
 function fmtTime(t?: string) {
   if (!t) return '—'
   return t.replace('T', ' ').slice(0, 16)
+}
+
+function onWorkStatusChanged(event: Event) {
+  isWorking.value = (event as CustomEvent<WorkStatus>).detail.working
+}
+
+onMounted(async () => {
+  window.addEventListener('work-status-changed', onWorkStatusChanged)
+  const status = await workStatusApi.status().catch(() => null)
+  if (status) isWorking.value = status.working
+})
+
+onUnmounted(() => window.removeEventListener('work-status-changed', onWorkStatusChanged))
+
+function fmtDuration(seconds?: number | null) {
+  if (seconds == null) return '—'
+  const totalMinutes = Math.max(0, Math.round(Number(seconds) / 60))
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (!hours) return `${minutes}分钟`
+  return minutes ? `${hours}小时 ${minutes}分钟` : `${hours}小时`
 }
 
 function disableStartDate(date: Date) {
@@ -300,8 +335,14 @@ async function loadProjectCandidates(projectId?: number) {
     })
   }
   candidateUsers.value = [...map.values()]
-  if (form.assigneeId == null && d.ownerId != null) form.assigneeId = Number(d.ownerId)
-  if (form.holderId == null && d.ownerId != null) form.holderId = Number(d.ownerId)
+  const selfId = Number(userStore.user?.id)
+  const defaultUserId = map.has(selfId)
+    ? selfId
+    : d.ownerId != null
+      ? Number(d.ownerId)
+      : undefined
+  if (form.assigneeId == null) form.assigneeId = defaultUserId
+  if (form.holderId == null) form.holderId = defaultUserId
   candidateProjectId.value = projectId
   const have = new Set(candidateUsers.value.map((u) => Number(u.id)))
   const ids = form.participantIds || []
@@ -355,7 +396,10 @@ function upsertProjectOption(d: any) {
 
 async function ensureOptions() {
   // 每次打开都刷新，避免新建项目后抽屉仍用旧列表导致默认项目空白
-  projects.value = (await bizApi.taskManagementProjects()) || []
+  // 新建任务应列出当前用户担任负责人或参与人的全部项目，不能使用默认的
+  // “我的任务”范围；后者只包含已经负责/持有过任务的项目，会让尚未分配
+  // 任务的项目成员无法选择项目并创建第一条任务。
+  projects.value = (await bizApi.taskManagementProjects('all')) || []
   await loadProjectCandidates(form.projectId)
 }
 
@@ -386,13 +430,17 @@ watch(
   () => form.projectId,
   async (pid) => {
     if (!visible.value || syncingDetail.value) return
+    if (pid !== detail.value?.projectId) {
+      // 切换项目时先清除旧项目的人员值，再由新项目候选人设置合法默认值。
+      form.assigneeId = undefined
+      form.holderId = undefined
+    }
     await loadProjectCandidates(pid)
     if (pid !== detail.value?.projectId) {
       const allowed = new Set(
         candidateUsers.value.filter(isEligibleCandidate).map((u) => Number(u.id)),
       )
       form.participantIds = (form.participantIds || []).filter((id: number) => allowed.has(Number(id)))
-      if (form.holderId != null && !allowed.has(Number(form.holderId))) form.holderId = undefined
       const selfId = userStore.user?.id
       if (selfId != null && allowed.has(Number(selfId)) && !form.participantIds.includes(selfId)) {
         form.participantIds = [...form.participantIds, selfId]
@@ -565,6 +613,15 @@ async function reviewCompletion(approved: boolean) {
 }
 
 async function openTransfer() {
+  if (Number(detail.value?.status) === 2) {
+    ElMessage.warning('已完成的任务不能移交')
+    return
+  }
+  if (!isNew.value && !isWorking.value && [1, 2].includes(Number(form.status))
+      && Number(form.status) !== Number(detail.value?.status)) {
+    ElMessage.warning('当前未处于上班状态，不能开始或完成任务')
+    return
+  }
   await loadProjectCandidates(form.projectId || detail.value?.projectId)
   transferForm.holderId = undefined
   transferForm.remark = ''
@@ -821,6 +878,35 @@ function commentAttachmentUrl(file: any, preview = false) {
           <el-button type="danger" plain :disabled="reviewing" @click="reviewCompletion(false)">驳回</el-button>
         </div>
 
+        <section v-if="completedDurationRows.length" class="duration-section" aria-labelledby="duration-title">
+          <div class="duration-section__head">
+            <h4 id="duration-title">任务耗时明细</h4>
+            <span>已扣除非工作时间与员工下班时间</span>
+          </div>
+          <div class="duration-table-wrap">
+            <table class="duration-table">
+              <thead>
+                <tr>
+                  <th scope="col">任务名称</th>
+                  <th scope="col">执行人</th>
+                  <th scope="col">耗时</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="task in completedDurationRows" :key="task.id">
+                  <td>{{ task.title }}</td>
+                  <td>{{ task.assigneeName || '未指定' }}</td>
+                  <td class="duration-value">{{ fmtDuration(task.workDurationSeconds) }}</td>
+                </tr>
+                <tr class="duration-total">
+                  <th scope="row" colspan="2">总计</th>
+                  <td class="duration-value">{{ fmtDuration(totalWorkDurationSeconds) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <div class="section comments">
           <el-tabs v-model="detailPane" class="detail-tabs">
             <el-tab-pane :label="`评论${comments.length ? ` (${comments.length})` : ''}`" name="comments">
@@ -892,7 +978,12 @@ function commentAttachmentUrl(file: any, preview = false) {
                       </div>
                       <time class="flow-time" :datetime="f.createTime">{{ fmtTime(f.createTime) }}</time>
                     </header>
-                    <div class="flow-summary">{{ f.summary }}</div>
+                    <div class="flow-summary-row">
+                      <div class="flow-summary">{{ f.summary }}</div>
+                      <span v-if="f.toStatus === 2 && f.workDurationSeconds != null" class="flow-duration">
+                        任务耗时 {{ fmtDuration(f.workDurationSeconds) }}
+                      </span>
+                    </div>
                     <div v-if="f.taskTitle && f.taskId !== detail.id" class="flow-task-name">关联任务：{{ f.taskTitle }}</div>
                     <div v-if="f.remark" class="flow-remark">
                       <span class="flow-remark-label">说明</span>
@@ -954,9 +1045,10 @@ function commentAttachmentUrl(file: any, preview = false) {
                 </el-select>
               </el-form-item>
               <el-form-item label="持有人" required>
-                <el-select v-model="form.holderId" filterable placeholder="选择唯一持有人" style="width: 100%">
+                <el-select v-model="form.holderId" filterable placeholder="选择唯一持有人" style="width: 100%" :disabled="!isNew && detail?.status === 2">
                   <el-option v-for="u in candidateUsers.filter(isEligibleCandidate)" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
                 </el-select>
+                <span v-if="!isNew && detail?.status === 2" class="field-help">已完成任务不可更换持有人；如属误操作，请先修改任务状态并保存</span>
               </el-form-item>
               <el-form-item label="参与人员">
                 <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="选择协作成员" style="width: 100%" :disabled="!form.projectId || (!isNew && !userStore.hasPermission('project:task:add'))">
@@ -971,10 +1063,20 @@ function commentAttachmentUrl(file: any, preview = false) {
                 </el-radio-group>
               </el-form-item>
               <el-form-item label="任务状态">
-                <el-tag :type="statusType[isNew ? 0 : form.status]" effect="light">
-                  {{ statusMap[isNew ? 0 : form.status] || '待办' }}
-                </el-tag>
-                <span v-if="isNew" class="field-help">新建任务默认保存为待办</span>
+                <template v-if="isNew">
+                  <el-tag :type="statusType[0]" effect="light">待办</el-tag>
+                  <span class="field-help">新建任务默认保存为待办</span>
+                </template>
+                <template v-else>
+                  <el-select v-model="form.status" placeholder="选择任务状态" style="width: 100%">
+                    <el-option label="待办" :value="0" />
+                    <el-option label="进行中" :value="1" :disabled="!isWorking && form.status !== 1" />
+                    <el-option label="已完成" :value="2" :disabled="!isWorking && form.status !== 2" />
+                    <el-option v-if="form.status === 4" label="待确认完成" :value="4" disabled />
+                  </el-select>
+                  <span v-if="!isWorking" class="field-help">当前为下班状态，只允许将进行中任务暂停为待办</span>
+                  <span v-else class="field-help">可用于纠正误操作；关闭任务请使用“关闭”操作</span>
+                </template>
               </el-form-item>
             </div>
           </section>
@@ -1416,6 +1518,35 @@ function commentAttachmentUrl(file: any, preview = false) {
   border-top: 1px solid #f1f5f9;
 }
 
+.duration-section {
+  margin-top: 18px;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.duration-section__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.duration-section__head h4 { margin: 0; color: #0f172a; font-size: 14px; }
+.duration-section__head span { color: #64748b; font-size: 12px; }
+.duration-table-wrap { overflow-x: auto; }
+.duration-table { width: 100%; min-width: 480px; border-collapse: collapse; font-size: 13px; }
+.duration-table th, .duration-table td { padding: 11px 14px; border-bottom: 1px solid #edf2f7; text-align: left; }
+.duration-table thead th { color: #64748b; background: #fff; font-weight: 600; }
+.duration-table tbody td { color: #334155; }
+.duration-table tr:last-child th, .duration-table tr:last-child td { border-bottom: 0; }
+.duration-value { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.duration-total th, .duration-total td { color: #1d4ed8; background: #eff6ff; font-weight: 700; }
+
 .detail-tabs :deep(.el-tabs__header) {
   margin-bottom: 12px;
 }
@@ -1610,6 +1741,26 @@ function commentAttachmentUrl(file: any, preview = false) {
   overflow-wrap: anywhere;
 }
 
+.flow-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.flow-duration {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border: 1px solid #bbf7d0;
+  border-radius: 999px;
+  color: #15803d;
+  background: #f0fdf4;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .flow-task-name { margin-top: 6px; color: var(--kk-text-muted); font-size: 12px; }
 .flow-remark {
   display: flex;
@@ -1706,6 +1857,11 @@ function commentAttachmentUrl(file: any, preview = false) {
 
   .flow-time {
     padding-left: 36px;
+  }
+
+  .duration-section__head, .flow-summary-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

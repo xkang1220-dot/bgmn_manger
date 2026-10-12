@@ -52,6 +52,10 @@ public class PmTaskFlow extends BaseEntity {
     @TableField(exist = false)
     private String summary;
 
+    /** 状态变更为已完成时，对应任务的有效耗时（秒）。 */
+    @TableField(exist = false)
+    private Long workDurationSeconds;
+
     @TableField(exist = false)
     private List<SysFile> images;
 

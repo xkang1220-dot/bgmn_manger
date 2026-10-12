@@ -9,6 +9,7 @@ import { useUserStore } from '@/stores/user'
 import TaskDetailDrawer from '@/components/task/TaskDetailDrawer.vue'
 import CompanyTaskShareDialog from '@/components/task/CompanyTaskShareDialog.vue'
 import { companyTaskShareApi, type CompanyTaskShareOption } from '@/api/companyTaskShare'
+import { workStatusApi, type WorkStatus } from '@/api/workStatus'
 
 const route = useRoute()
 const userStore = useUserStore()
@@ -81,6 +82,7 @@ const activeTaskId = ref<number | null>(null)
 type TaskDrawerAction = 'view' | 'edit' | 'transfer' | 'close' | 'subtask'
 const taskDrawerAction = ref<TaskDrawerAction>('view')
 const listLoading = ref(false)
+const isWorking = ref(true)
 const shareOpen = ref(false)
 const shareCompanies = ref<CompanyTaskShareOption[]>([])
 const projectNavCollapsed = ref(false)
@@ -372,8 +374,10 @@ function open(row?: any, action: TaskDrawerAction = 'view') {
 }
 
 function canCreateSubtask(row: any) {
-  // 仅父任务可新建子任务；子任务行不展示该入口
-  return !isSubtaskRow(row) && [0, 1].includes(row.status) && userStore.hasPermission('project:task:add')
+  // 项目负责人和项目参与人都可创建任务；成员资格由后端统一校验。
+  // 这里只限制可挂子任务的层级和父任务状态，避免把“新增任务”菜单权限
+  // 误当成项目成员创建子任务的前置条件。
+  return !isSubtaskRow(row) && [0, 1].includes(row.status)
 }
 
 function hasUnfinishedChildren(row: any) {
@@ -391,7 +395,7 @@ function canEditTask(row: any) {
 }
 
 function canTransferTask(row: any) {
-  return userStore.hasPermission('project:task:add') && row.canTransfer && row.status !== 3
+  return userStore.hasPermission('project:task:add') && row.canTransfer && ![2, 3].includes(Number(row.status))
 }
 
 function canCloseTask(row: any) {
@@ -423,6 +427,19 @@ function onTaskAction(row: any, command: string) {
   else if (command === 'review-reject') void review(row, false)
 }
 
+function onWorkStatusChanged(event: Event) {
+  isWorking.value = (event as CustomEvent<WorkStatus>).detail.working
+}
+
+function taskProgressDisabledReason(row: any, action: 'start' | 'complete') {
+  if (!isWorking.value) return `当前为下班状态，不能${action === 'start' ? '开始' : '完成'}任务`
+  if (action === 'start' && Number(row.status) === 1) return '任务已在进行中'
+  if (Number(row.status) === 2) return '任务已完成'
+  if (isParentPending(row)) return '父任务为待办状态'
+  if (action === 'complete' && hasUnfinishedChildren(row)) return '请先完成所有子任务'
+  return ''
+}
+
 const taskStatusActions: Record<number, { title: string; verb: string; success: string; type: 'warning' | 'success' | 'info' }> = {
   0: { title: '暂停任务', verb: '暂停', success: '任务已暂停并转为待办', type: 'info' },
   1: { title: '开始任务', verb: '开始', success: '任务已开始', type: 'warning' },
@@ -431,6 +448,14 @@ const taskStatusActions: Record<number, { title: string; verb: string; success: 
 
 async function changeTaskStatus(row: any, status: 0 | 1 | 2) {
   if (Number(row.status) === status) return
+  if (Number(row.status) === 2) {
+    ElMessage.warning('已完成的任务不能再次开始、暂停或关闭')
+    return
+  }
+  if ((status === 1 || status === 2) && !isWorking.value) {
+    ElMessage.warning('当前未处于上班状态，不能开始或完成任务')
+    return
+  }
   if ((status === 1 || status === 2) && isParentPending(row)) {
     ElMessage.warning('父任务为待办时，子任务不能开始或完成')
     return
@@ -481,6 +506,9 @@ async function review(row: any, approved: boolean) {
 }
 
 onMounted(async () => {
+  const workStatus = await workStatusApi.status().catch(() => null)
+  if (workStatus) isWorking.value = workStatus.working
+  window.addEventListener('work-status-changed', onWorkStatusChanged)
   projects.value = await bizApi.taskManagementProjects(taskScope.value).catch(() => [])
   shareCompanies.value = userStore.hasPermission('project:task:share')
     ? await companyTaskShareApi.options().catch(() => [])
@@ -500,6 +528,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('work-status-changed', onWorkStatusChanged)
   for (const timer of hoverTimers.values()) clearTimeout(timer)
   hoverTimers.clear()
 })
@@ -758,10 +787,10 @@ onUnmounted(() => {
                     <el-dropdown-item v-if="canCreateSubtask(row)" command="subtask">子任务</el-dropdown-item>
                     <el-dropdown-item v-if="canEditTask(row)" command="edit">编辑</el-dropdown-item>
                     <el-dropdown-item v-if="canTransferTask(row)" command="transfer">移交</el-dropdown-item>
-                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="start" divided :disabled="row.status === 1 || isParentPending(row)">开始任务</el-dropdown-item>
-                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="complete" :disabled="row.status === 2 || hasUnfinishedChildren(row) || isParentPending(row)">完成任务</el-dropdown-item>
-                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="pause" :disabled="row.status === 0">暂停任务</el-dropdown-item>
-                    <el-dropdown-item v-if="canCloseTask(row)" command="close" divided>关闭</el-dropdown-item>
+                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="start" divided :disabled="!isWorking || row.status === 1 || row.status === 2 || isParentPending(row)" :title="taskProgressDisabledReason(row, 'start')">开始任务</el-dropdown-item>
+                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="complete" :disabled="!isWorking || row.status === 2 || hasUnfinishedChildren(row) || isParentPending(row)" :title="taskProgressDisabledReason(row, 'complete')">完成任务</el-dropdown-item>
+                    <el-dropdown-item v-if="canChangeTaskStatus(row)" command="pause" :disabled="row.status === 0 || row.status === 2">暂停任务</el-dropdown-item>
+                    <el-dropdown-item v-if="canCloseTask(row)" command="close" divided :disabled="row.status === 2">关闭</el-dropdown-item>
                     <el-dropdown-item v-if="canReviewTask(row)" command="review-pass" divided>确认完成</el-dropdown-item>
                     <el-dropdown-item v-if="canReviewTask(row)" command="review-reject">驳回</el-dropdown-item>
                   </el-dropdown-menu>

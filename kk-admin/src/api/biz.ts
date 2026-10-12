@@ -196,6 +196,9 @@ export const bizApi = {
   taskManagementProjects(scope: 'mine' | 'all' = 'mine') {
     return request<any[]>({ url: '/project/task-options', method: 'get', params: { scope } })
   },
+  taskDashboardProjects() {
+    return request<any[]>({ url: '/project/task-dashboard-options', method: 'get' })
+  },
   myProjects() {
     return request<any[]>({ url: '/project/mine', method: 'get' })
   },

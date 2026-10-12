@@ -22,6 +22,8 @@ import com.kk.biz.mapper.PmTaskMemberMapper;
 import com.kk.biz.service.PmTaskService;
 import com.kk.biz.service.PmProjectService;
 import com.kk.biz.service.SysFileService;
+import com.kk.biz.service.TaskWorkDurationService;
+import com.kk.biz.service.UserWorkStatusService;
 import com.kk.biz.workflow.ProjectScales;
 import com.kk.common.exception.BusinessException;
 import com.kk.system.entity.SysUser;
@@ -39,6 +41,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.Duration;
 import java.time.DayOfWeek;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAdjusters;
@@ -76,6 +79,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     private final DataScopeService dataScopeService;
     private final SysNotificationService notificationService;
     private final PmProjectService projectService;
+    private final TaskWorkDurationService taskWorkDurationService;
+    private final UserWorkStatusService userWorkStatusService;
 
     private static final Map<Integer, String> STATUS_LABEL = Map.of(
             0, "待办",
@@ -128,8 +133,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             wrapper.isNull(PmTask::getParentTaskId);
         }
         if (StringUtils.hasText(periodFrom) && StringUtils.hasText(periodTo)) {
-            wrapper.ge(PmTask::getCreateTime, LocalDate.parse(periodFrom).atStartOfDay())
-                    .lt(PmTask::getCreateTime, LocalDate.parse(periodTo).atStartOfDay());
+            applyTaskExecutionPeriodFilter(wrapper, periodFrom, periodTo);
         }
         LocalDate today = LocalDate.now();
         LocalDateTime now = LocalDateTime.now();
@@ -182,7 +186,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         applyProjectIdFilter(wrapper, projectId);
         if (dashboardDrill) {
-            applyHolderFilter(wrapper, participantId);
+            applyDashboardPersonFilter(wrapper, participantId);
         } else {
             applyParticipantFilter(wrapper, participantId);
         }
@@ -194,7 +198,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 applyMineTaskTreeScope(wrapper);
             }
         } else {
-            applyVisibleScope(wrapper);
+            // 任务驾驶舱是领导全局视角，不叠加当前登录人的个人任务可见范围。
+            if (!(dashboardDrill && StpUtil.hasRole("task_manager"))) {
+                applyVisibleScope(wrapper);
+            }
             // 驾驶舱分类下钻仅向 task_manager 开放全局范围；其它管理查询仍沿用个人口径。
             if (managementScope && !(dashboardDrill && StpUtil.hasRole("task_manager"))) {
                 applyManagementProjectScope(wrapper);
@@ -373,6 +380,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                     .toList();
         }
         fillExtras(children);
+        fillWorkDuration(task);
+        children.forEach(this::fillWorkDuration);
         task.setChildren(children);
         return task;
     }
@@ -402,6 +411,13 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
     }
 
+    /** 驾驶舱顶部人员筛选：匹配任务负责人或唯一持有人，不包含普通参与人。 */
+    private void applyDashboardPersonFilter(LambdaQueryWrapper<PmTask> wrapper, Long userId) {
+        if (userId != null) {
+            wrapper.and(w -> w.eq(PmTask::getAssigneeId, userId).or().eq(PmTask::getHolderId, userId));
+        }
+    }
+
     private Map<String, Object> summaryInternal(Long projectId, Integer priority, Long participantId, String title,
                                                 boolean managementScope, boolean holderStatistics) {
         return summaryInternal(projectId, priority, participantId, title, managementScope, holderStatistics, null, null);
@@ -419,16 +435,17 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 .eq(priority != null, PmTask::getPriority, priority)
                 .like(StringUtils.hasText(title), PmTask::getTitle, title);
         if (StringUtils.hasText(periodFrom) && StringUtils.hasText(periodTo)) {
-            wrapper.ge(PmTask::getCreateTime, LocalDate.parse(periodFrom).atStartOfDay())
-                    .lt(PmTask::getCreateTime, LocalDate.parse(periodTo).atStartOfDay());
+            applyTaskExecutionPeriodFilter(wrapper, periodFrom, periodTo);
         }
         applyProjectIdFilter(wrapper, projectId);
         if (holderStatistics) {
-            applyHolderFilter(wrapper, participantId);
+            applyDashboardPersonFilter(wrapper, participantId);
         } else {
             applyParticipantFilter(wrapper, participantId);
         }
-        applyVisibleScope(wrapper);
+        if (!holderStatistics) {
+            applyVisibleScope(wrapper);
+        }
         if (managementScope) {
             applyManagementProjectScope(wrapper);
         }
@@ -506,7 +523,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             // 驾驶舱按唯一持有人归属任务；父任务和子任务都是独立记录，各计一次。
             Set<Long> taskUserIds;
             if (holderStatistics) {
-                taskUserIds = row.getHolderId() == null ? Set.of() : Set.of(row.getHolderId());
+                // 未筛选时仍按唯一持有人归属；筛选后，负责人或持有人命中的任务均归入所选人员统计。
+                taskUserIds = participantId == null
+                        ? (row.getHolderId() == null ? Set.of() : Set.of(row.getHolderId()))
+                        : Set.of(participantId);
             } else {
                 taskUserIds = new HashSet<>(taskMemberIds.getOrDefault(row.getId(), Set.of()));
                 if (row.getAssigneeId() != null) taskUserIds.add(row.getAssigneeId());
@@ -615,6 +635,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         memberTaskStats.sort(Comparator
                 .<Map<String, Object>>comparingLong(item -> -((Number) item.get("total")).longValue())
                 .thenComparing(item -> String.valueOf(item.get("memberName"))));
+        List<Map<String, Object>> employeeDurationStats = holderStatistics
+                ? buildEmployeeDurationStats(projectId, priority, participantId, title, periodFrom, periodTo)
+                : List.of();
         List<Map<String, Object>> trend = new ArrayList<>();
         LocalDate thisMonday = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
         for (int i = 5; i >= 0; i--) {
@@ -657,8 +680,83 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         map.put("riskTasks", riskTasks.stream().limit(8).toList());
         map.put("ownerLoad", ownerLoad.stream().limit(8).toList());
         map.put("memberTaskStats", memberTaskStats);
+        map.put("employeeDurationStats", employeeDurationStats);
         map.put("trend", trend);
         return map;
+    }
+
+    /** 员工耗时按任务执行区间与统计周期是否相交筛选，耗时仍取任务自身的完整执行区间。 */
+    private List<Map<String, Object>> buildEmployeeDurationStats(Long projectId, Integer priority,
+                                                                  Long participantId, String title,
+                                                                  String periodFrom, String periodTo) {
+        LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<PmTask>()
+                .select(PmTask::getId, PmTask::getAssigneeId, PmTask::getHolderId, PmTask::getStatus,
+                        PmTask::getStartedAt, PmTask::getCompletedAt)
+                .in(PmTask::getStatus, 0, 1, 2, 4)
+                .isNotNull(PmTask::getStartedAt)
+                .eq(priority != null, PmTask::getPriority, priority)
+                .like(StringUtils.hasText(title), PmTask::getTitle, title);
+        if (StringUtils.hasText(periodFrom) && StringUtils.hasText(periodTo)) {
+            applyTaskExecutionPeriodFilter(wrapper, periodFrom, periodTo);
+        }
+        applyProjectIdFilter(wrapper, projectId);
+        applyDashboardPersonFilter(wrapper, participantId);
+        List<PmTask> durationTasks = list(wrapper);
+        Set<Long> memberIds = durationTasks.stream()
+                .map(task -> participantId == null ? task.getHolderId() : participantId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        Map<Long, SysUser> memberMap = loadUserMap(memberIds);
+        Map<Long, Map<String, Object>> statsMap = new HashMap<>();
+        LocalDateTime calculationNow = LocalDateTime.now();
+        for (PmTask task : durationTasks) {
+            Long memberId = participantId == null ? task.getHolderId() : participantId;
+            if (memberId == null) continue;
+            boolean completed = Integer.valueOf(2).equals(task.getStatus()) && task.getCompletedAt() != null;
+            LocalDateTime durationEnd = completed ? task.getCompletedAt() : calculationNow;
+            SysUser member = memberMap.get(memberId);
+            Map<String, Object> stats = statsMap.computeIfAbsent(memberId, id -> {
+                Map<String, Object> item = new HashMap<>();
+                item.put("memberId", id);
+                item.put("memberName", member == null ? "用户" + id : userName(member));
+                item.put("durationSeconds", 0L);
+                item.put("completedDurationSeconds", 0L);
+                item.put("incompleteDurationSeconds", 0L);
+                item.put("completedTasks", 0L);
+                item.put("incompleteTasks", 0L);
+                item.put("timedTasks", 0L);
+                return item;
+            });
+            increment(stats, completed ? "completedTasks" : "incompleteTasks");
+            long seconds = Math.max(0L, taskWorkDurationService.calculate(
+                    task.getId(), memberId, task.getStartedAt(), durationEnd).getSeconds());
+            stats.put("durationSeconds", ((Number) stats.get("durationSeconds")).longValue() + seconds);
+            String durationKey = completed ? "completedDurationSeconds" : "incompleteDurationSeconds";
+            stats.put(durationKey, ((Number) stats.get(durationKey)).longValue() + seconds);
+            increment(stats, "timedTasks");
+        }
+        List<Map<String, Object>> result = new ArrayList<>(statsMap.values());
+        result.sort(Comparator
+                .<Map<String, Object>>comparingLong(item -> -((Number) item.get("durationSeconds")).longValue())
+                .thenComparing(item -> String.valueOf(item.get("memberName"))));
+        for (int index = 0; index < result.size(); index++) {
+            result.get(index).put("rank", index + 1);
+        }
+        return result;
+    }
+
+    /** 查询周期仅用于筛选：任务实际执行区间与周期相交即可。 */
+    private void applyTaskExecutionPeriodFilter(LambdaQueryWrapper<PmTask> wrapper,
+                                                 String periodFrom, String periodTo) {
+        LocalDateTime from = LocalDate.parse(periodFrom).atStartOfDay();
+        LocalDateTime to = LocalDate.parse(periodTo).atStartOfDay();
+        wrapper.lt(PmTask::getStartedAt, to);
+        if (LocalDateTime.now().isBefore(from)) {
+            // 未完成任务的临时结束点是当前时间，因此不会与未来周期相交。
+            wrapper.ge(PmTask::getCompletedAt, from);
+        } else {
+            wrapper.and(w -> w.isNull(PmTask::getCompletedAt).or().ge(PmTask::getCompletedAt, from));
+        }
     }
 
     private void increment(Map<String, Object> item, String key) {
@@ -927,8 +1025,18 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         assertCanAccessTask(existing);
         assertTaskNotClosed(existing);
         assertCanWriteTask(existing);
+        if (task.getStatus() != null && (task.getStatus() < 0 || task.getStatus() > 4)) {
+            throw new BusinessException("状态不正确");
+        }
         if (task.getStatus() != null && task.getStatus() == 3 && !Objects.equals(existing.getStatus(), 3)) {
             throw new BusinessException("关闭任务请使用关闭操作并填写原因");
+        }
+        if (Integer.valueOf(4).equals(task.getStatus()) && !Integer.valueOf(4).equals(existing.getStatus())) {
+            throw new BusinessException("待确认完成状态只能通过完成任务操作进入");
+        }
+        if (!Objects.equals(task.getStatus(), existing.getStatus())
+                && (Integer.valueOf(1).equals(task.getStatus()) || Integer.valueOf(2).equals(task.getStatus()))) {
+            assertWorkingForTaskProgress();
         }
         if (StpUtil.hasPermission("project:task:add")) {
             validateTaskReward(task.getTaskReward());
@@ -951,6 +1059,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (task.getAssigneeId() == null) throw new BusinessException("请指定任务负责人");
         if (task.getHolderId() == null) task.setHolderId(existing.getHolderId());
         if (task.getHolderId() == null) throw new BusinessException("请选择任务持有人");
+        if (Integer.valueOf(2).equals(existing.getStatus())
+                && !Objects.equals(task.getHolderId(), existing.getHolderId())) {
+            throw new BusinessException("已完成的任务不能移交");
+        }
         assertUsersInCompany(companyId, task.getAssigneeId(), task.getParticipantIds());
         assertParticipantsEligible(existing.getProjectId(), List.of(task.getAssigneeId()));
         assertParticipantsEligible(existing.getProjectId(), List.of(task.getHolderId()));
@@ -1118,6 +1230,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         if (status.equals(oldStatus)) {
             return;
         }
+        if (Objects.equals(oldStatus, 2)) {
+            throw new BusinessException("已完成的任务不能再次开始、暂停或关闭");
+        }
         if (Objects.equals(oldStatus, 3)) {
             throw new BusinessException("已关闭的任务不可修改，仅可查看");
         }
@@ -1135,6 +1250,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             assertChildrenCompletedBeforeFinish(existing);
         }
         if (status == 1 || status == 2) {
+            assertWorkingForTaskProgress();
             assertParentStartedBeforeChildProgress(existing);
         }
         int targetStatus = status == 2 ? completionTargetStatus(existing.getTaskReward()) : status;
@@ -1218,6 +1334,9 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         }
         assertCanAccessTask(existing);
         assertTaskNotClosed(existing);
+        if (Integer.valueOf(2).equals(existing.getStatus())) {
+            throw new BusinessException("已完成的任务不能移交");
+        }
         assertCanWriteTask(existing);
         assertCanTransfer(existing);
         SysUser target = userService.getById(targetUserId);
@@ -1401,7 +1520,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             visibleTaskQuery.or().eq(PmTask::getParentTaskId, task.getId());
         }
         visibleTaskQuery.select(PmTask::getId, PmTask::getProjectId,
-                PmTask::getAssigneeId, PmTask::getTitle);
+                PmTask::getAssigneeId, PmTask::getTitle, PmTask::getStartedAt, PmTask::getCompletedAt);
         List<PmTask> visibleTasks = list(visibleTaskQuery)
                 .stream().filter(this::canAccessTask).toList();
         Set<Long> visibleTaskIds = visibleTasks.stream().map(PmTask::getId).collect(Collectors.toSet());
@@ -1412,7 +1531,29 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 .orderByDesc(PmTaskFlow::getId));
         list.forEach(flow -> flow.setTaskTitle(taskTitles.get(flow.getTaskId())));
         fillFlows(list);
+        Map<Long, PmTask> taskMap = visibleTasks.stream()
+                .collect(Collectors.toMap(PmTask::getId, item -> item));
+        list.stream()
+                .filter(flow -> Integer.valueOf(2).equals(flow.getToStatus()))
+                .forEach(flow -> {
+                    PmTask relatedTask = taskMap.get(flow.getTaskId());
+                    if (relatedTask != null && relatedTask.getStartedAt() != null && flow.getCreateTime() != null) {
+                        Duration duration = taskWorkDurationService.calculate(relatedTask.getId(), relatedTask.getAssigneeId(),
+                                relatedTask.getStartedAt(), flow.getCreateTime());
+                        flow.setWorkDurationSeconds(Math.max(0L, duration.getSeconds()));
+                    }
+                });
         return list;
+    }
+
+    private void fillWorkDuration(PmTask task) {
+        if (task == null || !Integer.valueOf(2).equals(task.getStatus())
+                || task.getStartedAt() == null || task.getCompletedAt() == null) {
+            return;
+        }
+        Duration duration = taskWorkDurationService.calculate(task.getId(), task.getAssigneeId(),
+                task.getStartedAt(), task.getCompletedAt());
+        task.setWorkDurationSeconds(Math.max(0L, duration.getSeconds()));
     }
 
     private void validateParentTask(Long parentTaskId, Long projectId, Long currentTaskId) {
@@ -2054,13 +2195,24 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             update.setStartedAt(now);
         }
         if (status != null && status == 2) {
-            update.setCompletedAt(now);
+            if (existing == null || !Integer.valueOf(2).equals(existing.getStatus())
+                    || existing.getCompletedAt() == null) {
+                update.setCompletedAt(now);
+            } else {
+                update.setCompletedAt(existing.getCompletedAt());
+            }
         } else if (existing != null && Integer.valueOf(2).equals(existing.getStatus())) {
             update.setCompletedAt(null);
         }
         if (!StringUtils.hasText(update.getRiskLevel())) {
             update.setRiskLevel(existing == null || !StringUtils.hasText(existing.getRiskLevel())
                     ? "NORMAL" : existing.getRiskLevel());
+        }
+    }
+
+    private void assertWorkingForTaskProgress() {
+        if (!userWorkStatusService.isWorking(StpUtil.getLoginIdAsLong())) {
+            throw new BusinessException("当前未处于上班状态，不能开始或完成任务；暂停任务不受影响");
         }
     }
 

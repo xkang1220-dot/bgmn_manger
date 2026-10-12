@@ -8,10 +8,12 @@ import com.kk.biz.entity.FinPool;
 import com.kk.biz.entity.FinProjectAccount;
 import com.kk.biz.entity.HrWallet;
 import com.kk.biz.entity.PmProject;
+import com.kk.biz.entity.PmProjectMember;
 import com.kk.biz.mapper.FinLedgerMapper;
 import com.kk.biz.mapper.FinPoolMapper;
 import com.kk.biz.mapper.FinProjectAccountMapper;
 import com.kk.biz.mapper.PmProjectMapper;
+import com.kk.biz.mapper.PmProjectMemberMapper;
 import com.kk.biz.service.FinProjectAccountService;
 import com.kk.biz.service.HrWalletService;
 import com.kk.biz.service.PmProjectService;
@@ -52,6 +54,7 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
     private final FinLedgerMapper ledgerMapper;
     private final FinPoolMapper poolMapper;
     private final PmProjectMapper projectMapper;
+    private final PmProjectMemberMapper projectMemberMapper;
     private final HrWalletService walletService;
     private final SysUserService userService;
     private final SysDeptService deptService;
@@ -99,10 +102,10 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
             throw new BusinessException("项目不存在");
         }
         String scale = project.getScale() == null ? ProjectScales.NORMAL : project.getScale();
-        assertProjectVisible(project);
         if (!ProjectScales.isFinanceVisible(scale)) {
             return null;
         }
+        assertProjectParticipant(project);
         FinProjectAccount account = getOrCreate(projectId);
         fillExtra(List.of(account), Map.of(project.getId(), project));
         applyMajorShellAggregation(List.of(account), Map.of(project.getId(), project));
@@ -111,6 +114,20 @@ public class FinProjectAccountServiceImpl extends ServiceImpl<FinProjectAccountM
         }
         fillCompanyPoolBalance(account, project);
         return account;
+    }
+
+    /** 项目账款详情只对项目负责人或项目成员开放，不依赖角色/菜单权限。 */
+    private void assertProjectParticipant(PmProject project) {
+        long loginId = StpUtil.getLoginIdAsLong();
+        if (project.getOwnerId() != null && project.getOwnerId() == loginId) {
+            return;
+        }
+        long memberCount = projectMemberMapper.selectCount(new LambdaQueryWrapper<PmProjectMember>()
+                .eq(PmProjectMember::getProjectId, project.getId())
+                .eq(PmProjectMember::getUserId, loginId));
+        if (memberCount == 0) {
+            throw new BusinessException(403, "仅项目参与者可以查看项目账款");
+        }
     }
 
     /**
