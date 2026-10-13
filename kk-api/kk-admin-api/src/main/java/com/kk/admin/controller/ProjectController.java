@@ -252,7 +252,8 @@ public class ProjectController {
      * 编辑项目：规模不变或降到常规直存；改到重点/重大（含互切）提交规模变更审批
      */
     @PutMapping
-    @SaCheckPermission("project:edit")
+    // 项目负责人通常只有项目查看权限；具体是否为负责人由业务层按项目校验。
+    @SaCheckPermission(value = {"project:list", "project:edit"}, mode = SaMode.OR)
     @Transactional(rollbackFor = Exception.class)
     public Result<?> update(@RequestBody PmProject project) {
         String[] pendingScale = projectService.updateProjectMaybeScaleApproval(project);

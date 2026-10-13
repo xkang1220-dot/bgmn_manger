@@ -401,7 +401,13 @@ public class PmProjectServiceImpl extends ServiceImpl<PmProjectMapper, PmProject
         if (existing == null) {
             throw new BusinessException("项目不存在");
         }
-        assertCanView(existing, StpUtil.getLoginIdAsLong());
+        long loginId = StpUtil.getLoginIdAsLong();
+        assertCanView(existing, loginId);
+        // 项目负责人可直接维护项目信息（包括成员），不受重点/重大项目规模限制。
+        // 其他用户仍须具备原有的项目编辑权限，避免把“可查看”错误放大为“可编辑”。
+        if (!StpUtil.hasPermission("project:edit") && !Objects.equals(existing.getOwnerId(), loginId)) {
+            throw new BusinessException("仅项目负责人或有项目编辑权限的用户可修改项目");
+        }
         if (existing.getParentId() != null) {
             // 小项目规模固定 KEY，忽略改档
             project.setScale(ProjectScales.KEY);

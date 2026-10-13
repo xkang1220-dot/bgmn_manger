@@ -80,6 +80,11 @@ const isKeyOrMajor = computed(
   () => !!detail.value && (detail.value.scale === 'KEY' || detail.value.scale === 'MAJOR'),
 )
 const isChildProject = computed(() => !!detail.value?.parentId)
+const canEditProject = (project?: any) =>
+  !!project && (
+    userStore.hasPermission('project:edit')
+    || Number(project.ownerId) === Number(userStore.user?.id)
+  )
 const saving = ref(false)
 const filteredEmpty = computed(
   () =>
@@ -698,7 +703,7 @@ onMounted(async () => {
           </p>
           <div class="project-card__actions" @click.stop>
             <el-button
-              v-permission="'project:edit'"
+              v-if="canEditProject(row)"
               class="icon-btn"
               text
               aria-label="编辑"
@@ -785,7 +790,7 @@ onMounted(async () => {
 
           <div class="project-hero__ops">
             <el-button
-              v-permission="'project:edit'"
+              v-if="canEditProject(detail)"
               class="icon-btn"
               text
               aria-label="编辑"
