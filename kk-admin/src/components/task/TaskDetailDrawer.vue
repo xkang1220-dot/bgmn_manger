@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Link } from '@element-plus/icons-vue'
+import { EditPen, Link } from '@element-plus/icons-vue'
 import type { UploadFile, UploadProps } from 'element-plus'
+import DOMPurify from 'dompurify'
+import { marked } from 'marked'
 import { bizApi } from '@/api/biz'
 import { useUserStore } from '@/stores/user'
 import ProjectCascadeSelect from '@/components/project/ProjectCascadeSelect.vue'
@@ -18,6 +20,8 @@ const props = defineProps<{
   /** 新建时默认项目 */
   defaultProjectId?: number | null
   taskScope?: 'mine' | 'all'
+  /** 查看模式下是否展示任务编辑入口（仍受接口 canEdit 与菜单权限约束） */
+  showEditAction?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -40,6 +44,10 @@ const isWorking = ref(true)
 const editing = ref(false)
 const isNew = ref(false)
 const isTaskManager = computed(() => userStore.hasPermission('project:task:add'))
+const canEditDetail = computed(() => !!props.showEditAction
+  && userStore.hasPermission('project:task:edit')
+  && !!detail.value?.canEdit
+  && ![3, 4].includes(Number(detail.value?.status)))
 const projects = ref<any[]>([])
 const creatableProjects = computed(() => {
   if (!isNew.value) return projects.value
@@ -81,7 +89,14 @@ const uploading = ref(false)
 const imageFileList = ref<UploadFile[]>([])
 const previewVisible = ref(false)
 const previewUrl = ref('')
-const previewIsVideo = ref(false)
+const previewName = ref('')
+const previewText = ref('')
+const previewLoading = ref(false)
+const previewKind = ref<'image' | 'video' | 'audio' | 'pdf' | 'markdown' | 'text' | 'unsupported'>('image')
+const previewMarkdown = computed(() => {
+  if (previewKind.value !== 'markdown' || !previewText.value) return ''
+  return DOMPurify.sanitize(marked.parse(previewText.value, { gfm: true, breaks: true }) as string)
+})
 const transferDialog = ref(false)
 const transferring = ref(false)
 const transferForm = reactive({
@@ -93,7 +108,10 @@ const transferImages = ref<any[]>([])
 const transferUploading = ref(false)
 const detailPane = ref('comments')
 const subtaskParentTitle = ref('')
-const pendingAction = ref<'view' | 'edit' | 'transfer' | 'close' | 'subtask'>('view')
+const subtaskParentId = ref<number | undefined>(undefined)
+const parentTaskOptions = ref<any[]>([])
+let drawerLoadVersion = 0
+let candidateLoadVersion = 0
 
 const completedDurationRows = computed(() => {
   if (!detail.value) return []
@@ -122,6 +140,15 @@ const form = reactive<any>({
   content: '',
   imageFileIds: [] as number[],
 })
+
+const canManageParticipants = computed(() => {
+  if (isNew.value) return true
+  const loginId = Number(userStore.user?.id)
+  if (!Number.isFinite(loginId)) return false
+  return Number(selectedProject.value?.ownerId) === loginId
+    || Number(detail.value?.assigneeId) === loginId
+})
+const canChangeParentTask = computed(() => isNew.value || !(detail.value?.children || []).length)
 
 const statusMap: Record<number, string> = { 0: '待办', 1: '进行中', 2: '已完成', 3: '已关闭', 4: '待确认完成' }
 const priorityMap: Record<number, string> = { 1: '高', 2: '中', 3: '低' }
@@ -207,6 +234,22 @@ function fmtTime(t?: string) {
   return t.replace('T', ' ').slice(0, 16)
 }
 
+function isHtmlContent(value?: string) {
+  return /<([a-z][\w-]*)\b[^>]*>/i.test(value || '')
+}
+
+function filePreviewKind(file: { contentType?: string; type?: string; name?: string; originalName?: string; url?: string }) {
+  const type = String(file.contentType || file.type || '').toLowerCase()
+  const name = String(file.originalName || file.name || file.url || '').toLowerCase().split('?')[0]
+  if (isImageFile(file)) return 'image' as const
+  if (isVideoFile(file)) return 'video' as const
+  if (type.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|aac|flac)$/.test(name)) return 'audio' as const
+  if (type === 'application/pdf' || name.endsWith('.pdf')) return 'pdf' as const
+  if (/\.(md|markdown)$/.test(name)) return 'markdown' as const
+  if (type.startsWith('text/') || /\.(txt|log|md|csv|json|xml|ya?ml|ini|conf|properties|java|kt|js|ts|vue|css|scss|sql|py|sh|ps1)$/.test(name)) return 'text' as const
+  return 'unsupported' as const
+}
+
 function onWorkStatusChanged(event: Event) {
   isWorking.value = (event as CustomEvent<WorkStatus>).detail.working
 }
@@ -240,25 +283,36 @@ function disableDueDate(date: Date) {
   return date.getTime() < start.getTime()
 }
 
-async function loadDetail(id: number) {
+async function loadDetail(
+  id: number,
+  action: 'view' | 'edit' | 'transfer' | 'close' | 'subtask' = 'view',
+  version = ++drawerLoadVersion,
+) {
   loading.value = true
   syncingDetail.value = true
   try {
     if (!projects.value.length) {
-      projects.value = (await bizApi.taskManagementProjects()) || []
+      const options = (await bizApi.taskManagementProjects()) || []
+      if (version !== drawerLoadVersion || !visible.value) return
+      projects.value = options
     }
     const [full, commentList, flowList] = await Promise.all([
       bizApi.taskDetail(id, props.taskScope),
       bizApi.taskComments(id),
       bizApi.taskFlows(id),
     ])
+    if (version !== drawerLoadVersion || !visible.value) return
+    subtaskParentId.value = undefined
+    subtaskParentTitle.value = ''
     detail.value = full
     Object.assign(form, {
       ...full,
       participantIds: full.participantIds || [],
       imageFileIds: (full.images || []).map((f: any) => f.id),
     })
-    await loadProjectCandidates(full.projectId)
+    await loadProjectCandidates(full.projectId, version)
+    await loadParentTaskOptions(full.projectId, full.id, version)
+    if (version !== drawerLoadVersion || !visible.value) return
     imageFileList.value = (full.images || []).map(toUploadFile)
     comments.value = commentList
     flows.value = flowList
@@ -266,19 +320,22 @@ async function loadDetail(id: number) {
     isNew.value = false
     detailPane.value = 'comments'
   } finally {
-    syncingDetail.value = false
-    loading.value = false
+    if (version === drawerLoadVersion) {
+      syncingDetail.value = false
+      loading.value = false
+    }
   }
 
-  const action = pendingAction.value
-  pendingAction.value = 'view'
+  if (version !== drawerLoadVersion || !visible.value) return
   if (action === 'edit') editing.value = true
   else if (action === 'transfer') await openTransfer()
   else if (action === 'close') await closeTask()
-  else if (action === 'subtask') await startSubtask()
+  else if (action === 'subtask') await startSubtask(version)
 }
 
-async function openCreate() {
+async function openCreate(version = drawerLoadVersion) {
+  if (version !== drawerLoadVersion || !visible.value) return
+  subtaskParentId.value = undefined
   subtaskParentTitle.value = ''
   detail.value = null
   Object.assign(form, emptyForm())
@@ -289,7 +346,8 @@ async function openCreate() {
   commentAttachments.value = []
   editing.value = true
   isNew.value = true
-  await ensureOptions()
+  await ensureOptions(version)
+  if (version !== drawerLoadVersion || !visible.value) return
   const allowed = new Set(
     candidateUsers.value.filter(isEligibleCandidate).map((u) => Number(u.id)),
   )
@@ -307,13 +365,16 @@ function isEligibleCandidate(u: any) {
   return u?.layer !== '需从参与人移除'
 }
 
-async function loadProjectCandidates(projectId?: number) {
+async function loadProjectCandidates(projectId?: number, openVersion?: number) {
+  const version = ++candidateLoadVersion
   if (projectId == null) {
     candidateUsers.value = []
     candidateProjectId.value = undefined
     return
   }
   const d = await bizApi.projectDetail(projectId)
+  if (version !== candidateLoadVersion) return
+  if (openVersion != null && openVersion !== drawerLoadVersion) return
   upsertProjectOption(d)
   const map = new Map<number, any>()
   if (d.ownerId != null) {
@@ -394,16 +455,33 @@ function upsertProjectOption(d: any) {
   }
 }
 
-async function ensureOptions() {
+async function ensureOptions(openVersion?: number) {
   // 每次打开都刷新，避免新建项目后抽屉仍用旧列表导致默认项目空白
   // 新建任务应列出当前用户担任负责人或参与人的全部项目，不能使用默认的
   // “我的任务”范围；后者只包含已经负责/持有过任务的项目，会让尚未分配
   // 任务的项目成员无法选择项目并创建第一条任务。
-  projects.value = (await bizApi.taskManagementProjects('all')) || []
-  await loadProjectCandidates(form.projectId)
+  const options = (await bizApi.taskManagementProjects('all')) || []
+  if (openVersion != null && openVersion !== drawerLoadVersion) return
+  projects.value = options
+  await loadProjectCandidates(form.projectId, openVersion)
 }
 
-async function startSubtask() {
+async function loadParentTaskOptions(projectId?: number, currentTaskId?: number, openVersion?: number) {
+  if (projectId == null) {
+    parentTaskOptions.value = []
+    return
+  }
+  const tasks = (await bizApi.taskBoard(projectId)) || []
+  if (openVersion != null && openVersion !== drawerLoadVersion) return
+  parentTaskOptions.value = tasks.filter((task: any) =>
+    !task.parentTaskId
+    && Number(task.id) !== Number(currentTaskId)
+    && [0, 1].includes(Number(task.status)),
+  )
+}
+
+async function startSubtask(version = drawerLoadVersion) {
+  if (version !== drawerLoadVersion || !visible.value) return
   if (!detail.value?.id) return
   const parent = detail.value.parentTaskId
     ? { id: detail.value.parentTaskId, title: detail.value.parentTaskTitle, projectId: detail.value.projectId }
@@ -412,6 +490,7 @@ async function startSubtask() {
     projectId: parent.projectId,
     parentTaskId: parent.id,
   })
+  subtaskParentId.value = Number(parent.id)
   subtaskParentTitle.value = parent.title || `任务 ${parent.id}`
   detail.value = null
   comments.value = []
@@ -419,11 +498,12 @@ async function startSubtask() {
   imageFileList.value = []
   editing.value = true
   isNew.value = true
-  await ensureOptions()
+  await ensureOptions(version)
 }
 
 function openChildTask(task: { id: number }) {
-  void loadDetail(Number(task.id))
+  const version = ++drawerLoadVersion
+  void loadDetail(Number(task.id), 'view', version)
 }
 
 watch(
@@ -436,6 +516,7 @@ watch(
       form.holderId = undefined
     }
     await loadProjectCandidates(pid)
+    if (!isNew.value) await loadParentTaskOptions(pid, form.id)
     if (pid !== detail.value?.projectId) {
       const allowed = new Set(
         candidateUsers.value.filter(isEligibleCandidate).map((u) => Number(u.id)),
@@ -453,10 +534,15 @@ watch(
 watch(
   () => [props.modelValue, props.taskId, props.initialAction] as const,
   async ([open, id, action]) => {
-    if (!open) return
-    pendingAction.value = action || 'view'
-    if (id) await loadDetail(Number(id))
-    else await openCreate()
+    const version = ++drawerLoadVersion
+    candidateLoadVersion++
+    if (!open) {
+      loading.value = false
+      syncingDetail.value = false
+      return
+    }
+    if (id) await loadDetail(Number(id), action || 'view', version)
+    else await openCreate(version)
   },
 )
 
@@ -514,6 +600,11 @@ async function save() {
   saving.value = true
   try {
     const payload = { ...form }
+    // 子任务的父级由本次创建上下文锁定，避免异步刷新表单时丢失后静默创建为顶层任务。
+    if (isNew.value && subtaskParentId.value != null) {
+      payload.parentTaskId = subtaskParentId.value
+    }
+    if (!isNew.value) payload.clearParentTask = payload.parentTaskId == null
     // 新建任务统一从“待办”开始；后续状态流转从列表“更多”操作进入并二次确认。
     if (isNew.value) payload.status = 0
     // 去掉仅展示用字段，避免污染请求体
@@ -726,21 +817,30 @@ async function onRemoveImage(uploadFile: UploadFile) {
   return true
 }
 
-function onPreviewImage(uploadFile: UploadFile) {
+async function openFilePreview(uploadFile: any) {
   const meta = {
     contentType: (uploadFile as any).contentType,
-    name: uploadFile.name,
-    url: uploadFile.url,
+    name: uploadFile.name || uploadFile.originalName,
+    originalName: uploadFile.originalName,
+    url: imageUrl(uploadFile),
   }
-  if (!isImageFile(meta) && !isVideoFile(meta)) {
-    const href = uploadFile.url || (uploadFile.uid != null ? `/api/file/download/${uploadFile.uid}` : '')
-    if (href) window.open(href, '_blank', 'noopener')
-    else ElMessage.info('该文件类型暂不支持预览，请下载后查看')
-    return
-  }
-  previewUrl.value = uploadFile.url || ''
-  previewIsVideo.value = isVideoFile(meta)
+  previewKind.value = filePreviewKind(meta)
+  previewName.value = meta.name || '附件预览'
+  previewUrl.value = meta.url || (uploadFile.uid != null ? `/api/file/preview/${uploadFile.uid}` : '')
+  previewText.value = ''
   previewVisible.value = true
+  if ((previewKind.value === 'text' || previewKind.value === 'markdown') && previewUrl.value) {
+    previewLoading.value = true
+    try {
+      const response = await fetch(previewUrl.value, { credentials: 'same-origin' })
+      if (!response.ok) throw new Error('读取失败')
+      previewText.value = await response.text()
+    } catch {
+      previewKind.value = 'unsupported'
+    } finally {
+      previewLoading.value = false
+    }
+  }
 }
 
 async function handleAttachRemove(uploadFile: UploadFile) {
@@ -814,6 +914,15 @@ function commentAttachmentUrl(file: any, preview = false) {
     <template #header>
       <div class="drawer-heading">
         <h2>{{ isNew ? '新建任务' : editing ? '编辑任务' : '任务详情' }}</h2>
+        <el-button
+          v-if="!editing && detail && canEditDetail"
+          type="primary"
+          plain
+          :icon="EditPen"
+          @click="editing = true"
+        >
+          编辑任务
+        </el-button>
       </div>
     </template>
     <div v-loading="loading" class="task-detail">
@@ -846,7 +955,12 @@ function commentAttachmentUrl(file: any, preview = false) {
             实际开始 {{ fmtTime(detail.startedAt) }} · 实际完成 {{ fmtTime(detail.completedAt) }} · 最后推进 {{ fmtTime(detail.lastActivityAt) }}
           </el-descriptions-item>
           <el-descriptions-item label="描述">
-            <div v-if="detail.content" class="content-text" v-html="detail.content" />
+            <div
+              v-if="detail.content"
+              class="content-text"
+              :class="{ 'content-text--plain': !isHtmlContent(detail.content) }"
+              v-html="detail.content"
+            />
             <div v-else class="content-text content-text--empty">暂无描述</div>
           </el-descriptions-item>
         </el-descriptions>
@@ -863,12 +977,17 @@ function commentAttachmentUrl(file: any, preview = false) {
                 preload="metadata"
               />
               <el-image
-                v-else
+                v-else-if="isImageFile(file)"
                 :src="imageUrl(file)"
-                :preview-src-list="detail.images.filter((f: any) => !isVideoFile(f)).map(imageUrl)"
+                :preview-src-list="detail.images.filter((f: any) => isImageFile(f)).map(imageUrl)"
                 fit="cover"
                 class="image-item"
               />
+              <button v-else type="button" class="file-card" @click="openFilePreview(file)">
+                <el-icon><Link /></el-icon>
+                <span>{{ file.originalName || `附件 ${file.id}` }}</span>
+                <small>{{ filePreviewKind(file) === 'unsupported' ? '下载查看' : '点击预览' }}</small>
+              </button>
             </template>
           </div>
         </div>
@@ -921,9 +1040,9 @@ function commentAttachmentUrl(file: any, preview = false) {
                     <a
                       v-for="file in c.attachments"
                       :key="file.id"
-                      :href="commentAttachmentUrl(file)"
+                      href="javascript:;"
                       class="comment-attachment"
-                      target="_blank"
+                      @click.prevent="openFilePreview(file)"
                     >
                       <el-icon><Link /></el-icon>
                       <span>{{ file.originalName || `附件 ${file.id}` }}</span>
@@ -992,7 +1111,8 @@ function commentAttachmentUrl(file: any, preview = false) {
                     <div v-if="f.images?.length" class="flow-images">
                       <template v-for="img in f.images" :key="img.id">
                         <video v-if="isVideoFile(img)" class="flow-img media-video" :src="imageUrl(img)" controls preload="metadata" />
-                        <el-image v-else :src="imageUrl(img)" :preview-src-list="f.images.filter((x: any) => !isVideoFile(x)).map(imageUrl)" fit="cover" class="flow-img" />
+                        <el-image v-else-if="isImageFile(img)" :src="imageUrl(img)" :preview-src-list="f.images.filter((x: any) => isImageFile(x)).map(imageUrl)" fit="cover" class="flow-img" />
+                        <button v-else type="button" class="flow-file" @click="openFilePreview(img)"><el-icon><Link /></el-icon><span>{{ img.originalName || '附件' }}</span></button>
                       </template>
                     </div>
                   </article>
@@ -1015,8 +1135,22 @@ function commentAttachmentUrl(file: any, preview = false) {
             <el-form-item label="任务标题" required class="title-field">
               <el-input v-model="form.title" size="large" placeholder="请输入任务标题" maxlength="128" show-word-limit />
             </el-form-item>
-            <el-form-item v-if="form.parentTaskId" label="父任务">
+            <el-form-item v-if="isNew && form.parentTaskId" label="父任务">
               <el-input :model-value="subtaskParentTitle" disabled />
+            </el-form-item>
+            <el-form-item v-else-if="!isNew" label="父任务">
+              <el-select
+                v-model="form.parentTaskId"
+                clearable
+                filterable
+                placeholder="无（作为顶层任务）"
+                style="width: 100%"
+                :disabled="!canChangeParentTask"
+              >
+                <el-option v-for="task in parentTaskOptions" :key="task.id" :label="task.title" :value="task.id" />
+              </el-select>
+              <span v-if="!canChangeParentTask" class="field-help">该任务已有子任务，不能再挂靠到其他父任务</span>
+              <span v-else class="field-help">清空后将成为顶层父任务；无子任务时也可挂靠到另一父任务</span>
             </el-form-item>
             <el-form-item label="所属项目" required>
               <ProjectCascadeSelect
@@ -1051,7 +1185,7 @@ function commentAttachmentUrl(file: any, preview = false) {
                 <span v-if="!isNew && detail?.status === 2" class="field-help">已完成任务不可更换持有人；如属误操作，请先修改任务状态并保存</span>
               </el-form-item>
               <el-form-item label="参与人员">
-                <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="选择协作成员" style="width: 100%" :disabled="!form.projectId || (!isNew && !userStore.hasPermission('project:task:add'))">
+                <el-select v-model="form.participantIds" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="选择协作成员" style="width: 100%" :disabled="!form.projectId || !canManageParticipants">
                   <el-option v-for="u in candidateUsers" :key="u.id" :label="candidateLabel(u)" :value="u.id" />
                 </el-select>
               </el-form-item>
@@ -1103,7 +1237,7 @@ function commentAttachmentUrl(file: any, preview = false) {
             <el-form-item label="相关附件" class="attachment-field">
               <div v-if="imageFileList.length" class="pending-attachments">
                 <div v-for="file in imageFileList" :key="file.uid" class="pending-attachment">
-                  <a href="javascript:;" @click.prevent="onPreviewImage(file)">
+                  <a href="javascript:;" @click.prevent="openFilePreview(file)">
                     <el-icon><Link /></el-icon>
                     <span>{{ file.name || `附件 ${file.uid}` }}</span>
                   </a>
@@ -1131,14 +1265,21 @@ function commentAttachmentUrl(file: any, preview = false) {
       </template>
     </div>
 
-    <el-dialog v-model="previewVisible" :title="previewIsVideo ? '视频预览' : '图片预览'" width="720px" append-to-body @closed="previewUrl = ''">
+    <el-dialog v-model="previewVisible" :title="previewName || '附件预览'" width="min(900px, 92vw)" append-to-body @closed="previewUrl = ''; previewText = ''">
       <video
-        v-if="previewIsVideo"
+        v-if="previewKind === 'video'"
         :src="previewUrl"
         controls
         style="display: block; width: 100%; max-height: 70vh; background: #000"
       />
-      <img v-else :src="previewUrl" alt="preview" style="display: block; max-width: 100%; margin: 0 auto" />
+      <img v-else-if="previewKind === 'image'" :src="previewUrl" :alt="previewName" style="display: block; max-width: 100%; max-height: 72vh; margin: 0 auto" />
+      <audio v-else-if="previewKind === 'audio'" :src="previewUrl" controls style="display: block; width: 100%" />
+      <iframe v-else-if="previewKind === 'pdf'" :src="previewUrl" :title="previewName" class="file-preview-frame" />
+      <article v-else-if="previewKind === 'markdown'" v-loading="previewLoading" class="markdown-preview" v-html="previewMarkdown" />
+      <div v-else-if="previewKind === 'text'" v-loading="previewLoading" class="text-preview"><pre>{{ previewText }}</pre></div>
+      <el-empty v-else description="该文件暂不支持在线预览，请下载后查看">
+        <el-button type="primary" tag="a" :href="previewUrl.replace('/preview/', '/download/')" target="_blank">下载附件</el-button>
+      </el-empty>
     </el-dialog>
 
     <el-dialog v-model="transferDialog" title="移交任务" width="420px" append-to-body @close="onTransferDialogClose">
@@ -1171,11 +1312,12 @@ function commentAttachmentUrl(file: any, preview = false) {
                 preload="metadata"
               />
               <el-image
-                v-else
+                v-else-if="isImageFile(img)"
                 :src="imageUrl(img)"
                 fit="cover"
                 class="flow-img"
               />
+              <button v-else type="button" class="flow-file" @click="openFilePreview(img)"><el-icon><Link /></el-icon><span>{{ img.originalName || '附件' }}</span></button>
             </template>
             <el-button link type="danger" @click="transferImages = []; transferForm.imageFileIds = []">清空</el-button>
           </div>
@@ -1229,6 +1371,15 @@ function commentAttachmentUrl(file: any, preview = false) {
 :global(.task-drawer .el-drawer__close-btn:hover) {
   color: var(--kk-text);
   background: rgba(24, 24, 27, 0.06);
+}
+
+.drawer-heading {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
 }
 
 .drawer-heading h2 {
@@ -1452,21 +1603,27 @@ function commentAttachmentUrl(file: any, preview = false) {
 }
 
 .content-text {
-  white-space: pre-wrap;
+  white-space: normal;
   line-height: 1.6;
   color: #334155;
   overflow-wrap: anywhere;
+}
+
+.content-text--plain {
+  white-space: pre-wrap;
 }
 
 .content-text--empty {
   color: #94a3b8;
 }
 
-.content-text :deep(p) {
+.content-text :deep(p),
+.content-text :deep(div) {
   margin: 0 0 6px;
 }
 
-.content-text :deep(p:last-child) {
+.content-text :deep(p:last-child),
+.content-text :deep(div:last-child) {
   margin-bottom: 0;
 }
 
@@ -1499,6 +1656,62 @@ function commentAttachmentUrl(file: any, preview = false) {
   border-radius: 8px;
   border: 1px solid #e2e8f0;
 }
+
+.file-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 8px;
+  width: min(240px, 100%);
+  min-height: 64px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  color: #334155;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-card:hover, .file-card:focus-visible { border-color: #94a3b8; background: #f8fafc; }
+.file-card span { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.file-card small { grid-column: 2; color: #94a3b8; }
+
+.file-preview-frame { display: block; width: 100%; height: 70vh; border: 0; background: #f8fafc; }
+.text-preview { min-height: 180px; max-height: 70vh; overflow: auto; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
+.text-preview pre { margin: 0; padding: 16px; color: #334155; font: 13px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.markdown-preview {
+  min-height: 180px;
+  max-height: 70vh;
+  overflow: auto;
+  padding: 8px 24px 24px;
+  color: #334155;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.markdown-preview :deep(h1), .markdown-preview :deep(h2), .markdown-preview :deep(h3),
+.markdown-preview :deep(h4), .markdown-preview :deep(h5), .markdown-preview :deep(h6) {
+  margin: 1.4em 0 0.65em;
+  color: #0f172a;
+  line-height: 1.3;
+}
+.markdown-preview :deep(h1) { padding-bottom: 0.35em; border-bottom: 1px solid #e2e8f0; font-size: 2em; }
+.markdown-preview :deep(h2) { padding-bottom: 0.3em; border-bottom: 1px solid #e2e8f0; font-size: 1.55em; }
+.markdown-preview :deep(h3) { font-size: 1.25em; }
+.markdown-preview :deep(p), .markdown-preview :deep(ul), .markdown-preview :deep(ol), .markdown-preview :deep(blockquote) { margin: 0.8em 0; }
+.markdown-preview :deep(ul), .markdown-preview :deep(ol) { padding-left: 2em; }
+.markdown-preview :deep(a) { color: #2563eb; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.markdown-preview :deep(blockquote) { padding: 0.25em 1em; border-left: 4px solid #cbd5e1; color: #64748b; background: #f8fafc; }
+.markdown-preview :deep(code) { padding: 0.15em 0.35em; border-radius: 4px; background: #f1f5f9; font: 0.9em ui-monospace, SFMono-Regular, Consolas, monospace; }
+.markdown-preview :deep(pre) { overflow: auto; padding: 14px 16px; border-radius: 8px; color: #e2e8f0; background: #0f172a; line-height: 1.55; }
+.markdown-preview :deep(pre code) { padding: 0; color: inherit; background: transparent; }
+.markdown-preview :deep(table) { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-spacing: 0; border-collapse: collapse; }
+.markdown-preview :deep(th), .markdown-preview :deep(td) { padding: 7px 12px; border: 1px solid #cbd5e1; text-align: left; }
+.markdown-preview :deep(th) { background: #f8fafc; font-weight: 600; }
+.markdown-preview :deep(img) { max-width: 100%; height: auto; border-radius: 6px; }
+.markdown-preview :deep(hr) { margin: 1.5em 0; border: 0; border-top: 1px solid #e2e8f0; }
 
 .media-video {
   object-fit: cover;
@@ -1864,4 +2077,20 @@ function commentAttachmentUrl(file: any, preview = false) {
     flex-direction: column;
   }
 }
+
+.flow-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  color: #475569;
+  background: #fff;
+  cursor: pointer;
+}
+
+.flow-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

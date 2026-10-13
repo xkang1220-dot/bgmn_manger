@@ -91,11 +91,20 @@ const draggingTaskId = ref<number | string | null>(null)
 const hoveredTaskId = ref<number | string | null>(null)
 const hoverTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
+const isAllStatusQuery = computed(() => query.status == null && !query.statuses?.length && !query.overdue)
+
+function allStatusRank(item: any) {
+  if (item.overdue && [0, 1].includes(Number(item.status))) return 0
+  return ({ 1: 1, 0: 2, 2: 3, 3: 4, 4: 5 } as Record<number, number>)[Number(item.status)] ?? 6
+}
+
 const orderedList = computed(() => {
+  const rows = [...list.value].filter((item) => !item.parentTaskId)
+  if (isAllStatusQuery.value) {
+    return rows.sort((a, b) => allStatusRank(a) - allStatusRank(b))
+  }
   const ranks = new Map(taskOrder.value.map((id, index) => [String(id), index]))
-  return [...list.value]
-    .filter((item) => !item.parentTaskId)
-    .sort((a, b) => {
+  return rows.sort((a, b) => {
       const aRank = ranks.get(String(a.id))
       const bRank = ranks.get(String(b.id))
       if (aRank == null && bRank == null) return 0
@@ -108,6 +117,26 @@ const orderedList = computed(() => {
 const detailTreeList = computed(() => orderedList.value)
 const taskTableRef = ref<TableInstance>()
 const expandedTaskIds = ref<Set<string>>(new Set())
+const selectedTasks = ref<any[]>([])
+const batchLoading = ref(false)
+
+const selectedCount = computed(() => selectedTasks.value.length)
+
+function isTaskSelectable(row: any) {
+  return taskScope.value === 'mine'
+    && userStore.hasPermission('project:task:edit')
+    && row.canEdit
+    && [0, 1].includes(Number(row.status))
+}
+
+function onSelectionChange(rows: any[]) {
+  selectedTasks.value = rows
+}
+
+function clearSelection() {
+  taskTableRef.value?.clearSelection()
+  selectedTasks.value = []
+}
 
 function taskRowClassName({ row }: { row: any }) {
   return row.parentTaskId ? 'is-subtask' : ''
@@ -278,6 +307,7 @@ function onProjectNavClick(projectId?: number) {
 
 async function load() {
   listLoading.value = true
+  clearSelection()
   try {
     const params: Record<string, unknown> = {
       page: query.page,
@@ -483,6 +513,77 @@ async function changeTaskStatus(row: any, status: 0 | 1 | 2) {
   await load()
 }
 
+type BatchAction = 'start' | 'complete' | 'pause' | 'close'
+
+const batchActionMeta: Record<BatchAction, { status: 0 | 1 | 2 | 3; label: string; type: 'warning' | 'success' | 'info' }> = {
+  start: { status: 1, label: '开始', type: 'warning' },
+  complete: { status: 2, label: '完成', type: 'success' },
+  pause: { status: 0, label: '暂停', type: 'info' },
+  close: { status: 3, label: '关闭', type: 'warning' },
+}
+
+function batchInvalidTasks(action: BatchAction) {
+  const selectedIds = new Set(selectedTasks.value.map((item) => Number(item.id)))
+  return selectedTasks.value.filter((row) => {
+    if (!isTaskSelectable(row)) return true
+    if ((action === 'start' || action === 'complete') && !isWorking.value) return true
+    if (action === 'start') return Number(row.status) === 1 || isParentPending(row)
+    if (action === 'complete') {
+      return isParentPending(row)
+        || (row.children || []).some((child: any) => child.status !== 2 && !selectedIds.has(Number(child.id)))
+    }
+    if (action === 'pause') return Number(row.status) === 0
+    return hasUnfinishedChildren(row)
+  })
+}
+
+async function runBatchAction(action: BatchAction) {
+  if (!selectedCount.value || batchLoading.value) return
+  const meta = batchActionMeta[action]
+  const invalid = batchInvalidTasks(action)
+  if (invalid.length) {
+    const names = invalid.slice(0, 3).map((row) => `「${row.title}」`).join('、')
+    ElMessage.warning(`${names}${invalid.length > 3 ? `等 ${invalid.length} 项` : ''}当前不能${meta.label}，请调整选择`)
+    return
+  }
+
+  let remark: string | undefined
+  try {
+    if (action === 'close') {
+      const result = await ElMessageBox.prompt(
+        `将关闭已选择的 ${selectedCount.value} 项任务，关闭后任务不会删除。请填写统一关闭原因。`,
+        '批量关闭任务',
+        {
+          confirmButtonText: '确认关闭', cancelButtonText: '取消', inputType: 'textarea',
+          inputValidator: (value) => !!String(value || '').trim() || '请填写关闭原因',
+        },
+      )
+      remark = result.value.trim()
+    } else {
+      await ElMessageBox.confirm(
+        `确认${meta.label}已选择的 ${selectedCount.value} 项任务？`,
+        `批量${meta.label}任务`,
+        { confirmButtonText: `确认${meta.label}`, cancelButtonText: '取消', type: meta.type },
+      )
+    }
+  } catch { return }
+
+  const rows = [...selectedTasks.value]
+  if (action === 'complete' || action === 'close') {
+    rows.sort((a, b) => Number(!!b.parentTaskId) - Number(!!a.parentTaskId))
+  } else if (action === 'start') {
+    rows.sort((a, b) => Number(!!a.parentTaskId) - Number(!!b.parentTaskId))
+  }
+  batchLoading.value = true
+  try {
+    await bizApi.batchUpdateTaskStatus(rows.map((row) => Number(row.id)), meta.status, remark)
+    ElMessage.success(`已${meta.label} ${rows.length} 项任务`)
+    await load()
+  } finally {
+    batchLoading.value = false
+  }
+}
+
 async function review(row: any, approved: boolean) {
   let remark = ''
   if (approved) {
@@ -616,11 +717,13 @@ onUnmounted(() => {
       <div class="task-view-panel task-view-panel--details">
         <div class="details-toolbar">
           <nav class="delivery-tabs" aria-label="任务交付状态">
+            <button type="button" :class="{ 'is-active': isAllStatusQuery }" @click="filterByStatus()">全部</button>
             <button type="button" :class="{ 'is-active': query.status === 0 && !query.overdue }" @click="filterByStatus(0)">待办</button>
             <button type="button" :class="{ 'is-active': query.status === 1 && !query.overdue }" @click="filterByStatus(1)">进行中</button>
             <button type="button" :class="{ 'is-active': query.overdue }" @click="filterOverdue">已逾期</button>
             <button type="button" :class="{ 'is-active': query.status === 4 && !query.overdue }" @click="filterByStatus(4)">待确认完成</button>
             <button type="button" :class="{ 'is-active': query.status === 2 && !query.overdue }" @click="filterByStatus(2)">已完成</button>
+            <button type="button" :class="{ 'is-active': query.status === 3 && !query.overdue }" @click="filterByStatus(3)">已关闭</button>
           </nav>
           <el-form class="filter-bar task-filter-bar" @submit.prevent="onFilter">
             <el-form-item label="标题">
@@ -645,6 +748,19 @@ onUnmounted(() => {
             </el-form-item>
           </el-form>
         </div>
+        <div v-if="!isAllTasksView && selectedCount" class="task-batch-bar" role="region" aria-label="批量任务操作">
+          <div class="task-batch-summary">
+            <span class="task-batch-count">{{ selectedCount }}</span>
+            <span>已选择 {{ selectedCount }} 项任务</span>
+            <button type="button" class="task-batch-clear" @click="clearSelection">取消选择</button>
+          </div>
+          <div class="task-batch-actions">
+            <el-button size="small" :loading="batchLoading" @click="runBatchAction('start')">开始任务</el-button>
+            <el-button size="small" :loading="batchLoading" @click="runBatchAction('complete')">完成任务</el-button>
+            <el-button size="small" :loading="batchLoading" @click="runBatchAction('pause')">暂停任务</el-button>
+            <el-button size="small" type="danger" plain :loading="batchLoading" @click="runBatchAction('close')">关闭任务</el-button>
+          </div>
+        </div>
         <div class="task-table-scroll">
         <el-table
           ref="taskTableRef"
@@ -657,10 +773,12 @@ onUnmounted(() => {
           :row-class-name="taskRowClassName"
           empty-text="暂无任务"
           class="task-table"
+          @selection-change="onSelectionChange"
         >
+        <el-table-column v-if="!isAllTasksView" type="selection" width="46" align="center" :selectable="isTaskSelectable" reserve-selection />
         <el-table-column
           label=""
-          width="48"
+          width="44"
           align="center"
           class-name="task-expand-col"
           label-class-name="task-expand-col"
@@ -680,7 +798,7 @@ onUnmounted(() => {
             </button>
           </template>
         </el-table-column>
-        <el-table-column label="任务" min-width="360">
+        <el-table-column label="任务" min-width="300">
           <template #default="{ row }">
             <div
               class="task-title-cell"
@@ -728,12 +846,12 @@ onUnmounted(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="projectName" label="所属项目" min-width="150" show-overflow-tooltip>
+        <el-table-column prop="projectName" label="所属项目" min-width="125" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="task-project-name">{{ row.projectName || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="负责人 / 持有人" min-width="190">
+        <el-table-column label="负责人 / 持有人" min-width="160">
           <template #default="{ row }">
             <div class="task-owner-cell">
               <strong>{{ row.assigneeName || '未指定' }}</strong>
@@ -745,7 +863,7 @@ onUnmounted(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="交付状态" min-width="120">
+        <el-table-column label="交付状态" min-width="105">
           <template #default="{ row }">
             <el-tag :type="statusType[row.status]" size="small">{{ statusMap[row.status] }}</el-tag>
           </template>
@@ -755,7 +873,7 @@ onUnmounted(() => {
             <strong v-if="row.taskReward != null">¥{{ Number(row.taskReward).toFixed(2) }}</strong>
           </template>
         </el-table-column>
-        <el-table-column label="计划时间" min-width="190">
+        <el-table-column label="计划时间" min-width="170">
           <template #default="{ row }">
             <div class="task-date-range">
               <span><i>开始</i>{{ row.startDate || '未设置' }}</span>
@@ -763,7 +881,7 @@ onUnmounted(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="实际时间" min-width="190">
+        <el-table-column label="实际时间" min-width="170">
           <template #default="{ row }">
             <div class="task-date-range">
               <span><i>开始</i>{{ fmtTaskTime(row.startedAt) }}</span>
@@ -771,7 +889,7 @@ onUnmounted(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="128" fixed="right" align="center">
+        <el-table-column label="操作" width="112" fixed="right" align="center" class-name="task-actions-column" label-class-name="task-actions-column">
           <template #default="{ row }">
             <div class="task-row-actions">
               <button type="button" class="task-action-btn is-detail" @click="open(row)">详情</button>
@@ -1002,6 +1120,15 @@ onUnmounted(() => {
   border: 1px solid rgba(24, 24, 27, 0.1);
 }
 .task-row-actions { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px 12px; }
+.task-table :deep(.el-table__cell.task-actions-column) {
+  background: var(--el-bg-color, #fff);
+}
+.task-table :deep(th.el-table__cell.task-actions-column .cell) {
+  white-space: nowrap;
+}
+.task-table :deep(td.el-table__cell.task-actions-column) {
+  box-shadow: -8px 0 14px -14px rgba(24, 24, 27, 0.45);
+}
 .task-row-actions :deep(.el-dropdown) { line-height: 1; vertical-align: middle; }
 .task-row-actions :deep(.el-tooltip__trigger) {
   outline: none !important;
@@ -1070,6 +1197,50 @@ onUnmounted(() => {
   border-color: #18181b;
 }
 .delivery-tabs button:focus-visible { outline: 2px solid var(--kk-primary); outline-offset: 2px; }
+.task-batch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  gap: 12px 20px;
+  min-height: 48px;
+  margin: -4px 0 10px;
+  padding: 7px 10px 7px 14px;
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 10px;
+  background: rgba(37, 99, 235, 0.055);
+}
+.task-batch-summary,
+.task-batch-actions { display: flex; align-items: center; gap: 8px; }
+.task-batch-summary { min-width: 0; font-size: 13px; font-weight: 500; color: var(--kk-text-secondary); }
+.task-batch-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 999px;
+  color: #fff;
+  background: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.task-batch-clear {
+  min-height: 32px;
+  padding: 0 7px;
+  border: 0;
+  color: #2563eb;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.task-batch-clear:hover { color: #1d4ed8; text-decoration: underline; }
+.task-batch-clear:focus-visible { outline: 2px solid var(--kk-primary); outline-offset: 2px; border-radius: 5px; }
+@media (max-width: 900px) {
+  .task-batch-bar { align-items: flex-start; flex-direction: column; }
+  .task-batch-actions { flex-wrap: wrap; }
+}
 .task-title-cell[draggable="true"] { cursor: grab; }
 .task-title-cell[draggable="true"]:active { cursor: grabbing; }
 .task-title-cell.is-dragging { opacity: .48; }

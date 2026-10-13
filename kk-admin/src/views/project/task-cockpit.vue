@@ -22,11 +22,11 @@ const listOwnerId = ref<number | undefined>()
 const listFrom = ref<string | undefined>()
 const listTo = ref<string | undefined>()
 const filters = reactive({ participantId: undefined as number | undefined })
-type PeriodKey = 'TODAY' | 'THIS_WEEK' | 'LAST_WEEK' | 'THIS_MONTH' | 'LAST_MONTH' | 'CUSTOM'
+type PeriodKey = 'ALL' | 'TODAY' | 'THIS_WEEK' | 'LAST_WEEK' | 'THIS_MONTH' | 'LAST_MONTH' | 'CUSTOM'
 const period = ref<PeriodKey>('TODAY')
 const customPeriod = ref<[string, string] | undefined>()
 const periodOptions: Array<{ label: string; value: PeriodKey }> = [
-  { label: '当日', value: 'TODAY' }, { label: '本周', value: 'THIS_WEEK' },
+  { label: '全部', value: 'ALL' }, { label: '当日', value: 'TODAY' }, { label: '本周', value: 'THIS_WEEK' },
   { label: '上周', value: 'LAST_WEEK' }, { label: '本月', value: 'THIS_MONTH' },
   { label: '上月', value: 'LAST_MONTH' }, { label: '自定义', value: 'CUSTOM' },
 ]
@@ -64,6 +64,7 @@ function addDays(value: string, days: number) {
 }
 
 const periodBounds = computed(() => {
+  if (period.value === 'ALL') return undefined
   const now = new Date()
   let from: Date
   let to: Date
@@ -527,9 +528,31 @@ onBeforeUnmount(() => {
             <i aria-hidden="true">{{ memberInitial(item.memberName) }}</i>
             <span><strong>{{ item.memberName }}</strong><small>{{ item.timedTasks }} 项任务计入耗时<span v-if="item.incompleteTasks"> · {{ item.incompleteTasks }} 项未完成</span></small></span>
           </span>
-          <span class="duration-bar" aria-hidden="true">
-            <i class="completed" :style="{ width: `${item.completedDurationSeconds / employeeDurationMax * 100}%` }" />
-            <i class="incomplete" :style="{ width: `${item.incompleteDurationSeconds / employeeDurationMax * 100}%` }" />
+          <span class="duration-bar" :aria-label="`${item.memberName}的任务耗时分布`">
+            <el-tooltip
+              v-if="item.completedDurationSeconds > 0"
+              :content="`已完成任务耗时：${formatDuration(item.completedDurationSeconds)}`"
+              placement="top"
+            >
+              <button
+                type="button"
+                class="duration-segment completed"
+                :style="{ width: `${item.completedDurationSeconds / employeeDurationMax * 100}%` }"
+                :aria-label="`${item.memberName}，已完成任务耗时：${formatDuration(item.completedDurationSeconds)}`"
+              />
+            </el-tooltip>
+            <el-tooltip
+              v-if="item.incompleteDurationSeconds > 0"
+              :content="`未完成任务耗时：${formatDuration(item.incompleteDurationSeconds)}`"
+              placement="top"
+            >
+              <button
+                type="button"
+                class="duration-segment incomplete"
+                :style="{ width: `${item.incompleteDurationSeconds / employeeDurationMax * 100}%` }"
+                :aria-label="`${item.memberName}，未完成任务耗时：${formatDuration(item.incompleteDurationSeconds)}`"
+              />
+            </el-tooltip>
           </span>
           <strong class="duration-value">{{ formatDuration(item.durationSeconds) }}</strong>
         </li>
@@ -608,7 +631,13 @@ onBeforeUnmount(() => {
         <el-empty v-if="!listRows.length && !listLoading" description="暂无符合条件的数据" :image-size="64" />
       </div>
     </el-dialog>
-    <TaskDetailDrawer v-model="drawerOpen" :task-id="activeTaskId" @saved="refreshAfterTaskSaved" @deleted="refreshAfterTaskSaved" />
+    <TaskDetailDrawer
+      v-model="drawerOpen"
+      :task-id="activeTaskId"
+      show-edit-action
+      @saved="refreshAfterTaskSaved"
+      @deleted="refreshAfterTaskSaved"
+    />
   </div>
 </template>
 
@@ -1314,13 +1343,24 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   background: rgba(24, 24, 27, 0.06);
 }
-.duration-bar i {
+.duration-segment {
   height: 100%;
   display: block;
   flex: none;
+  min-width: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  cursor: help;
 }
-.duration-bar i.completed { background: linear-gradient(90deg, #18181b, #52525b); }
-.duration-bar i.incomplete { background: #f59e0b; }
+.duration-segment:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+.duration-segment.completed { background: linear-gradient(90deg, #18181b, #52525b); }
+.duration-segment.incomplete { background: #f59e0b; }
 .duration-value {
   color: var(--kk-text);
   font-size: 13px;

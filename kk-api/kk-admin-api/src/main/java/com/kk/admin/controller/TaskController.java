@@ -149,6 +149,13 @@ public class TaskController {
         return Result.ok();
     }
 
+    @PutMapping("/batch/status")
+    @SaCheckPermission("project:task:edit")
+    public Result<Void> batchUpdateStatus(@RequestBody BatchStatusRequest request) {
+        taskService.batchUpdateStatus(request.getIds(), request.getStatus(), request.getRemark());
+        return Result.ok();
+    }
+
     @PutMapping("/{id}/completion-review")
     @SaCheckPermission("project:task:confirm")
     public Result<Void> reviewCompletion(@PathVariable Long id, @RequestBody CompletionReviewRequest request) {
@@ -219,6 +226,14 @@ public class TaskController {
         private Integer status;
         private List<Long> imageFileIds;
         /** 关闭任务时必填 */
+        private String remark;
+    }
+
+    @Data
+    public static class BatchStatusRequest {
+        private List<Long> ids;
+        private Integer status;
+        /** 批量关闭任务时必填 */
         private String remark;
     }
 

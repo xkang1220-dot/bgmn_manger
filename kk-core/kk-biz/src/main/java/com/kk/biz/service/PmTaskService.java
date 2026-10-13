@@ -62,6 +62,9 @@ public interface PmTaskService extends IService<PmTask> {
     /** @param remark 关闭(status=3)时必填原因 */
     void updateStatus(Long id, Integer status, List<Long> imageFileIds, String remark);
 
+    /** 批量更新任务状态；任一任务校验失败时整批回滚。 */
+    void batchUpdateStatus(List<Long> ids, Integer status, String remark);
+
     /** 任务管理员确认或驳回用户提交的完成申请。 */
     void reviewCompletion(Long id, boolean approved, String remark);
 

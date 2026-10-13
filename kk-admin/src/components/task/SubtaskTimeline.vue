@@ -103,7 +103,14 @@ const range = computed(() => {
 
   if (!parentStart && !datedTasks.value.length) return null
 
-  let min = parentStart ? dayMs(parentStart) : Math.min(...datedTasks.value.map((t) => t.startMs))
+  // 子任务可能在父任务计划/实际开始日期之前创建。时间轴起点必须覆盖两者，
+  // 否则较早创建的任务条会得到负的 left，并被滚动容器裁掉。
+  const childStart = datedTasks.value.length
+    ? Math.min(...datedTasks.value.map((task) => task.startMs))
+    : null
+  let min = parentStart
+    ? Math.min(dayMs(parentStart), childStart ?? dayMs(parentStart))
+    : childStart!
 
   // 默认到今天；若父任务在今天之前已完成，则到完成日
   let max = today
@@ -158,7 +165,7 @@ function barStyle(task: { startMs: number; endMs: number }) {
   if (!range.value) return {}
   const { min } = range.value
   const left = ((task.startMs - min) / DAY_MS) * DAY_WIDTH
-  const width = Math.max(((task.endMs - task.startMs) / DAY_MS + 1) * DAY_WIDTH - 6, 100)
+  const width = Math.max(((task.endMs - task.startMs) / DAY_MS + 1) * DAY_WIDTH, 100)
   return { left: `${left}px`, width: `${width}px` }
 }
 </script>

@@ -318,6 +318,9 @@ export const bizApi = {
   updateTaskStatus(id: number, status: number, imageFileIds?: number[], remark?: string) {
     return request<void>({ url: `/task/${id}/status`, method: 'put', data: { status, imageFileIds, remark } })
   },
+  batchUpdateTaskStatus(ids: number[], status: number, remark?: string) {
+    return request<void>({ url: '/task/batch/status', method: 'put', data: { ids, status, remark } })
+  },
   reviewTaskCompletion(id: number, approved: boolean, remark?: string) {
     return request<void>({ url: `/task/${id}/completion-review`, method: 'put', data: { approved, remark } })
   },

@@ -30,6 +30,10 @@ public class PmTask extends BaseEntity {
     /** 父任务 ID；为空表示项目内的顶层任务。 */
     private Long parentTaskId;
 
+    /** 编辑时显式解除父任务关系；用于区分 JSON null 与未提交 parentTaskId。 */
+    @TableField(exist = false)
+    private Boolean clearParentTask;
+
     private String title;
 
     private String content;
