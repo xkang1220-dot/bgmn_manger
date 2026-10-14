@@ -132,7 +132,6 @@ const selectedCount = computed(() => selectedTasks.value.length)
 
 function isTaskSelectable(row: any) {
   return taskScope.value === 'mine'
-    && userStore.hasPermission('project:task:edit')
     && row.canEdit
     && [0, 1].includes(Number(row.status))
 }
@@ -468,15 +467,15 @@ function isParentPending(row: any) {
 }
 
 function canEditTask(row: any) {
-  return userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3
+  return row.canEdit && row.status !== 3
 }
 
 function canTransferTask(row: any) {
-  return userStore.hasPermission('project:task:add') && row.canTransfer && ![2, 3].includes(Number(row.status))
+  return row.canTransfer && ![2, 3].includes(Number(row.status))
 }
 
 function canCloseTask(row: any) {
-  return userStore.hasPermission('project:task:edit') && row.canEdit && row.status !== 3 && !hasUnfinishedChildren(row)
+  return row.canEdit && row.status !== 3 && !hasUnfinishedChildren(row)
 }
 
 function canReviewTask(row: any) {
@@ -484,7 +483,7 @@ function canReviewTask(row: any) {
 }
 
 function canChangeTaskStatus(row: any) {
-  return userStore.hasPermission('project:task:edit') && row.canEdit && ![3, 4].includes(Number(row.status))
+  return row.canEdit && ![3, 4].includes(Number(row.status))
 }
 
 function hasTaskActions(row: any) {
@@ -903,10 +902,6 @@ onUnmounted(() => {
             <div class="task-owner-cell">
               <strong>{{ row.assigneeName || '未指定' }}</strong>
               <span>持有人：{{ row.holderName || '未指定' }}</span>
-              <span v-if="row.participantNames?.length">
-                协作：{{ row.participantNames.filter((name: string) => name !== row.assigneeName).join('、') || '—' }}
-              </span>
-              <span v-else>暂无协作人员</span>
             </div>
           </template>
         </el-table-column>

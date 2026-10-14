@@ -137,28 +137,28 @@ public class TaskController {
     }
 
     @PutMapping
-    @SaCheckPermission("project:task:edit")
+    @SaCheckPermission("project:task:list")
     public Result<Void> update(@RequestBody PmTask task) {
         taskService.updateTask(task);
         return Result.ok();
     }
 
     @PutMapping("/{id}/status")
-    @SaCheckPermission("project:task:edit")
+    @SaCheckPermission("project:task:list")
     public Result<Void> updateStatus(@PathVariable Long id, @RequestBody StatusRequest request) {
         taskService.updateStatus(id, request.getStatus(), request.getImageFileIds(), request.getRemark());
         return Result.ok();
     }
 
     @PutMapping("/{id}/actual-time")
-    @SaCheckPermission("project:task:edit")
+    @SaCheckPermission("project:task:list")
     public Result<Void> updateActualTime(@PathVariable Long id, @RequestBody ActualTimeRequest request) {
         taskService.updateActualTime(id, request.getField(), request.getValue());
         return Result.ok();
     }
 
     @PutMapping("/batch/status")
-    @SaCheckPermission("project:task:edit")
+    @SaCheckPermission("project:task:list")
     public Result<Void> batchUpdateStatus(@RequestBody BatchStatusRequest request) {
         taskService.batchUpdateStatus(request.getIds(), request.getStatus(), request.getRemark());
         return Result.ok();
@@ -223,7 +223,7 @@ public class TaskController {
     }
 
     @PutMapping("/{id}/transfer")
-    @SaCheckPermission("project:task:add")
+    @SaCheckPermission("project:task:list")
     public Result<Void> transfer(@PathVariable Long id, @RequestBody TransferRequest request) {
         taskService.transfer(id, request.getHolderId(), request.getRemark(), request.getImageFileIds());
         return Result.ok();

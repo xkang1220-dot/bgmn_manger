@@ -87,11 +87,11 @@ public class PmTask extends BaseEntity {
     @TableField(exist = false)
     private String holderName;
 
-    /** 当前登录人是否可编辑（任务参与人 / 项目负责人 / 股东 control / 全局管理员） */
+    /** 当前登录人是否可编辑（仅任务负责人或持有人） */
     @TableField(exist = false)
     private Boolean canEdit;
 
-    /** 当前登录人是否可移交（参与人 / 项目负责人 / 股东 control / 全局管理员） */
+    /** 当前登录人是否可移交（仅任务负责人或持有人） */
     @TableField(exist = false)
     private Boolean canTransfer;
 

@@ -20,7 +20,7 @@ const props = defineProps<{
   /** 新建时默认项目 */
   defaultProjectId?: number | null
   taskScope?: 'mine' | 'all'
-  /** 查看模式下是否展示任务编辑入口（仍受接口 canEdit 与菜单权限约束） */
+  /** 查看模式下是否展示任务编辑入口（仍受接口 canEdit 约束） */
   showEditAction?: boolean
 }>()
 
@@ -45,7 +45,6 @@ const editing = ref(false)
 const isNew = ref(false)
 const isTaskManager = computed(() => userStore.hasPermission('project:task:add'))
 const canEditDetail = computed(() => !!props.showEditAction
-  && userStore.hasPermission('project:task:edit')
   && !!detail.value?.canEdit
   && ![3, 4].includes(Number(detail.value?.status)))
 const projects = ref<any[]>([])

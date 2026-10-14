@@ -2033,10 +2033,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         return memberCount != null && memberCount > 0;
     }
 
-    /** 可写：任务管理员 / admin / 公司 control / 项目负责人 / 任务参与人（创建人也放行） */
+    /** 可写：仅任务负责人或当前持有人。 */
     private void assertCanWriteTask(PmTask task) {
         if (!canWriteTask(task, null)) {
-            throw new BusinessException("仅任务参与人、项目负责人或股东可修改任务");
+            throw new BusinessException("仅任务负责人或持有人可操作任务");
         }
     }
 
@@ -2052,24 +2052,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             return false;
         }
         long loginId = StpUtil.getLoginIdAsLong();
-        if (StpUtil.hasRole("task_manager") || dataScopeService.isGlobalAdmin(loginId)) {
-            return true;
-        }
-        Long companyId = task.getCompanyId();
-        if (companyId != null && dataScopeService.hasRoleInCompany(loginId, "control", companyId)) {
-            return true;
-        }
-        PmProject p = project;
-        if (p == null && task.getProjectId() != null) {
-            p = projectMapper.selectById(task.getProjectId());
-        }
-        if (p != null && Objects.equals(p.getOwnerId(), loginId)) {
-            return true;
-        }
-        if (Objects.equals(task.getCreateBy(), loginId)) {
-            return true;
-        }
-        return isTaskParticipant(task.getId(), loginId);
+        return Objects.equals(task.getAssigneeId(), loginId)
+                || Objects.equals(task.getHolderId(), loginId);
     }
 
     /** 仅所属项目负责人或任务负责人可以调整已有任务的参与人员。 */
@@ -2089,34 +2073,13 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     }
 
     private void assertCanTransfer(PmTask task) {
-        if (!StpUtil.hasPermission("project:task:add")) {
-            throw new BusinessException("仅任务管理员可以分派或移交任务");
-        }
         if (!canTransferTask(task, null)) {
-            throw new BusinessException("仅任务参与人、项目负责人或股东可移交");
+            throw new BusinessException("仅任务负责人或持有人可移交任务");
         }
     }
 
     private boolean canTransferTask(PmTask task, PmProject project) {
-        if (!canWriteTask(task, project)) {
-            return false;
-        }
-        long loginId = StpUtil.getLoginIdAsLong();
-        if (dataScopeService.isGlobalAdmin(loginId)) {
-            return true;
-        }
-        Long companyId = task.getCompanyId();
-        if (companyId != null && dataScopeService.hasRoleInCompany(loginId, "control", companyId)) {
-            return true;
-        }
-        PmProject p = project;
-        if (p == null && task.getProjectId() != null) {
-            p = projectMapper.selectById(task.getProjectId());
-        }
-        if (p != null && Objects.equals(p.getOwnerId(), loginId)) {
-            return true;
-        }
-        return isTaskParticipant(task.getId(), loginId);
+        return canWriteTask(task, project);
     }
 
     private void assertTaskNotClosed(PmTask task) {
