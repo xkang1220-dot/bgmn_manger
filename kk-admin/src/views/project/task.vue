@@ -119,6 +119,14 @@ const taskTableRef = ref<TableInstance>()
 const expandedTaskIds = ref<Set<string>>(new Set())
 const selectedTasks = ref<any[]>([])
 const batchLoading = ref(false)
+type ActualTimeField = 'startedAt' | 'completedAt'
+const actualTimeDialogVisible = ref(false)
+const actualTimeSaving = ref(false)
+const actualTimeForm = reactive({
+  task: null as any,
+  field: 'startedAt' as ActualTimeField,
+  value: '',
+})
 
 const selectedCount = computed(() => selectedTasks.value.length)
 
@@ -408,6 +416,45 @@ function canCreateSubtask(row: any) {
   // 这里只限制可挂子任务的层级和父任务状态，避免把“新增任务”菜单权限
   // 误当成项目成员创建子任务的前置条件。
   return !isSubtaskRow(row) && [0, 1].includes(row.status)
+}
+
+function localDateTimeValue(value?: string) {
+  if (value) return String(value).replace(' ', 'T').slice(0, 19)
+  const now = new Date()
+  const offset = now.getTimezoneOffset() * 60_000
+  return new Date(now.getTime() - offset).toISOString().slice(0, 19)
+}
+
+function openActualTimeDialog(row: any, field: ActualTimeField) {
+  if (!canEditTask(row)) return
+  actualTimeForm.task = row
+  actualTimeForm.field = field
+  actualTimeForm.value = localDateTimeValue(row[field])
+  actualTimeDialogVisible.value = true
+}
+
+async function saveActualTime() {
+  const row = actualTimeForm.task
+  if (!row || !actualTimeForm.value) {
+    ElMessage.warning('请选择具体时间')
+    return
+  }
+  const otherValue = actualTimeForm.field === 'startedAt' ? row.completedAt : row.startedAt
+  const startedAt = actualTimeForm.field === 'startedAt' ? actualTimeForm.value : otherValue
+  const completedAt = actualTimeForm.field === 'completedAt' ? actualTimeForm.value : otherValue
+  if (startedAt && completedAt && new Date(completedAt).getTime() < new Date(startedAt).getTime()) {
+    ElMessage.warning('结束时间不能早于开始时间')
+    return
+  }
+  actualTimeSaving.value = true
+  try {
+    await bizApi.updateTaskActualTime(row.id, actualTimeForm.field, actualTimeForm.value)
+    ElMessage.success(`${actualTimeForm.field === 'startedAt' ? '开始' : '结束'}时间已修改`)
+    actualTimeDialogVisible.value = false
+    await load()
+  } finally {
+    actualTimeSaving.value = false
+  }
 }
 
 function hasUnfinishedChildren(row: any) {
@@ -884,8 +931,22 @@ onUnmounted(() => {
         <el-table-column label="实际时间" min-width="170">
           <template #default="{ row }">
             <div class="task-date-range">
-              <span><i>开始</i>{{ fmtTaskTime(row.startedAt) }}</span>
-              <span><i>结束</i>{{ fmtTaskTime(row.completedAt) }}</span>
+              <span
+                class="actual-time-value"
+                :class="{ 'is-editable': canEditTask(row) }"
+                :tabindex="canEditTask(row) ? 0 : undefined"
+                :title="canEditTask(row) ? '双击修改实际开始时间' : undefined"
+                @dblclick="openActualTimeDialog(row, 'startedAt')"
+                @keydown.enter="openActualTimeDialog(row, 'startedAt')"
+              ><i>开始</i>{{ fmtTaskTime(row.startedAt) }}</span>
+              <span
+                class="actual-time-value"
+                :class="{ 'is-editable': canEditTask(row) }"
+                :tabindex="canEditTask(row) ? 0 : undefined"
+                :title="canEditTask(row) ? '双击修改实际结束时间' : undefined"
+                @dblclick="openActualTimeDialog(row, 'completedAt')"
+                @keydown.enter="openActualTimeDialog(row, 'completedAt')"
+              ><i>结束</i>{{ fmtTaskTime(row.completedAt) }}</span>
             </div>
           </template>
         </el-table-column>
@@ -935,6 +996,30 @@ onUnmounted(() => {
     </div>
 
     <CompanyTaskShareDialog v-model="shareOpen" :companies="shareCompanies" />
+    <el-dialog
+      v-model="actualTimeDialogVisible"
+      :title="`修改实际${actualTimeForm.field === 'startedAt' ? '开始' : '结束'}时间`"
+      width="420px"
+      destroy-on-close
+      @closed="actualTimeForm.task = null"
+    >
+      <el-form label-position="top" @submit.prevent="saveActualTime">
+        <el-form-item :label="actualTimeForm.field === 'startedAt' ? '开始时间' : '结束时间'" required>
+          <el-date-picker
+            v-model="actualTimeForm.value"
+            type="datetime"
+            value-format="YYYY-MM-DDTHH:mm:ss"
+            format="YYYY-MM-DD HH:mm:ss"
+            placeholder="请选择日期和时间"
+            style="width: 100%"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="actualTimeSaving" @click="actualTimeDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="actualTimeSaving" @click="saveActualTime">确定</el-button>
+      </template>
+    </el-dialog>
     <TaskDetailDrawer
       v-model="taskDrawer"
       :task-id="activeTaskId"
@@ -1603,6 +1688,9 @@ onUnmounted(() => {
 .task-date-range { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--kk-text-secondary); }
 .task-date-range span { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
 .task-date-range i { width: 28px; flex-shrink: 0; font-style: normal; color: var(--kk-text-muted); }
+.actual-time-value.is-editable { cursor: pointer; border-radius: 4px; }
+.actual-time-value.is-editable:hover { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
+.actual-time-value.is-editable:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
 .overdue { color: var(--kk-danger); font-weight: 500; }
 
 @media (max-width: 900px) {

@@ -25,6 +25,7 @@ const filters = reactive({ participantId: undefined as number | undefined })
 type PeriodKey = 'ALL' | 'TODAY' | 'THIS_WEEK' | 'LAST_WEEK' | 'THIS_MONTH' | 'LAST_MONTH' | 'CUSTOM'
 const period = ref<PeriodKey>('TODAY')
 const customPeriod = ref<[string, string] | undefined>()
+const collapsedDurationMembers = ref<Set<string>>(new Set())
 const periodOptions: Array<{ label: string; value: PeriodKey }> = [
   { label: '全部', value: 'ALL' }, { label: '当日', value: 'TODAY' }, { label: '本周', value: 'THIS_WEEK' },
   { label: '上周', value: 'LAST_WEEK' }, { label: '本月', value: 'THIS_MONTH' },
@@ -179,21 +180,120 @@ const memberChartRows = computed(() => filteredMemberTaskStats.value.map((item: 
 })))
 const memberChartMax = computed(() => Math.max(1, ...memberChartRows.value.flatMap((item: any) => [item.done, item.doing, item.overdue])))
 const memberChartMinWidth = computed(() => Math.max(720, memberChartRows.value.length * 112))
-const employeeDurationRows = computed(() => (dashboard.value.employeeDurationStats || []).map((item: any) => ({
-  ...item,
-  durationSeconds: Number(item.durationSeconds || 0),
-  completedDurationSeconds: Number(item.completedDurationSeconds || 0),
-  incompleteDurationSeconds: Number(item.incompleteDurationSeconds || 0),
-  completedTasks: Number(item.completedTasks || 0),
-  incompleteTasks: Number(item.incompleteTasks || 0),
-  timedTasks: Number(item.timedTasks || 0),
-})))
-const employeeDurationMax = computed(() => Math.max(1, ...employeeDurationRows.value.map((item: any) => item.durationSeconds)))
+const employeeDurationRows = computed(() => (dashboard.value.employeeDurationStats || [])
+  .map((item: any) => ({
+    ...item,
+    durationSeconds: Number(item.durationSeconds || 0),
+    completedDurationSeconds: Number(item.completedDurationSeconds || 0),
+    incompleteDurationSeconds: Number(item.incompleteDurationSeconds || 0),
+    completedTasks: Number(item.completedTasks || 0),
+    incompleteTasks: Number(item.incompleteTasks || 0),
+    timedTasks: Number(item.timedTasks || 0),
+    tasks: [...(item.tasks || [])].sort((a: any, b: any) => Number(b.durationSeconds || 0) - Number(a.durationSeconds || 0)),
+  }))
+  .sort((a: any, b: any) => b.completedTasks - a.completedTasks
+    || b.timedTasks - a.timedTasks
+    || b.durationSeconds - a.durationSeconds
+    || String(a.memberName || '').localeCompare(String(b.memberName || ''), 'zh-CN')))
 const employeeDurationTotal = computed(() => employeeDurationRows.value.reduce(
   (sum: number, item: any) => sum + item.durationSeconds, 0,
 ))
+const timelineRange = computed(() => {
+  if (periodBounds.value) {
+    return {
+      start: new Date(`${periodBounds.value.from}T00:00:00`).getTime(),
+      end: new Date(`${periodBounds.value.to}T00:00:00`).getTime(),
+    }
+  }
+  const tasks = employeeDurationRows.value.flatMap((item: any) => item.tasks || [])
+  if (!tasks.length) return undefined
+  const starts = tasks.map((task: any) => parseDateTime(task.startedAt)).filter(Number.isFinite)
+  const ends = tasks.map((task: any) => parseDateTime(task.endedAt)).filter(Number.isFinite)
+  if (!starts.length || !ends.length) return undefined
+  const startDate = new Date(Math.min(...starts))
+  const endDate = new Date(Math.max(...ends))
+  const start = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate()).getTime()
+  const end = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate() + 1).getTime()
+  return { start, end: Math.max(end, start + 86_400_000) }
+})
+const timelineTicks = computed(() => {
+  const range = timelineRange.value
+  if (!range) return []
+  if (period.value === 'TODAY') {
+    return [0, 4, 8, 12, 16, 20, 24].map((hour) => ({ key: hour, label: `${String(hour).padStart(2, '0')}:00`, position: hour / 24 * 100 }))
+  }
+  const dayMs = 86_400_000
+  const days = Math.max(1, Math.round((range.end - range.start) / dayMs))
+  if (days <= 14) {
+    return Array.from({ length: days }, (_, index) => {
+      const date = new Date(range.start + index * dayMs)
+      const weekLabel = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][date.getDay()]
+      return { key: date.getTime(), label: days === 7 ? weekLabel : `${date.getMonth() + 1}/${date.getDate()}`, position: (index + 0.5) / days * 100 }
+    })
+  }
+  if (days <= 62) {
+    const step = Math.max(1, Math.ceil(days / 8))
+    const ticks = []
+    for (let index = 0; index < days; index += step) {
+      const date = new Date(range.start + index * dayMs)
+      ticks.push({ key: date.getTime(), label: `${date.getMonth() + 1}/${date.getDate()}`, position: index / days * 100 })
+    }
+    const lastDate = new Date(range.end - dayMs)
+    ticks.push({ key: range.end, label: `${lastDate.getMonth() + 1}/${lastDate.getDate()}`, position: 100 })
+    return ticks
+  }
+  const ticks = []
+  const cursor = new Date(range.start)
+  cursor.setDate(1)
+  if (cursor.getTime() < range.start) cursor.setMonth(cursor.getMonth() + 1)
+  while (cursor.getTime() < range.end) {
+    const value = cursor.getTime()
+    ticks.push({
+      key: value,
+      label: `${cursor.getFullYear()}/${cursor.getMonth() + 1}`,
+      position: (value - range.start) / (range.end - range.start) * 100,
+    })
+    cursor.setMonth(cursor.getMonth() + 1)
+  }
+  return ticks
+})
+function parseDateTime(value: string) {
+  return new Date(value).getTime()
+}
+function timelineBarStyle(task: any) {
+  const timeline = timelineRange.value
+  if (!timeline) return { left: '0%', width: '100%' }
+  const rangeStart = timeline.start
+  const rangeEnd = timeline.end
+  const start = Math.max(rangeStart, parseDateTime(task.startedAt))
+  const end = Math.min(rangeEnd, parseDateTime(task.endedAt))
+  const range = Math.max(1, rangeEnd - rangeStart)
+  const left = Math.max(0, Math.min(100, (start - rangeStart) / range * 100))
+  const width = Math.max(0.7, Math.min(100 - left, (Math.max(start, end) - start) / range * 100))
+  return { left: `${left}%`, width: `${width}%` }
+}
+function timelineTaskTime(task: any) {
+  const start = new Date(task.startedAt)
+  const end = new Date(task.endedAt)
+  const time = (value: Date) => `${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}`
+  if (period.value === 'TODAY') return `${time(start)}–${time(end)}`
+  return `${start.getMonth() + 1}/${start.getDate()} ${time(start)}–${end.getMonth() + 1}/${end.getDate()} ${time(end)}`
+}
 function memberInitial(name: string) {
   return (name || '?').trim().slice(0, 1).toUpperCase()
+}
+function durationMemberKey(item: any) {
+  return String(item.memberId ?? item.memberName)
+}
+function isDurationMemberCollapsed(item: any) {
+  return collapsedDurationMembers.value.has(durationMemberKey(item))
+}
+function toggleDurationMember(item: any) {
+  const key = durationMemberKey(item)
+  const next = new Set(collapsedDurationMembers.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsedDurationMembers.value = next
 }
 
 function formatDuration(seconds: number) {
@@ -521,42 +621,46 @@ onBeforeUnmount(() => {
         <span><i class="completed" />已完成任务耗时</span>
         <span><i class="incomplete" />未完成任务耗时（从实际开始计算至当前时间）</span>
       </div>
-      <ol v-if="employeeDurationRows.length" class="duration-ranking" aria-label="员工任务耗时排名">
-        <li v-for="item in employeeDurationRows" :key="item.memberId">
-          <span class="duration-rank" :class="`is-${Math.min(item.rank, 4)}`">{{ item.rank }}</span>
-          <span class="duration-person">
-            <i aria-hidden="true">{{ memberInitial(item.memberName) }}</i>
-            <span><strong>{{ item.memberName }}</strong><small>{{ item.timedTasks }} 项任务计入耗时<span v-if="item.incompleteTasks"> · {{ item.incompleteTasks }} 项未完成</span></small></span>
-          </span>
-          <span class="duration-bar" :aria-label="`${item.memberName}的任务耗时分布`">
-            <el-tooltip
-              v-if="item.completedDurationSeconds > 0"
-              :content="`已完成任务耗时：${formatDuration(item.completedDurationSeconds)}`"
-              placement="top"
-            >
-              <button
-                type="button"
-                class="duration-segment completed"
-                :style="{ width: `${item.completedDurationSeconds / employeeDurationMax * 100}%` }"
-                :aria-label="`${item.memberName}，已完成任务耗时：${formatDuration(item.completedDurationSeconds)}`"
-              />
-            </el-tooltip>
-            <el-tooltip
-              v-if="item.incompleteDurationSeconds > 0"
-              :content="`未完成任务耗时：${formatDuration(item.incompleteDurationSeconds)}`"
-              placement="top"
-            >
-              <button
-                type="button"
-                class="duration-segment incomplete"
-                :style="{ width: `${item.incompleteDurationSeconds / employeeDurationMax * 100}%` }"
-                :aria-label="`${item.memberName}，未完成任务耗时：${formatDuration(item.incompleteDurationSeconds)}`"
-              />
-            </el-tooltip>
-          </span>
-          <strong class="duration-value">{{ formatDuration(item.durationSeconds) }}</strong>
-        </li>
-      </ol>
+      <div v-if="employeeDurationRows.length" class="duration-timelines" aria-label="员工任务时间轴">
+        <article v-for="item in employeeDurationRows" :key="item.memberId" class="duration-timeline-card">
+          <button
+            type="button"
+            class="timeline-person"
+            :aria-expanded="!isDurationMemberCollapsed(item)"
+            :aria-controls="`duration-tasks-${durationMemberKey(item)}`"
+            @click="toggleDurationMember(item)"
+          >
+            <span class="duration-person">
+              <i aria-hidden="true">{{ memberInitial(item.memberName) }}</i>
+              <span><strong>{{ item.memberName }}</strong><small>{{ item.completedTasks }} 项已完成 · {{ item.timedTasks }} 项计时任务 · 共 {{ formatDuration(item.durationSeconds) }}</small></span>
+            </span>
+            <span class="timeline-collapse-hint">
+              {{ isDurationMemberCollapsed(item) ? '展开任务' : '收起任务' }}
+              <i aria-hidden="true" :class="{ 'is-collapsed': isDurationMemberCollapsed(item) }" />
+            </span>
+          </button>
+          <div v-show="!isDurationMemberCollapsed(item)" :id="`duration-tasks-${durationMemberKey(item)}`" class="timeline-task-content">
+            <div class="timeline-axis-row" aria-hidden="true">
+              <span class="timeline-label-spacer" />
+              <div class="timeline-track timeline-axis">
+                <span v-for="tick in timelineTicks" :key="tick.key" :class="{ 'is-start': tick.position === 0, 'is-end': tick.position === 100 }" :style="{ left: `${tick.position}%` }">{{ tick.label }}</span>
+              </div>
+            </div>
+            <button v-for="task in item.tasks" :key="task.id" type="button" class="timeline-task-row" @click="openTask(task.id)">
+              <span class="timeline-task-label">
+                <strong :title="task.title">{{ task.title }}</strong>
+                <small>{{ formatDuration(task.durationSeconds) }} · {{ task.projectName }}</small>
+              </span>
+              <span class="timeline-track timeline-task-track">
+                <i v-for="tick in timelineTicks" :key="tick.key" class="timeline-gridline" :style="{ left: `${tick.position}%` }" />
+                <el-tooltip :content="`${task.title}｜${timelineTaskTime(task)}｜耗时 ${formatDuration(task.durationSeconds)}`" placement="top">
+                  <b class="timeline-task-bar" :class="task.completed ? 'completed' : 'incomplete'" :style="timelineBarStyle(task)" />
+                </el-tooltip>
+              </span>
+            </button>
+          </div>
+        </article>
+      </div>
       <el-empty v-else description="暂无员工任务耗时数据" :image-size="64" />
     </section>
 
@@ -1267,6 +1371,135 @@ onBeforeUnmount(() => {
 }
 .duration-legend i.completed { background: #3f3f46; }
 .duration-legend i.incomplete { background: #f59e0b; }
+.duration-timelines {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+.duration-timeline-card {
+  overflow: hidden;
+  border: 1px solid rgba(24, 24, 27, 0.07);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.4);
+}
+.timeline-person {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 58px;
+  padding: 10px 14px;
+  border: 0;
+  border-bottom: 1px solid rgba(24, 24, 27, 0.06);
+  background: rgba(255, 255, 255, 0.42);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease-out;
+}
+.timeline-person:hover { background: rgba(255, 255, 255, 0.68); }
+.timeline-person:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
+.timeline-collapse-hint {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  color: var(--kk-text-muted);
+  font-size: 11px;
+}
+.timeline-collapse-hint > i {
+  width: 8px;
+  height: 8px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(225deg) translate(-1px, -1px);
+  transition: transform 160ms ease-out;
+}
+.timeline-collapse-hint > i.is-collapsed { transform: rotate(45deg) translate(-1px, -1px); }
+.timeline-axis-row,
+.timeline-task-row {
+  display: grid;
+  grid-template-columns: minmax(190px, 260px) minmax(480px, 1fr);
+}
+.timeline-axis-row {
+  min-height: 32px;
+  color: var(--kk-text-muted);
+  font-size: 10px;
+}
+.timeline-label-spacer,
+.timeline-task-label {
+  border-right: 1px solid rgba(24, 24, 27, 0.07);
+}
+.timeline-track { position: relative; min-width: 0; }
+.timeline-axis {
+  margin: 0 14px;
+  border-bottom: 1px solid rgba(24, 24, 27, 0.12);
+}
+.timeline-axis > span {
+  position: absolute;
+  bottom: 6px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.timeline-axis > span.is-start { transform: none; }
+.timeline-axis > span.is-end { transform: translateX(-100%); }
+.timeline-task-row {
+  width: 100%;
+  min-height: 54px;
+  padding: 0;
+  border: 0;
+  border-top: 1px solid rgba(24, 24, 27, 0.05);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.timeline-task-row:hover { background: rgba(24, 24, 27, 0.025); }
+.timeline-task-row:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
+.timeline-task-label {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  padding: 8px 14px;
+}
+.timeline-task-label strong {
+  overflow: hidden;
+  color: var(--kk-text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.timeline-task-label small {
+  overflow: hidden;
+  margin-top: 4px;
+  color: var(--kk-text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.timeline-task-track { margin: 0 14px; }
+.timeline-gridline {
+  position: absolute;
+  inset-block: 0;
+  width: 1px;
+  background: rgba(24, 24, 27, 0.055);
+}
+.timeline-task-bar {
+  position: absolute;
+  top: 50%;
+  height: 12px;
+  min-width: 3px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  box-shadow: 0 1px 3px rgba(24, 24, 27, 0.14);
+}
+.timeline-task-bar.completed { background: linear-gradient(90deg, #18181b, #52525b); }
+.timeline-task-bar.incomplete { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
 .duration-ranking {
   display: grid;
   gap: 8px;
@@ -1449,6 +1682,9 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr 1fr;
     width: 100%;
   }
+  .duration-timeline-card { overflow-x: auto; }
+  .timeline-axis-row,
+  .timeline-task-row { width: 760px; }
   .duration-ranking li {
     grid-template-columns: 28px minmax(0, 1fr) auto;
     gap: 10px;

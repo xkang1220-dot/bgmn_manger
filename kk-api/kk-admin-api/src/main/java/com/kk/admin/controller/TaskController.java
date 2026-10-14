@@ -18,6 +18,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 
@@ -149,6 +150,13 @@ public class TaskController {
         return Result.ok();
     }
 
+    @PutMapping("/{id}/actual-time")
+    @SaCheckPermission("project:task:edit")
+    public Result<Void> updateActualTime(@PathVariable Long id, @RequestBody ActualTimeRequest request) {
+        taskService.updateActualTime(id, request.getField(), request.getValue());
+        return Result.ok();
+    }
+
     @PutMapping("/batch/status")
     @SaCheckPermission("project:task:edit")
     public Result<Void> batchUpdateStatus(@RequestBody BatchStatusRequest request) {
@@ -227,6 +235,12 @@ public class TaskController {
         private List<Long> imageFileIds;
         /** 关闭任务时必填 */
         private String remark;
+    }
+
+    @Data
+    public static class ActualTimeRequest {
+        private String field;
+        private LocalDateTime value;
     }
 
     @Data
