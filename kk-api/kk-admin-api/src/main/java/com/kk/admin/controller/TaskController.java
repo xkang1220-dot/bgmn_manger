@@ -129,6 +129,12 @@ public class TaskController {
         return Result.ok(taskService.getDetail(id, scope));
     }
 
+    @GetMapping("/management/{id}")
+    @SaCheckRole("task_manager")
+    public Result<PmTask> managementDetail(@PathVariable Long id) {
+        return Result.ok(taskService.getManagementDetail(id));
+    }
+
     @PostMapping
     @SaCheckPermission("project:task:list")
     public Result<Void> create(@RequestBody PmTask task) {
@@ -140,6 +146,13 @@ public class TaskController {
     @SaCheckPermission("project:task:list")
     public Result<Void> update(@RequestBody PmTask task) {
         taskService.updateTask(task);
+        return Result.ok();
+    }
+
+    @PutMapping("/management")
+    @SaCheckRole("task_manager")
+    public Result<Void> managementUpdate(@RequestBody PmTask task) {
+        taskService.updateManagementTask(task);
         return Result.ok();
     }
 

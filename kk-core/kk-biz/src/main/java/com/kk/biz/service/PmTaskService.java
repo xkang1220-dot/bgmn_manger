@@ -26,6 +26,9 @@ public interface PmTaskService extends IService<PmTask> {
 
     PmTask getDetail(Long id, String scope);
 
+    /** 任务驾驶舱详情：task_manager 全局可读，并返回可编辑标记。 */
+    PmTask getManagementDetail(Long id);
+
     /**
      * 任务统计。与列表共用项目/标题/优先级/参与人筛选；
      * 不含 status、overdue（这两项由统计卡片自身表达，避免点卡片后其它数变 0）。
@@ -54,6 +57,9 @@ public interface PmTaskService extends IService<PmTask> {
     void createTask(PmTask task);
 
     void updateTask(PmTask task);
+
+    /** 任务驾驶舱编辑：仅由已校验 task_manager 角色的管理接口调用。 */
+    void updateManagementTask(PmTask task);
 
     /** 单独修正任务实际开始或完成时间，不触发任务状态流转。 */
     void updateActualTime(Long id, String field, LocalDateTime value);

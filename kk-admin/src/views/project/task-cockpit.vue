@@ -129,14 +129,14 @@ const browserProjectItems = computed<BrowserProjectItem[]>(() => {
       })
     }
   })
-  return items
+  return items.filter((item) => item.taskCount > 0)
 })
 const browserSelectedLabel = computed(() => {
   if (browserProjectId.value == null) return '参与项目'
   return browserProjectItems.value.find((item) => item.id === browserProjectId.value)?.label || '当前项目'
 })
 const browserTabCounts = computed(() => {
-  const rows = browserRows.value
+  const rows = browserScopedRows.value
   return {
     all: rows.length,
     0: rows.filter((task) => Number(task.status) === 0).length,
@@ -147,8 +147,12 @@ const browserTabCounts = computed(() => {
     3: rows.filter((task) => Number(task.status) === 3).length,
   } as Record<BrowserTabKey, number>
 })
+const browserScopedRows = computed(() => {
+  if (browserProjectId.value == null) return browserRows.value
+  return browserRows.value.filter((task) => Number(task.projectId) === Number(browserProjectId.value))
+})
 const browserActiveTasks = computed(() => {
-  const rows = browserRows.value
+  const rows = browserScopedRows.value
   if (browserTab.value === 'all') return rows
   if (browserTab.value === 'overdue') return rows.filter((task) => !!task.overdue)
   return rows.filter((task) => Number(task.status) === browserTab.value)
@@ -202,14 +206,9 @@ const employeeDurationRows = computed(() => (dashboard.value.employeeDurationSta
     || b.completedTasks - a.completedTasks
     || b.durationSeconds - a.durationSeconds
     || String(a.memberName || '').localeCompare(String(b.memberName || ''), 'zh-CN')))
-const timelineRange = computed(() => {
-  if (periodBounds.value) {
-    return {
-      start: new Date(`${periodBounds.value.from}T00:00:00`).getTime(),
-      end: new Date(`${periodBounds.value.to}T00:00:00`).getTime(),
-    }
-  }
-  const tasks = employeeDurationRows.value.flatMap((item: any) => item.tasks || [])
+type TimelineRange = { start: number; end: number }
+
+function buildTimelineRange(tasks: any[]): TimelineRange | undefined {
   if (!tasks.length) return undefined
   const starts = tasks.map((task: any) => parseDateTime(task.startedAt)).filter(Number.isFinite)
   const ends = tasks.map((task: any) => parseDateTime(task.endedAt)).filter(Number.isFinite)
@@ -219,15 +218,14 @@ const timelineRange = computed(() => {
   const start = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate()).getTime()
   const end = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate() + 1).getTime()
   return { start, end: Math.max(end, start + 86_400_000) }
-})
-const timelineTicks = computed(() => {
-  const range = timelineRange.value
-  if (!range) return []
-  if (period.value === 'TODAY') {
-    return [0, 4, 8, 12, 16, 20, 24].map((hour) => ({ key: hour, label: `${String(hour).padStart(2, '0')}:00`, position: hour / 24 * 100 }))
-  }
+}
+
+function buildTimelineTicks(range: TimelineRange) {
   const dayMs = 86_400_000
   const days = Math.max(1, Math.round((range.end - range.start) / dayMs))
+  if (days === 1) {
+    return [0, 4, 8, 12, 16, 20, 24].map((hour) => ({ key: hour, label: `${String(hour).padStart(2, '0')}:00`, position: hour / 24 * 100 }))
+  }
   if (days <= 14) {
     return Array.from({ length: days }, (_, index) => {
       const date = new Date(range.start + index * dayMs)
@@ -260,12 +258,30 @@ const timelineTicks = computed(() => {
     cursor.setMonth(cursor.getMonth() + 1)
   }
   return ticks
+}
+
+const memberTimelines = computed(() => {
+  const timelines = new Map<string, { range: TimelineRange; ticks: ReturnType<typeof buildTimelineTicks> }>()
+  for (const item of employeeDurationRows.value) {
+    const range = buildTimelineRange(item.tasks || [])
+    if (range) timelines.set(durationMemberKey(item), { range, ticks: buildTimelineTicks(range) })
+  }
+  return timelines
 })
+
+function memberTimeline(item: any) {
+  return memberTimelines.value.get(durationMemberKey(item))
+}
+
+function memberTimelineTicks(item: any) {
+  return memberTimeline(item)?.ticks || []
+}
+
 function parseDateTime(value: string) {
   return new Date(value).getTime()
 }
-function timelineBarStyle(task: any) {
-  const timeline = timelineRange.value
+function timelineBarStyle(task: any, item: any) {
+  const timeline = memberTimeline(item)?.range
   if (!timeline) return { left: '0%', width: '100%' }
   const rangeStart = timeline.start
   const rangeEnd = timeline.end
@@ -350,8 +366,6 @@ async function loadBrowserTasks() {
       // 驾驶舱列表与统计统一按唯一持有人筛选。
       dashboardCategory: 'TOTAL',
     }
-    // 模块内项目选择优先；成员始终走顶部人员筛选
-    if (browserProjectId.value != null) params.projectId = browserProjectId.value
     const firstPage = await bizApi.managementTaskPage(params)
     const rows = [...(firstPage.list || [])]
     const total = Number(firstPage.total || rows.length)
@@ -569,7 +583,7 @@ onBeforeUnmount(() => {
           >
             <span>{{ item.label }}</span>
             <em v-if="item.scale" class="browser-scale" :class="`is-${String(item.scale).toLowerCase()}`">{{ browserScaleLabel(item.scale) }}</em>
-            <i v-if="browserProjectId == null || Number(browserProjectId) === item.id">{{ item.taskCount }}</i>
+            <i>{{ item.taskCount }}</i>
           </button>
         </aside>
         <div v-loading="browserLoading" class="browser-tasks" aria-live="polite">
@@ -652,7 +666,7 @@ onBeforeUnmount(() => {
             <div class="timeline-axis-row" aria-hidden="true">
               <span class="timeline-label-spacer" />
               <div class="timeline-track timeline-axis">
-                <span v-for="tick in timelineTicks" :key="tick.key" :class="{ 'is-start': tick.position === 0, 'is-end': tick.position === 100 }" :style="{ left: `${tick.position}%` }">{{ tick.label }}</span>
+                <span v-for="tick in memberTimelineTicks(item)" :key="tick.key" :class="{ 'is-start': tick.position === 0, 'is-end': tick.position === 100 }" :style="{ left: `${tick.position}%` }">{{ tick.label }}</span>
               </div>
             </div>
             <button v-for="task in item.tasks" :key="task.id" type="button" class="timeline-task-row" @click="openTask(task.id)">
@@ -661,9 +675,9 @@ onBeforeUnmount(() => {
                 <small>{{ formatDuration(task.durationSeconds) }} · {{ task.projectName }}</small>
               </span>
               <span class="timeline-track timeline-task-track">
-                <i v-for="tick in timelineTicks" :key="tick.key" class="timeline-gridline" :style="{ left: `${tick.position}%` }" />
+                <i v-for="tick in memberTimelineTicks(item)" :key="tick.key" class="timeline-gridline" :style="{ left: `${tick.position}%` }" />
                 <el-tooltip :content="`${task.title}｜${durationTaskStateLabel(task)}｜${timelineTaskTime(task)}｜耗时 ${formatDuration(task.durationSeconds)}`" placement="top">
-                  <b class="timeline-task-bar" :class="durationTaskState(task)" :style="timelineBarStyle(task)" />
+                  <b class="timeline-task-bar" :class="durationTaskState(task)" :style="timelineBarStyle(task, item)" />
                 </el-tooltip>
               </span>
             </button>
@@ -748,6 +762,7 @@ onBeforeUnmount(() => {
       v-model="drawerOpen"
       :task-id="activeTaskId"
       show-edit-action
+      management-edit
       @saved="refreshAfterTaskSaved"
       @deleted="refreshAfterTaskSaved"
     />

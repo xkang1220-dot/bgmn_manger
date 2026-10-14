@@ -309,8 +309,11 @@ export const bizApi = {
   taskDetail(id: number, scope?: 'mine' | 'all') {
     return request<any>({ url: `/task/${id}`, method: 'get', params: { scope } })
   },
-  saveTask(data: any, isEdit: boolean) {
-    return request<void>({ url: '/task', method: isEdit ? 'put' : 'post', data })
+  managementTaskDetail(id: number) {
+    return request<any>({ url: `/task/management/${id}`, method: 'get' })
+  },
+  saveTask(data: any, isEdit: boolean, managementEdit = false) {
+    return request<void>({ url: isEdit && managementEdit ? '/task/management' : '/task', method: isEdit ? 'put' : 'post', data })
   },
   taskBoard(projectId: number) {
     return request<any[]>({ url: '/task/board', method: 'get', params: { projectId } })

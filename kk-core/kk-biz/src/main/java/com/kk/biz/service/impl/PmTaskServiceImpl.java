@@ -377,12 +377,26 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
 
     @Override
     public PmTask getDetail(Long id, String scope) {
+        return getDetailInternal(id, scope, false);
+    }
+
+    @Override
+    public PmTask getManagementDetail(Long id) {
+        return getDetailInternal(id, "all", true);
+    }
+
+    private PmTask getDetailInternal(Long id, String scope, boolean managementEdit) {
         PmTask task = getById(id);
         if (task == null) {
             throw new BusinessException("任务不存在");
         }
-        assertCanAccessTask(task);
+        if (!managementEdit) {
+            assertCanAccessTask(task);
+        }
         fillExtras(List.of(task));
+        if (managementEdit) {
+            task.setCanEdit(task.getStatus() == null || (task.getStatus() != 3 && task.getStatus() != 4));
+        }
         task.setContent(cleanTaskContent(task.getContent()));
         task.setImages(fileService.listByBiz(TASK_IMAGE_BIZ, id));
         if (task.getParentTaskId() != null) {
@@ -1066,6 +1080,16 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void updateTask(PmTask task) {
+        updateTaskInternal(task, false);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateManagementTask(PmTask task) {
+        updateTaskInternal(task, true);
+    }
+
+    private void updateTaskInternal(PmTask task, boolean managementEdit) {
         if (task.getId() == null) {
             throw new BusinessException("任务 ID 不能为空");
         }
@@ -1080,9 +1104,13 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         validateParentTask(requestedParentId, existing.getProjectId(), existing.getId());
         task.setParentTaskId(requestedParentId);
         task.setProjectId(existing.getProjectId());
-        assertCanAccessTask(existing);
+        if (!managementEdit) {
+            assertCanAccessTask(existing);
+        }
         assertTaskNotClosed(existing);
-        assertCanWriteTask(existing);
+        if (!managementEdit) {
+            assertCanWriteTask(existing);
+        }
         Integer requestedStatus = task.getStatus() == null ? existing.getStatus() : task.getStatus();
         if (parentChanged && requestedParentId != null
                 && (Integer.valueOf(1).equals(requestedStatus)
@@ -1133,7 +1161,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         assertParticipantsEligible(existing.getProjectId(), List.of(task.getHolderId()));
         assertUserInCompany(task.getHolderId(), companyId);
         if (task.getParticipantIds() != null) {
-            if (!canManageTaskParticipants(existing)) {
+            if (!managementEdit && !canManageTaskParticipants(existing)) {
                 Set<Long> existingParticipants = taskMemberMapper.selectList(new LambdaQueryWrapper<PmTaskMember>()
                                 .eq(PmTaskMember::getTaskId, task.getId()))
                         .stream().map(PmTaskMember::getUserId).filter(Objects::nonNull).collect(Collectors.toSet());

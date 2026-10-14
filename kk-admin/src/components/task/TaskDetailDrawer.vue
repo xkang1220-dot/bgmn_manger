@@ -20,6 +20,8 @@ const props = defineProps<{
   /** 新建时默认项目 */
   defaultProjectId?: number | null
   taskScope?: 'mine' | 'all'
+  /** 任务驾驶舱管理模式：通过 task_manager 专用接口读取、编辑任务。 */
+  managementEdit?: boolean
   /** 查看模式下是否展示任务编辑入口（仍受接口 canEdit 约束） */
   showEditAction?: boolean
 }>()
@@ -304,7 +306,7 @@ async function loadDetail(
       projects.value = options
     }
     const [full, commentList, flowList] = await Promise.all([
-      bizApi.taskDetail(id, props.taskScope),
+      props.managementEdit ? bizApi.managementTaskDetail(id) : bizApi.taskDetail(id, props.taskScope),
       bizApi.taskComments(id),
       bizApi.taskFlows(id),
     ])
@@ -633,7 +635,7 @@ async function save() {
     delete payload.images
     if (!isTaskManager.value) delete payload.taskReward
     else if (!showTaskReward.value) payload.taskReward = null
-    await bizApi.saveTask(payload, !isNew.value && !!form.id)
+    await bizApi.saveTask(payload, !isNew.value && !!form.id, !!props.managementEdit)
     ElMessage.success('保存成功')
     emit('saved')
     if (isNew.value) {
