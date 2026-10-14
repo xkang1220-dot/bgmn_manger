@@ -163,8 +163,16 @@ function hasUnfinishedChildren(task: any = detail.value) {
   return (task?.children || []).some((child: any) => child.status !== 2)
 }
 
+function todayDateValue() {
+  const today = new Date()
+  const year = today.getFullYear()
+  const month = String(today.getMonth() + 1).padStart(2, '0')
+  const day = String(today.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 function emptyForm() {
-  const selfId = userStore.user?.id as number | undefined
+  const selfId = userStore.user?.id != null ? Number(userStore.user.id) : undefined
   return {
     id: undefined,
     title: '',
@@ -176,9 +184,9 @@ function emptyForm() {
     holderId: undefined,
     participantIds: selfId != null ? [selfId] : ([] as number[]),
     status: 0,
-    priority: 2,
+    priority: 3,
     taskReward: undefined,
-    startDate: '',
+    startDate: todayDateValue(),
     dueDate: '',
     riskLevel: 'NORMAL',
     content: '',
@@ -403,6 +411,12 @@ async function loadProjectCandidates(projectId?: number, openVersion?: number) {
       : undefined
   if (form.assigneeId == null) form.assigneeId = defaultUserId
   if (form.holderId == null) form.holderId = defaultUserId
+  if (isNew.value && map.has(selfId)) {
+    form.assigneeId = selfId
+    if (!(form.participantIds || []).some((id: number) => Number(id) === selfId)) {
+      form.participantIds = [...(form.participantIds || []), selfId]
+    }
+  }
   candidateProjectId.value = projectId
   const have = new Set(candidateUsers.value.map((u) => Number(u.id)))
   const ids = form.participantIds || []
