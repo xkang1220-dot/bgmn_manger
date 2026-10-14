@@ -1329,6 +1329,30 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         ids.stream().distinct().forEach(id -> updateStatus(id, status, null, remark));
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void applyAiConfirmedStatus(Long id, Integer status) {
+        if (id == null || status == null || status < 0 || status > 3) {
+            throw new BusinessException("状态不正确");
+        }
+        PmTask existing = getById(id);
+        if (existing == null) throw new BusinessException("任务不存在");
+        assertCanAccessTask(existing);
+        assertCanWriteTask(existing);
+        if (status == 0 || status.equals(existing.getStatus())) return;
+        if (status == 2 || status == 3) assertChildrenCompletedBeforeFinish(existing);
+        int target = status == 2 ? completionTargetStatus(existing.getTaskReward()) : status;
+        PmTask update = new PmTask();
+        update.setId(id);
+        update.setStatus(target);
+        applyLifecycle(update, existing);
+        updateById(update);
+        recordFlow(id, target == 4 ? "COMPLETE_SUBMIT" : "STATUS", null, null,
+                existing.getStatus(), target, "AI 助手记工确认");
+        projectService.recordFlow(existing.getProjectId(), target == 2 ? "TASK_COMPLETE" : "TASK_UPDATE",
+                null, null, null, "AI 助手登记任务「" + existing.getTitle() + "」");
+    }
+
     private String taskDisplayTitle(Long taskId) {
         if (taskId == null) {
             return "无（顶层任务）";

@@ -52,6 +52,9 @@ public interface PmTaskService extends IService<PmTask> {
 
     void createTask(PmTask task);
 
+    /** AI 记工确认专用：跳过工作时段校验，但保留权限、生命周期与流转记录。 */
+    void applyAiConfirmedStatus(Long id, Integer status);
+
     void updateTask(PmTask task);
 
     /** 看板拖拽：仅更新状态 */
