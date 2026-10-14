@@ -712,7 +712,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                                                                   Long participantId, String title,
                                                                   String periodFrom, String periodTo) {
         LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<PmTask>()
-                .select(PmTask::getId, PmTask::getAssigneeId, PmTask::getHolderId, PmTask::getStatus,
+                .select(PmTask::getId, PmTask::getTitle, PmTask::getProjectId,
+                        PmTask::getAssigneeId, PmTask::getHolderId, PmTask::getStatus,
                         PmTask::getStartedAt, PmTask::getCompletedAt)
                 .in(PmTask::getStatus, 0, 1, 2, 4)
                 .isNotNull(PmTask::getStartedAt)
@@ -729,6 +730,14 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
         Map<Long, SysUser> memberMap = loadUserMap(memberIds);
+        Set<Long> projectIds = durationTasks.stream()
+                .map(PmTask::getProjectId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        Map<Long, PmProject> projectMap = projectIds.isEmpty()
+                ? Map.of()
+                : projectMapper.selectList(new LambdaQueryWrapper<PmProject>().in(PmProject::getId, projectIds)).stream()
+                .collect(Collectors.toMap(PmProject::getId, project -> project));
         Map<Long, Map<String, Object>> statsMap = new HashMap<>();
         LocalDateTime calculationNow = LocalDateTime.now();
         for (PmTask task : durationTasks) {
@@ -747,6 +756,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
                 item.put("completedTasks", 0L);
                 item.put("incompleteTasks", 0L);
                 item.put("timedTasks", 0L);
+                item.put("tasks", new ArrayList<Map<String, Object>>());
                 return item;
             });
             increment(stats, completed ? "completedTasks" : "incompleteTasks");
@@ -756,8 +766,28 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             String durationKey = completed ? "completedDurationSeconds" : "incompleteDurationSeconds";
             stats.put(durationKey, ((Number) stats.get(durationKey)).longValue() + seconds);
             increment(stats, "timedTasks");
+            Map<String, Object> taskItem = new LinkedHashMap<>();
+            taskItem.put("id", task.getId());
+            taskItem.put("title", task.getTitle());
+            PmProject project = projectMap.get(task.getProjectId());
+            taskItem.put("projectName", project == null ? "未关联项目" : project.getName());
+            taskItem.put("status", task.getStatus());
+            taskItem.put("startedAt", task.getStartedAt());
+            taskItem.put("endedAt", durationEnd);
+            taskItem.put("durationSeconds", seconds);
+            taskItem.put("completed", completed);
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> memberTasks = (List<Map<String, Object>>) stats.get("tasks");
+            memberTasks.add(taskItem);
         }
         List<Map<String, Object>> result = new ArrayList<>(statsMap.values());
+        result.forEach(item -> {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> tasks = (List<Map<String, Object>>) item.get("tasks");
+            tasks.sort(Comparator
+                    .<Map<String, Object>>comparingLong(task -> -((Number) task.get("durationSeconds")).longValue())
+                    .thenComparing(task -> String.valueOf(task.get("title"))));
+        });
         result.sort(Comparator
                 .<Map<String, Object>>comparingLong(item -> -((Number) item.get("durationSeconds")).longValue())
                 .thenComparing(item -> String.valueOf(item.get("memberName"))));
@@ -1327,6 +1357,45 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             throw new BusinessException("单次最多操作100个任务");
         }
         ids.stream().distinct().forEach(id -> updateStatus(id, status, null, remark));
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateActualTime(Long id, String field, LocalDateTime value) {
+        if (id == null) {
+            throw new BusinessException("任务 ID 不能为空");
+        }
+        if (value == null) {
+            throw new BusinessException("请选择具体时间");
+        }
+        if (!"startedAt".equals(field) && !"completedAt".equals(field)) {
+            throw new BusinessException("实际时间字段不正确");
+        }
+        PmTask existing = getById(id);
+        if (existing == null) {
+            throw new BusinessException("任务不存在");
+        }
+        assertCanAccessTask(existing);
+        assertTaskNotClosed(existing);
+        assertCanWriteTask(existing);
+
+        LocalDateTime startedAt = "startedAt".equals(field) ? value : existing.getStartedAt();
+        LocalDateTime completedAt = "completedAt".equals(field) ? value : existing.getCompletedAt();
+        if (startedAt != null && completedAt != null && completedAt.isBefore(startedAt)) {
+            throw new BusinessException("结束时间不能早于开始时间");
+        }
+
+        LocalDateTime oldValue = "startedAt".equals(field) ? existing.getStartedAt() : existing.getCompletedAt();
+        lambdaUpdate().eq(PmTask::getId, id)
+                .set("startedAt".equals(field), PmTask::getStartedAt, value)
+                .set("completedAt".equals(field), PmTask::getCompletedAt, value)
+                .set(PmTask::getLastActivityAt, LocalDateTime.now())
+                .update();
+        String label = "startedAt".equals(field) ? "实际开始时间" : "实际结束时间";
+        String detail = label + "：" + displayChangeValue(oldValue) + " → " + value;
+        recordFlow(id, "UPDATE", null, null, null, null, detail);
+        projectService.recordFlow(existing.getProjectId(), "TASK_UPDATE", null, null, null,
+                "修改任务「" + existing.getTitle() + "」" + label);
     }
 
     @Override

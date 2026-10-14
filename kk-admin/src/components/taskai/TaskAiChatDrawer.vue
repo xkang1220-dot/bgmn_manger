@@ -112,6 +112,34 @@ function resetConversation() {
   guideIndex.value = 0
 }
 
+/**
+ * blocks 是主要展示协议，replyText 通常只用于兼容旧客户端。
+ * 查询类 block（列表、统计、图表）只能表达结构化数据，无法完整展示
+ * 后端返回的时间范围、人员范围和空结果解释，因此在没有文本 block 时
+ * 将 replyText 作为一条 markdown 放在结构化结果前面。
+ */
+function resolveAssistantBlocks(res: TaskAiChatResponse): UiBlock[] {
+  const blocks = Array.isArray(res.blocks) ? res.blocks : []
+  const replyText = res.replyText?.trim()
+
+  if (!blocks.length) {
+    return replyText
+      ? [{ type: 'markdown', content: replyText }]
+      : [{ type: 'markdown', content: '（无内容）' }]
+  }
+
+  const hasTextBlock = blocks.some(
+    (block) => block.type === 'markdown' || block.type === 'clarify' || block.type === 'done',
+  )
+  const hasConfirm = blocks.some((block) => block.type === 'confirm_card')
+
+  if (replyText && !hasTextBlock && !hasConfirm) {
+    return [{ type: 'markdown', content: replyText }, ...blocks]
+  }
+
+  return blocks
+}
+
 function startGuideCarousel() {
   stopGuideCarousel()
   guideTimer = setInterval(() => {
@@ -170,12 +198,7 @@ function appendAssistant(res: TaskAiChatResponse, interactive = true) {
   messages.value.push({
     id: uid(),
     role: 'assistant',
-    blocks:
-      blocks.length > 0
-        ? blocks
-        : res.replyText?.trim()
-          ? [{ type: 'markdown', content: res.replyText.trim() }]
-          : [{ type: 'markdown', content: '（无内容）' }],
+    blocks: resolveAssistantBlocks(res),
     interactive,
   })
   for (let i = 0; i < messages.value.length - 1; i++) {

@@ -14,7 +14,8 @@ public final class TaskAiModels {
     @Data public static class CancelRequest { private String sessionId; }
     @Data public static class DraftItem {
         private String tempId; private Long projectId; private String projectName; private String title; private String content;
-        private String startAt; private String endAt; private Integer status; private String statusLabel;
+        private String startAt; private String endAt; private String timeLabel; private String durationLabel;
+        private Integer status; private String statusLabel;
     }
     public record ChatResponse(String sessionId, int protocolVersion, String replyText,
                                List<Map<String, Object>> blocks, boolean pendingConfirm,

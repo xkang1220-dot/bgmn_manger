@@ -85,3 +85,11 @@ logging:
 wallet:
   withdraw:
     tax-rate: ${WALLET_WITHDRAW_TAX_RATE:0.2}
+
+# 生产环境不内置密钥，部署时必须通过 AI_API_KEY 注入。
+ai:
+  base-url: ${AI_BASE_URL:https://api.deepseek.com}
+  model: ${AI_MODEL:deepseek-chat}
+  api-key: ${AI_API_KEY:}
+  max-tool-calls: ${AI_MAX_TOOL_CALLS:6}
+  tool-trace-enabled: false

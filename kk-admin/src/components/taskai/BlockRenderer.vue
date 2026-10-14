@@ -56,6 +56,7 @@ function asRecord(block: UiBlock): Record<string, unknown> {
         v-else-if="block.type === 'task_list'"
         :title="(block as any).title"
         :items="(block as any).items || []"
+        :empty-text="(block as any).emptyText"
       />
       <TimelineBlock
         v-else-if="block.type === 'timeline'"

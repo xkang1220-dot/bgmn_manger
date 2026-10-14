@@ -82,3 +82,11 @@ kk:
 logging:
   level:
     com.kk: debug
+
+# AI 任务助手。测试环境也会被本地 IDEA 启动配置使用，因此不能只在 dev 中配置。
+ai:
+  base-url: ${AI_BASE_URL:https://api.deepseek.com}
+  model: ${AI_MODEL:deepseek-chat}
+  api-key: ${AI_API_KEY:sk-eda57ec2f1ad405f88dd8e481829760e}
+  max-tool-calls: 6
+  tool-trace-enabled: true

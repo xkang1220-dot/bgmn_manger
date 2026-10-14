@@ -4,13 +4,14 @@ import type { TaskListItem } from '@/api/taskAi'
 defineProps<{
   title?: string
   items: TaskListItem[]
+  emptyText?: string
 }>()
 </script>
 
 <template>
   <div class="task-list">
     <div v-if="title" class="task-list-title">{{ title }}</div>
-    <div v-if="!items?.length" class="task-list-empty">暂无任务</div>
+    <div v-if="!items?.length" class="task-list-empty">{{ emptyText || '暂无任务' }}</div>
     <ul v-else class="task-list-ul">
       <li v-for="(item, idx) in items" :key="item.id ?? idx" class="task-list-li">
         <div class="task-list-main">
@@ -44,6 +45,9 @@ defineProps<{
   font-size: 13px;
   color: #a1a1aa;
   padding: 8px 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .task-list-ul {

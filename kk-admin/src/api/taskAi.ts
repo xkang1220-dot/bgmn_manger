@@ -55,7 +55,7 @@ export type UiBlock =
       options?: ClarifyOption[]
     }
   | { type: 'confirm_card'; items: ConfirmTaskItem[] }
-  | { type: 'task_list'; title?: string; items: TaskListItem[] }
+  | { type: 'task_list'; title?: string; items: TaskListItem[]; emptyText?: string }
   | { type: 'timeline'; title?: string; events: TimelineEvent[] }
   | {
       type: 'line_chart'

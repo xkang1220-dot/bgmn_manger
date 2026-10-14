@@ -318,6 +318,9 @@ export const bizApi = {
   updateTaskStatus(id: number, status: number, imageFileIds?: number[], remark?: string) {
     return request<void>({ url: `/task/${id}/status`, method: 'put', data: { status, imageFileIds, remark } })
   },
+  updateTaskActualTime(id: number, field: 'startedAt' | 'completedAt', value: string) {
+    return request<void>({ url: `/task/${id}/actual-time`, method: 'put', data: { field, value } })
+  },
   batchUpdateTaskStatus(ids: number[], status: number, remark?: string) {
     return request<void>({ url: '/task/batch/status', method: 'put', data: { ids, status, remark } })
   },

@@ -50,8 +50,12 @@
   "data": {
     "sessionId": "0d55d42a-f1d4-44cd-a08d-e7ca44f1955e",
     "protocolVersion": 1,
-    "replyText": "请确认以下记工内容",
+    "replyText": "",
     "blocks": [
+      {
+        "type": "markdown",
+        "content": "请确认以下登记信息："
+      },
       {
         "type": "confirm_card",
         "items": [
@@ -63,6 +67,8 @@
             "content": "排查并处理线上问题",
             "startAt": "2026-10-14 09:30:00",
             "endAt": "2026-10-14 12:00:00",
+            "timeLabel": "09:30:00 ~ 12:00:00",
+            "durationLabel": "2小时30分钟",
             "status": 2,
             "statusLabel": "已完成"
           }
@@ -75,7 +81,7 @@
 }
 ```
 
-渲染规则：严格按 `blocks` 顺序渲染；`replyText` 只用于日志或没有 block 时的降级文案。`pendingConfirm=true` 时展示确认/取消操作并禁止重复发送确认请求。
+渲染规则：严格按 `blocks` 顺序渲染；`replyText` 仅为兼容字段，不应在已有 `blocks` 时重复展示。`pendingConfirm=true` 与响应中存在 `confirm_card` 保持一致；此时展示确认/取消操作并禁止重复发送确认请求。
 
 ### 2.2 确认记工
 
@@ -95,6 +101,8 @@
       "content": "排查并处理线上问题",
       "startAt": "2026-10-14 09:30:00",
       "endAt": "2026-10-14 12:00:00",
+      "timeLabel": "09:30:00 ~ 12:00:00",
+      "durationLabel": "2小时30分钟",
       "status": 2,
       "statusLabel": "已完成"
     }
@@ -112,9 +120,9 @@
     "sessionId": "0d55d42a-f1d4-44cd-a08d-e7ca44f1955e",
     "protocolVersion": 1,
     "blocks": [
-      { "type": "done", "taskIds": [101], "message": "已成功登记 1 条任务" }
+      { "type": "done", "taskIds": [101], "message": "已登记 1 条任务" }
     ],
-    "done": { "taskIds": [101], "message": "已成功登记 1 条任务" }
+    "done": { "taskIds": [101], "message": "已登记 1 条任务" }
   }
 }
 ```
@@ -153,6 +161,36 @@
 | `stat_row` | `items[{label,value,hint?}]` | 汇总数字 |
 | `done` | `taskIds`, `message` | 入库完成 |
 
+### 3.1 `confirm_card` 固定结构
+
+`items` 至少一项，多事项必须放在同一个 block 的多个 item 中，不能使用 Markdown 表格替代。
+
+| 字段 | 类型 | 必填 | 前端处理 |
+|---|---|---:|---|
+| `tempId` | string | 是 | 会话内草稿标识；随确认请求原样回传 |
+| `projectId` | number | 是 | 项目主键；随确认请求回传 |
+| `projectName` | string | 是 | 展示项目名 |
+| `title` | string | 是 | 展示且允许编辑，最长 200 字符 |
+| `content` | string | 否 | 备注，允许编辑；后端无值时返回空字符串 |
+| `startAt` | string | 是 | `yyyy-MM-dd HH:mm:ss`，GMT+8；展示编辑并用于入库 |
+| `endAt` | string | 是 | 同上，且不得早于 `startAt` |
+| `timeLabel` | string | 建议字段，后端固定返回 | 优先用于只读时段展示；同日格式为 `HH:mm:ss ~ HH:mm:ss` |
+| `durationLabel` | string | 建议字段，后端固定返回 | 服务端计算的展示时长，例如 `1小时`、`1小时30分钟` |
+| `status` | 0\|1\|2\|3\|4 | 是 | 状态下拉实际值 |
+| `statusLabel` | string | 是 | 状态中文展示 |
+
+后端保存草稿时会确定性补全或覆盖 `tempId`、`projectName`、`timeLabel`、`durationLabel`、`statusLabel`，不采用模型生成的展示值。前端修改开始/结束时间后可本地即时刷新展示；最终确认时仍应回传完整 item，后端按 `startAt/endAt` 重新计算展示字段并校验。
+
+### 3.2 `clarify` 与缺参响应
+
+- 项目多匹配：返回 `clarify`，`field="project"`，`options` 为 `{id,label}[]`。
+- 时间存在歧义：返回 `clarify(field="time")` 或简短 `markdown` 追问。
+- 已有项目和时间但缺标题：仅返回简短 `markdown` 追问，不返回半空 `confirm_card`，`pendingConfirm=false`。
+- 参数齐全：返回固定旁白“请确认以下登记信息：”和 `confirm_card`，`pendingConfirm=true`。
+- 工具或服务暂时失败：只返回简短可见提示，不返回工具名、异常原文、尝试过程或内部草稿机制。
+
+点击选项后，将选中的 `field`、`id`、`label` 放入下一次 `/chat` 的 `clarifyAnswer`；不要仅在前端替换文案而不继续请求后端。
+
 图表、列表和统计数据均由后端工具查询真实数据后生成，前端无需二次计算。未知 `type` 请降级展示 JSON/提示，不要导致整个会话白屏。
 
 时间查询口径为：任务的计划开始日、截止日、完成时间或创建时间任一落在所选区间即命中。单次查询最多返回 200 条，趋势图最多展示 31 天。
@@ -165,6 +203,8 @@
 - 查询他人需要全局管理员或 `task:ai:query-others`；项目负责人可查询其负责项目与目标人员共同参与的范围。
 - `status`：`0` 待办、`1` 进行中、`2` 已完成、`3` 已关闭、`4` 待确认完成。
 - 确认传 `4` 时后端按完成流程处理；有任务报酬时仍会遵守现有完成审批规则进入待确认状态。
+
+会话状态流转：首次 `/chat` 创建 `chatting` 会话；草稿生成后进入 `awaiting_confirm`；确认成功进入 `committed`，取消进入 `cancelled`。`committed` 和 `cancelled` 会话不能继续对话；`committed` 会话重复确认只返回原任务 ID，不会重复入库。前端在 `done` 或取消成功后应清除当前会话 ID，新对话不应复用旧 ID。
 
 ## 5. 错误处理
 
@@ -191,6 +231,6 @@
 
 ## 7. 部署配置
 
-dev 已定义 `ai.base-url`、`ai.model`、`ai.api-key`、最大工具调用次数及 tool trace。环境变量 `AI_BASE_URL`、`AI_MODEL`、`AI_API_KEY` 可覆盖配置。生产环境务必通过密钥管理或环境变量注入 `AI_API_KEY`，并关闭调试 trace。
+dev/test 已定义 `ai.base-url`、`ai.model`、`ai.api-key`、最大工具调用次数及 tool trace。环境变量 `AI_BASE_URL`、`AI_MODEL`、`AI_API_KEY` 可覆盖配置。prod 只读取环境变量中的密钥；生产环境务必通过密钥管理或环境变量注入 `AI_API_KEY`，并保持调试 trace 关闭。
 
 数据库需执行 [ai_task_log_session.sql](../sql/ai_task_log_session.sql)。该表保存会话归属、状态、草稿、历史消息与已提交任务 ID；可按 `update_time` 定期清理过期的 cancelled/committed 会话。

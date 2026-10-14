@@ -8,6 +8,7 @@ import com.kk.biz.entity.PmTaskFlow;
 import com.kk.biz.entity.SysFile;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 
@@ -56,6 +57,9 @@ public interface PmTaskService extends IService<PmTask> {
     void applyAiConfirmedStatus(Long id, Integer status);
 
     void updateTask(PmTask task);
+
+    /** 单独修正任务实际开始或完成时间，不触发任务状态流转。 */
+    void updateActualTime(Long id, String field, LocalDateTime value);
 
     /** 看板拖拽：仅更新状态 */
     void updateStatus(Long id, Integer status);

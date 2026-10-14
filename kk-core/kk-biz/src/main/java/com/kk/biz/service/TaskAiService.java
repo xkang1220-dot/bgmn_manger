@@ -43,6 +43,7 @@ public class TaskAiService {
     private final DataScopeService dataScopeService;
     private final ObjectMapper objectMapper;
     private final TaskAiProperties properties;
+    private final TaskAiTimeRangeNormalizer timeRangeNormalizer;
 
     @Transactional(rollbackFor = Exception.class)
     public ChatResponse chat(long loginUserId, ChatRequest request) {
@@ -86,7 +87,7 @@ public class TaskAiService {
         if (items.size() > 20) throw new BusinessException("单次最多登记 20 条任务");
         List<Long> ids = new ArrayList<>();
         for (DraftItem item : items) {
-            validateDraft(item);
+            normalizeDraft(loginUserId, item);
             PmTask task = new PmTask();
             task.setProjectId(item.getProjectId());
             task.setTitle(item.getTitle().trim());
@@ -107,7 +108,7 @@ public class TaskAiService {
         session.setCommittedTaskIds(ids.stream().map(String::valueOf).collect(Collectors.joining(",")));
         session.setUpdateTime(LocalDateTime.now(ZONE));
         sessionMapper.updateById(session);
-        return done(session.getSessionId(), ids, "已成功登记 " + ids.size() + " 条任务");
+        return done(session.getSessionId(), ids, "已登记 " + ids.size() + " 条任务");
     }
 
     public void cancel(long loginUserId, String sessionId) {
@@ -125,10 +126,12 @@ public class TaskAiService {
     private AgentResult runAgent(long userId, AiTaskLogSession session, List<Map<String, Object>> history) {
         if (!StringUtils.hasText(properties.getApiKey())) throw new BusinessException("AI 服务未配置 apiKey");
         List<Map<String, Object>> apiMessages = new ArrayList<>();
-        apiMessages.add(Map.of("role", "system", "content", systemPrompt()));
+        apiMessages.add(Map.of("role", "system", "content", systemPrompt(session)));
         for (Map<String, Object> msg : history) apiMessages.add(Map.of("role", msg.get("role"), "content", msg.get("content")));
         List<Map<String, Object>> trace = new ArrayList<>();
         List<Map<String, Object>> suggested = new ArrayList<>();
+        Set<Long> resolvedUserIds = new LinkedHashSet<>();
+        Map<String, String> requestedTimeRange = latestUserTimeRange(history);
         String reply = "";
         for (int i = 0; i <= properties.getMaxToolCalls(); i++) {
             JsonNode answer = callModel(apiMessages);
@@ -146,18 +149,53 @@ public class TaskAiService {
                 Map<String, Object> args;
                 try { args = objectMapper.readValue(call.path("function").path("arguments").asText("{}"), new TypeReference<>() {}); }
                 catch (Exception e) { args = Map.of(); }
+                args = new LinkedHashMap<>(args);
+                if (isTaskQuery(name)) {
+                    if (!resolvedUserIds.isEmpty()) args.put("userIds", new ArrayList<>(resolvedUserIds));
+                    if (!requestedTimeRange.isEmpty()) {
+                        args.put("start", requestedTimeRange.get("start"));
+                        args.put("end", requestedTimeRange.get("end"));
+                    }
+                }
                 ToolResult tr;
                 try { tr = executeTool(name, userId, session, args); }
                 catch (Exception e) { tr = new ToolResult(false, e.getMessage(), Map.of(), List.of()); }
+                if (("resolve_user".equals(name) || "search_users".equals(name)) && tr.ok && tr.data instanceof Map<?, ?> data) {
+                    Long resolvedId = number(data.get("id"));
+                    if (resolvedId != null) resolvedUserIds.add(resolvedId);
+                }
                 suggested.addAll(tr.blocks);
                 if (properties.isToolTraceEnabled()) trace.add(Map.of("name", name, "ok", tr.ok));
                 apiMessages.add(Map.of("role", "tool", "tool_call_id", callId, "content", write(Map.of(
                         "ok", tr.ok, "message", Objects.toString(tr.message, ""), "data", tr.data))));
             }
         }
+        normalizeConfirmationBlocks(session, suggested);
         List<Map<String, Object>> blocks = sanitizeModelBlocks(reply, suggested);
         if (blocks.isEmpty()) blocks.add(Map.of("type", "markdown", "content", StringUtils.hasText(reply) ? reply : "暂时无法完成该请求，请换一种说法。"));
-        return new AgentResult(reply, blocks, trace);
+        boolean hasConfirmCard = blocks.stream().anyMatch(block -> "confirm_card".equals(block.get("type")));
+        return new AgentResult(hasConfirmCard ? "" : safeUserText(reply), blocks, trace);
+    }
+
+    private boolean isTaskQuery(String name) {
+        return Set.of("list_tasks", "summarize_tasks", "tasks_timeline", "tasks_by_project_chart", "tasks_trend_chart").contains(name);
+    }
+
+    private Map<String, String> latestUserTimeRange(List<Map<String, Object>> history) {
+        for (int i = history.size() - 1; i >= 0; i--) {
+            Map<String, Object> message = history.get(i);
+            if (!"user".equals(message.get("role"))) continue;
+            return timeRangeNormalizer.normalize(Objects.toString(message.get("content"), ""), LocalDateTime.now(ZONE))
+                    .orElse(Map.of());
+        }
+        return Map.of();
+    }
+
+    private void normalizeConfirmationBlocks(AiTaskLogSession session, List<Map<String, Object>> blocks) {
+        Map<String, Object> lastConfirmCard = null;
+        for (Map<String, Object> block : blocks) if ("confirm_card".equals(block.get("type"))) lastConfirmCard = block;
+        blocks.removeIf(block -> "confirm_card".equals(block.get("type")));
+        if ("awaiting_confirm".equals(session.getStatus()) && lastConfirmCard != null) blocks.add(lastConfirmCard);
     }
 
     private JsonNode callModel(List<Map<String, Object>> messages) {
@@ -180,7 +218,7 @@ public class TaskAiService {
             case "list_task_flows" -> listTaskFlows(userId, number(args.get("taskId")));
             case "work_duration_summary" -> workDuration(userId, number(args.get("taskId")));
             case "list_tasks", "summarize_tasks", "tasks_timeline", "tasks_by_project_chart", "tasks_trend_chart" -> queryTasks(name, userId, args);
-            case "draft_log_tasks", "update_draft" -> saveDraft(session, args);
+            case "draft_log_tasks", "update_draft" -> saveDraft(userId, session, args);
             case "clear_draft" -> { session.setDraftJson(null); session.setStatus("chatting"); yield ok(Map.of()); }
             default -> new ToolResult(false, "未知工具", Map.of(), List.of());
         };
@@ -220,30 +258,43 @@ public class TaskAiService {
     }
 
     private ToolResult normalizeTime(String expression) {
-        LocalDateTime now = LocalDateTime.now(ZONE), start, end;
-        String e = expression.trim();
-        if (e.contains("过去一小时") || e.contains("最近一小时")) { start = now.minusHours(1); end = now; }
-        else {
-            LocalDate day = e.contains("昨天") ? now.toLocalDate().minusDays(1) : now.toLocalDate();
-            if (e.contains("上午")) { start = day.atTime(9, 30); end = day.atTime(12, 0); }
-            else if (e.contains("下午")) { start = day.atTime(13, 30); end = day.atTime(18, 0); }
-            else if (e.contains("今天") || e.contains("今日") || e.contains("昨天")) { start = day.atStartOfDay(); end = day.atTime(23, 59, 59); }
-            else return new ToolResult(false, "无法解析时间，请提供具体日期或今天/昨天/上午/下午", Map.of(), List.of());
-        }
-        return ok(Map.of("start", start.format(DT), "end", end.format(DT), "label", expression));
+        return timeRangeNormalizer.normalize(expression, LocalDateTime.now(ZONE))
+                .<ToolResult>map(this::ok)
+                .orElseGet(() -> new ToolResult(false, "时间是早上、上午还是具体几点到几点？例如：09:00 到 11:00。", Map.of(), List.of()));
     }
 
     private ToolResult queryTasks(String tool, long loginId, Map<String, Object> args) {
         List<Long> userIds = longList(args.get("userIds")); if (userIds.isEmpty()) userIds = List.of(loginId);
-        List<Long> projectIds = longList(args.get("projectIds"));
-        projectIds = authorizedProjects(loginId, userIds, projectIds);
+        List<Long> requestedProjectIds = longList(args.get("projectIds"));
+        boolean unrestricted = dataScopeService.isGlobalAdmin(loginId)
+                || cn.dev33.satoken.stp.StpUtil.hasPermission("task:ai:query-others");
+        boolean includesSelf = userIds.contains(loginId);
+        List<Long> otherUserIds = userIds.stream().filter(id -> id != loginId).toList();
+        List<Long> otherProjectIds = otherUserIds.isEmpty() || unrestricted
+                ? requestedProjectIds
+                : authorizedProjects(loginId, otherUserIds, requestedProjectIds);
         final List<Long> queryUserIds = userIds;
-        final List<Long> queryProjectIds = projectIds;
+        final List<Long> queryProjectIds = requestedProjectIds;
         LocalDateTime start = parseDateTime(Objects.toString(args.get("start"), LocalDate.now(ZONE).atStartOfDay().format(DT)));
         LocalDateTime end = parseDateTime(Objects.toString(args.get("end"), LocalDate.now(ZONE).atTime(23,59,59).format(DT)));
-        Set<Long> memberTaskIds = projectMemberTaskIds(userIds);
-        LambdaQueryWrapper<PmTask> q = new LambdaQueryWrapper<PmTask>().in(!queryProjectIds.isEmpty(), PmTask::getProjectId, queryProjectIds)
-                .and(w -> w.in(PmTask::getAssigneeId, queryUserIds).or().in(!memberTaskIds.isEmpty(), PmTask::getId, memberTaskIds))
+        LambdaQueryWrapper<PmTask> q = new LambdaQueryWrapper<>();
+        if (otherUserIds.isEmpty() || unrestricted) {
+            q.in(!queryProjectIds.isEmpty(), PmTask::getProjectId, queryProjectIds)
+                    .and(w -> w.in(PmTask::getAssigneeId, queryUserIds).or().in(PmTask::getHolderId, queryUserIds));
+        } else if (includesSelf) {
+            // 混合查询“本人 + 他人”时，本人任务不能被他人的共同项目权限范围误过滤。
+            q.and(scope -> scope
+                    .and(self -> self.in(!queryProjectIds.isEmpty(), PmTask::getProjectId, queryProjectIds)
+                            .and(person -> person.eq(PmTask::getAssigneeId, loginId)
+                                    .or().eq(PmTask::getHolderId, loginId)))
+                    .or(other -> other.in(PmTask::getProjectId, otherProjectIds)
+                            .and(person -> person.in(PmTask::getAssigneeId, otherUserIds)
+                                    .or().in(PmTask::getHolderId, otherUserIds))));
+        } else {
+            q.in(PmTask::getProjectId, otherProjectIds)
+                    .and(w -> w.in(PmTask::getAssigneeId, otherUserIds).or().in(PmTask::getHolderId, otherUserIds));
+        }
+        q
                 .and(w -> w.between(PmTask::getStartDate, start.toLocalDate(), end.toLocalDate())
                         .or().between(PmTask::getDueDate, start.toLocalDate(), end.toLocalDate())
                         .or().between(PmTask::getCompletedAt, start, end)
@@ -277,11 +328,20 @@ public class TaskAiService {
         return new ArrayList<>(owned);
     }
 
-    private ToolResult saveDraft(AiTaskLogSession session, Map<String, Object> args) {
+    private ToolResult saveDraft(long userId, AiTaskLogSession session, Map<String, Object> args) {
         Object raw = args.get("items");
         if (!(raw instanceof List<?> list) || list.isEmpty()) return new ToolResult(false, "草稿不能为空", Map.of(), List.of());
         List<DraftItem> items = objectMapper.convertValue(list, new TypeReference<>() {});
-        for (DraftItem item : items) validateDraft(item);
+        items = mergeDraftItems(session, items);
+        if (items.size() > 20) return new ToolResult(false, "单次最多登记 20 条任务", Map.of(), List.of());
+        for (DraftItem item : items) {
+            if (!StringUtils.hasText(item.getStartAt()) || !StringUtils.hasText(item.getEndAt())) {
+                Map<String, String> fallback = timeRangeNormalizer.defaultWorkToNow(LocalDateTime.now(ZONE));
+                item.setStartAt(fallback.get("start")); item.setEndAt(fallback.get("end"));
+            }
+            if (item.getStatus() == null) item.setStatus(inferStatus(item));
+            normalizeDraft(userId, item);
+        }
         session.setDraftJson(write(items)); session.setStatus("awaiting_confirm");
         List<Map<String,Object>> normalized = objectMapper.convertValue(items, MAP_LIST);
         return new ToolResult(true, "草稿已保存，等待用户确认", Map.of("count",items.size()),
@@ -289,6 +349,13 @@ public class TaskAiService {
     }
 
     private List<Map<String,Object>> sanitizeModelBlocks(String reply, List<Map<String,Object>> suggested) {
+        boolean hasConfirmCard = suggested.stream().anyMatch(b -> "confirm_card".equals(b.get("type")));
+        if (hasConfirmCard) {
+            List<Map<String,Object>> result = new ArrayList<>();
+            result.add(Map.of("type", "markdown", "content", "请确认以下登记信息："));
+            result.addAll(suggested);
+            return result;
+        }
         List<Map<String,Object>> result = new ArrayList<>();
         if (StringUtils.hasText(reply)) {
             try {
@@ -297,14 +364,27 @@ public class TaskAiService {
                     JsonNode root = objectMapper.readTree(json.substring(a,b+1));
                     if (root.has("blocks")) for (JsonNode n : root.get("blocks")) {
                         String type = n.path("type").asText();
-                        if (Set.of("markdown","clarify").contains(type)) result.add(objectMapper.convertValue(n, new TypeReference<>() {}));
+                        if ("markdown".equals(type)) {
+                            String content = safeUserText(n.path("content").asText(""));
+                            if (StringUtils.hasText(content)) result.add(Map.of("type", "markdown", "content", content));
+                        } else if ("clarify".equals(type)) result.add(objectMapper.convertValue(n, new TypeReference<>() {}));
                     }
                 }
             } catch (Exception ignored) {}
         }
         result.addAll(suggested);
-        if (result.isEmpty() && StringUtils.hasText(reply)) result.add(Map.of("type","markdown","content",reply));
+        if (result.isEmpty() && StringUtils.hasText(reply)) result.add(Map.of("type","markdown","content",safeUserText(reply)));
         return result;
+    }
+
+    private String safeUserText(String text) {
+        if (!StringUtils.hasText(text)) return "";
+        String value = text.trim();
+        if (value.contains("工具报错") || value.contains("工具失败") || value.contains("错误详情")
+                || value.contains("不会直接入库") || value.contains("草稿工具") || value.contains("当前时间")) {
+            return "暂时无法生成确认信息，请补充信息或稍后重试。";
+        }
+        return value;
     }
 
     private List<Map<String,Object>> toolDefinitions() {
@@ -332,12 +412,18 @@ public class TaskAiService {
     private Map<String,Object> tool(String name,String desc,Map<String,Object> properties) { return Map.of("type","function","function",Map.of(
             "name",name,"description",desc,"parameters",Map.of("type","object","properties",properties))); }
     private Map<String,Object> props(String key,String type) { return Map.of(key,Map.of("type",type)); }
-    private String systemPrompt() { return """
+    private String systemPrompt(AiTaskLogSession session) { return """
             你是 BGMN 任务助手。所有项目、用户、任务数字必须通过工具获取，禁止编造。记工必须先解析时间和项目，再调用 draft_log_tasks，绝不能直接写库。
             查询他人必须 resolve_user 后再查询。工具返回的图表/时间线/统计块是唯一可信数据，不要自行生成图表数据。
+            对用户只给结论，不展示思考、试错、内部规则、草稿机制、工具名、工具错误或异常原文。工具失败时只简短追问缺失信息，或提示稍后重试。
+            参数齐全后必须调用 draft_log_tasks；最终确认只能使用工具生成的 confirm_card，禁止用 Markdown 表格或列表代替。缺事项标题时只简短追问，不生成半空确认卡。
+            必须结合全部会话历史和下方当前草稿按槽位累加。短回复（项目名、时段、事项、状态）只更新对应槽，其他已有槽不得丢失；澄清 optionId 选中后也继续合并。
+            早上/早晨/一早/上午按 09:30~12:00；上班按 09:30 起；下午按 13:30~18:00；晚上按 18:00~21:00。带“到现在”时终点为当前时间。能默认就出确认卡，不追问分钟精度。
+            状态未给时：做了/处理了/完成了/弄完了为 2，正在/排查中/还没做完为 1，否则为 0。一次最多只追问一个完全缺失且无法默认的槽。
             最终用简洁中文回答；可输出 {\"blocks\":[{\"type\":\"markdown\",\"content\":\"...\"}]}，但确认卡、图表和统计由工具生成。
-            状态：0待办、1进行中、2已完成、3已关闭。时间格式 yyyy-MM-dd HH:mm:ss，时区 Asia/Shanghai。
-            """; }
+            状态：0待办、1进行中、2已完成、3已关闭、4待确认完成。时间格式 yyyy-MM-dd HH:mm:ss，时区 Asia/Shanghai。
+            当前会话草稿（可能为空）：
+            """ + Objects.toString(session.getDraftJson(), "[]"); }
 
     private ToolResult listProjectMembers(long loginId, Long projectId) {
         PmProject project = accessibleProject(loginId, projectId);
@@ -380,6 +466,64 @@ public class TaskAiService {
         AiTaskLogSession s=sessionMapper.selectById(id); if(s==null||!Objects.equals(s.getUserId(),userId)) throw new BusinessException("会话不存在或无权访问"); return s; }
     private ConfirmResponse done(String sid,List<Long> ids,String msg) { Map<String,Object> d=Map.of("taskIds",ids,"message",msg);
         return new ConfirmResponse(sid,PROTOCOL_VERSION,List.of(Map.of("type","done","taskIds",ids,"message",msg)),d); }
+    private List<DraftItem> mergeDraftItems(AiTaskLogSession session, List<DraftItem> updates) {
+        if (!StringUtils.hasText(session.getDraftJson())) return updates;
+        List<DraftItem> existing;
+        try { existing = objectMapper.readValue(session.getDraftJson(), new TypeReference<>() {}); }
+        catch (Exception ignored) { return updates; }
+        List<DraftItem> merged = new ArrayList<>(existing);
+        for (int index = 0; index < updates.size(); index++) {
+            DraftItem update = updates.get(index);
+            int target = -1;
+            if (StringUtils.hasText(update.getTempId())) {
+                for (int i = 0; i < existing.size(); i++) if (update.getTempId().equals(existing.get(i).getTempId())) { target = i; break; }
+            } else if (index < existing.size()) target = index;
+            if (target >= 0) merged.set(target, mergeDraftItem(merged.get(target), update));
+            else merged.add(update);
+        }
+        return merged;
+    }
+    private DraftItem mergeDraftItem(DraftItem base, DraftItem update) {
+        if (update.getProjectId() != null) base.setProjectId(update.getProjectId());
+        if (StringUtils.hasText(update.getProjectName())) base.setProjectName(update.getProjectName());
+        if (StringUtils.hasText(update.getTitle())) base.setTitle(update.getTitle());
+        if (update.getContent() != null) base.setContent(update.getContent());
+        if (StringUtils.hasText(update.getStartAt())) base.setStartAt(update.getStartAt());
+        if (StringUtils.hasText(update.getEndAt())) base.setEndAt(update.getEndAt());
+        if (update.getStatus() != null) base.setStatus(update.getStatus());
+        return base;
+    }
+    private int inferStatus(DraftItem item) {
+        String text = Objects.toString(item.getTitle(), "") + Objects.toString(item.getContent(), "");
+        if (text.matches(".*(正在|排查中|还没做完).*")) return 1;
+        if (text.matches(".*(做了|处理了|完成了|弄完了|已完成).*")) return 2;
+        return 0;
+    }
+    private void normalizeDraft(long userId, DraftItem item) {
+        validateDraft(item);
+        PmProject project = accessibleProject(userId, item.getProjectId());
+        LocalDateTime start = parseDateTime(item.getStartAt()), end = parseDateTime(item.getEndAt());
+        int status = item.getStatus() == null ? 0 : item.getStatus();
+        item.setTempId(StringUtils.hasText(item.getTempId()) ? item.getTempId() : "draft-" + UUID.randomUUID());
+        item.setProjectName(project.getName());
+        item.setTitle(item.getTitle().trim());
+        item.setContent(Objects.toString(item.getContent(), "").trim());
+        item.setStartAt(start.format(DT)); item.setEndAt(end.format(DT));
+        item.setTimeLabel(start.toLocalDate().equals(end.toLocalDate())
+                ? start.toLocalTime().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + " ~ " + end.toLocalTime().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                : start.format(DT) + " ~ " + end.format(DT));
+        item.setDurationLabel(durationLabel(Duration.between(start, end)));
+        item.setStatus(status); item.setStatusLabel(status(status));
+    }
+    private String durationLabel(Duration duration) {
+        long seconds = duration.getSeconds();
+        long hours = seconds / 3600, minutes = seconds % 3600 / 60, remainingSeconds = seconds % 60;
+        StringBuilder label = new StringBuilder();
+        if (hours > 0) label.append(hours).append("小时");
+        if (minutes > 0) label.append(minutes).append("分钟");
+        if (remainingSeconds > 0 || label.isEmpty()) label.append(remainingSeconds).append("秒");
+        return label.toString();
+    }
     private void validateDraft(DraftItem i) { if(i==null||i.getProjectId()==null) throw new BusinessException("项目不能为空");
         if(!StringUtils.hasText(i.getTitle())) throw new BusinessException("任务标题不能为空"); if(i.getTitle().trim().length()>200) throw new BusinessException("任务标题过长");
         int s=i.getStatus()==null?0:i.getStatus(); if(s<0||s>4) throw new BusinessException("任务状态不正确");

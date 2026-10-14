@@ -19,6 +19,7 @@ const router = useRouter()
 const userStore = useUserStore()
 const ticketSubmitOpen = ref(false)
 const taskAiOpen = ref(false)
+const sidebarCollapsed = ref(localStorage.getItem('bgmn-sidebar-collapsed') === 'true')
 
 const canSubmitTicket = computed(() => userStore.hasPermission('ticket:submit'))
 
@@ -110,6 +111,11 @@ function go(path?: string) {
     mobileMenuOpen.value = false
     router.push(path)
   }
+}
+
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  localStorage.setItem('bgmn-sidebar-collapsed', String(sidebarCollapsed.value))
 }
 
 function fmtTime(t?: string) {
@@ -274,16 +280,30 @@ onUnmounted(() => {
 
 <template>
   <el-container class="layout">
-    <el-aside width="240px" class="aside">
-      <div class="logo" @click="router.push('/account')">
-        <div class="logo-mark"><KkLogoMark /></div>
-        <span class="logo-title">BGMN</span>
+    <el-aside :width="sidebarCollapsed ? '80px' : '240px'" class="aside" :class="{ 'is-collapsed': sidebarCollapsed }">
+      <div class="sidebar-head">
+        <button type="button" class="logo" aria-label="进入工作台" @click="router.push('/account')">
+          <span class="logo-mark"><KkLogoMark /></span>
+          <span class="logo-title">BGMN</span>
+        </button>
+        <button
+          type="button"
+          class="sidebar-toggle"
+          :title="sidebarCollapsed ? '展开菜单栏' : '收起菜单栏'"
+          :aria-label="sidebarCollapsed ? '展开菜单栏' : '收起菜单栏'"
+          :aria-expanded="!sidebarCollapsed"
+          @click="toggleSidebar"
+        >
+          <el-icon :size="18"><component :is="sidebarCollapsed ? 'Expand' : 'Fold'" /></el-icon>
+        </button>
       </div>
 
       <el-scrollbar class="menu-scroll">
         <el-menu
           :default-active="route.path"
           class="side-menu"
+          :collapse="sidebarCollapsed"
+          :collapse-transition="false"
           router
         >
           <template v-for="menu in visibleMenus" :key="menu.id">
@@ -308,7 +328,13 @@ onUnmounted(() => {
         </el-menu>
       </el-scrollbar>
       <div class="aside-footer">
-        <button type="button" class="ai-entry" @click="taskAiOpen = true">
+        <button
+          type="button"
+          class="ai-entry"
+          :title="sidebarCollapsed ? '打开 AI 助手' : undefined"
+          aria-label="打开 AI 助手"
+          @click="taskAiOpen = true"
+        >
           <span class="ai-entry-mark" aria-hidden="true">
             <AiAssistantIcon :size="22" />
           </span>
@@ -319,6 +345,18 @@ onUnmounted(() => {
           <span class="ai-entry-chevron" aria-hidden="true">›</span>
         </button>
       </div>
+      <button
+        type="button"
+        class="sidebar-edge-toggle"
+        :title="sidebarCollapsed ? '展开菜单栏' : '收起菜单栏'"
+        :aria-label="sidebarCollapsed ? '展开菜单栏' : '收起菜单栏'"
+        :aria-expanded="!sidebarCollapsed"
+        @click="toggleSidebar"
+      >
+        <span class="sidebar-edge-toggle__icon" aria-hidden="true">
+          <el-icon :size="14"><component :is="sidebarCollapsed ? 'Expand' : 'Fold'" /></el-icon>
+        </span>
+      </button>
     </el-aside>
 
     <el-container class="main-wrap">
@@ -522,11 +560,70 @@ onUnmounted(() => {
 }
 
 .aside {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   background: var(--kk-side);
-  overflow: hidden;
+  overflow: visible;
+  transition: width 0.22s var(--kk-ease);
+}
+
+.sidebar-edge-toggle {
+  position: absolute;
+  z-index: 3;
+  top: 88px;
+  right: -14px;
+  bottom: 88px;
+  width: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kk-text-secondary);
+  cursor: pointer;
+}
+
+.sidebar-edge-toggle__icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 36px;
+  border: 1px solid var(--kk-hairline);
+  border-radius: 999px;
+  background: var(--kk-side);
+  box-shadow: 0 2px 8px rgba(24, 24, 27, 0.1);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.88);
+  transition: opacity 0.16s var(--kk-ease), transform 0.16s var(--kk-ease), color 0.16s var(--kk-ease);
+}
+
+.sidebar-edge-toggle:hover .sidebar-edge-toggle__icon,
+.sidebar-edge-toggle:focus-visible .sidebar-edge-toggle__icon {
+  opacity: 1;
+  color: var(--kk-text);
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.sidebar-edge-toggle:focus-visible {
+  outline: none;
+}
+
+.sidebar-edge-toggle:focus-visible .sidebar-edge-toggle__icon {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+}
+
+.sidebar-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 68px;
+  margin: 10px 12px 0;
+  flex-shrink: 0;
 }
 
 .logo {
@@ -534,9 +631,20 @@ onUnmounted(() => {
   align-items: center;
   gap: 12px;
   height: 48px;
-  margin: 20px 20px 0;
+  min-width: 0;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
-  flex-shrink: 0;
+}
+
+.logo:focus-visible,
+.sidebar-toggle:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 
 .logo-mark {
@@ -553,6 +661,30 @@ onUnmounted(() => {
   font-size: 24px;
   font-weight: 500;
   line-height: 1.2;
+  color: var(--kk-text);
+  white-space: nowrap;
+  transition: opacity 0.16s var(--kk-ease);
+}
+
+.sidebar-toggle {
+  position: absolute;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: var(--kk-side);
+  color: var(--kk-text-secondary);
+  cursor: pointer;
+  transition: background 0.18s var(--kk-ease), color 0.18s var(--kk-ease);
+}
+
+.sidebar-toggle:hover {
+  background: var(--kk-side-hover);
   color: var(--kk-text);
 }
 
@@ -671,6 +803,69 @@ onUnmounted(() => {
   width: 200px;
   border-right: none;
   background: transparent;
+}
+
+.aside.is-collapsed .sidebar-head {
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  height: 108px;
+  margin-inline: 8px;
+}
+
+.aside.is-collapsed .logo {
+  width: 48px;
+  padding: 0;
+}
+
+.aside.is-collapsed .logo-title {
+  width: 0;
+  opacity: 0;
+  overflow: hidden;
+}
+
+.aside.is-collapsed .sidebar-toggle {
+  position: static;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  background: transparent;
+}
+
+.aside.is-collapsed .menu-scroll {
+  padding: 8px 12px 20px;
+}
+
+.aside.is-collapsed .side-menu,
+.aside.is-collapsed :deep(.el-menu) {
+  width: 56px;
+}
+
+.aside.is-collapsed :deep(.el-menu--collapse > .el-menu-item),
+.aside.is-collapsed :deep(.el-menu--collapse > .el-sub-menu > .el-sub-menu__title) {
+  width: 48px;
+  padding: 12px !important;
+}
+
+.aside.is-collapsed :deep(.el-icon:not(.el-sub-menu__icon-arrow)) {
+  margin-right: 0;
+}
+
+.aside.is-collapsed .aside-footer {
+  padding-inline: 12px;
+}
+
+.aside.is-collapsed .ai-entry {
+  justify-content: center;
+  min-height: 56px;
+  padding: 9px;
+  gap: 0;
+}
+
+.aside.is-collapsed .ai-entry-copy,
+.aside.is-collapsed .ai-entry-chevron {
+  display: none;
 }
 
 .aside :deep(.el-menu) {
@@ -1115,6 +1310,9 @@ onUnmounted(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .aside,
+  .logo-title,
+  .sidebar-edge-toggle__icon,
   .aside :deep(.el-sub-menu__title),
   .aside :deep(.el-menu-item),
   .user-chip,
@@ -1126,13 +1324,13 @@ onUnmounted(() => {
 }
 
 @media (max-width: 1100px) and (min-width: 769px) {
-  .aside {
+  .aside:not(.is-collapsed) {
     width: 200px !important;
   }
 
-  .logo,
-  .menu-scroll,
-  .aside-footer {
+  .aside:not(.is-collapsed) .sidebar-head,
+  .aside:not(.is-collapsed) .menu-scroll,
+  .aside:not(.is-collapsed) .aside-footer {
     margin-left: 12px;
     margin-right: 12px;
   }
@@ -1147,8 +1345,8 @@ onUnmounted(() => {
     padding-right: 0;
   }
 
-  .side-menu,
-  .aside :deep(.el-menu) {
+  .aside:not(.is-collapsed) .side-menu,
+  .aside:not(.is-collapsed) :deep(.el-menu) {
     width: 176px;
   }
 }

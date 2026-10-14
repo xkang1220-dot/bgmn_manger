@@ -10,3 +10,11 @@ kk:
     # 任务有效时长仅累计每天此时间段；暂不扣除午休、节假日。
     start: "09:00"
     end: "18:00"
+
+ai:
+  work-time:
+    morning-start: "09:30"
+    morning-end: "12:00"
+    afternoon-start: "13:30"
+    afternoon-end: "18:00"
+    evening-end: "21:00"
