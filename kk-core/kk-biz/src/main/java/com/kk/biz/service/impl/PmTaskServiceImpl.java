@@ -714,8 +714,10 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         LambdaQueryWrapper<PmTask> wrapper = new LambdaQueryWrapper<PmTask>()
                 .select(PmTask::getId, PmTask::getTitle, PmTask::getProjectId,
                         PmTask::getAssigneeId, PmTask::getHolderId, PmTask::getStatus,
-                        PmTask::getStartedAt, PmTask::getCompletedAt)
+                        PmTask::getDueDate, PmTask::getStartedAt, PmTask::getCompletedAt)
                 .in(PmTask::getStatus, 0, 1, 2, 4)
+                // 与驾驶舱上方的项目/状态统计保持一致：员工耗时只统计顶层任务。
+                .isNull(PmTask::getParentTaskId)
                 .isNotNull(PmTask::getStartedAt)
                 .eq(priority != null, PmTask::getPriority, priority)
                 .like(StringUtils.hasText(title), PmTask::getTitle, title);
@@ -776,6 +778,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
             taskItem.put("endedAt", durationEnd);
             taskItem.put("durationSeconds", seconds);
             taskItem.put("completed", completed);
+            taskItem.put("overdue", isOverdue(task));
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> memberTasks = (List<Map<String, Object>>) stats.get("tasks");
             memberTasks.add(taskItem);
