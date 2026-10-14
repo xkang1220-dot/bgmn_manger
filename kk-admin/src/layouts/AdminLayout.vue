@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import KkLogoMark from '@/components/KkLogoMark.vue'
 import TicketSubmitDialog from '@/components/ticket/TicketSubmitDialog.vue'
+import TaskAiChatDrawer from '@/components/taskai/TaskAiChatDrawer.vue'
+import AiAssistantIcon from '@/components/taskai/AiAssistantIcon.vue'
 import { notificationApi, type NotificationItem } from '@/api/notification'
 import type { MenuInfo } from '@/api/types'
 import {
@@ -16,6 +18,7 @@ const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 const ticketSubmitOpen = ref(false)
+const taskAiOpen = ref(false)
 
 const canSubmitTicket = computed(() => userStore.hasPermission('ticket:submit'))
 
@@ -304,6 +307,18 @@ onUnmounted(() => {
           </template>
         </el-menu>
       </el-scrollbar>
+      <div class="aside-footer">
+        <button type="button" class="ai-entry" @click="taskAiOpen = true">
+          <span class="ai-entry-mark" aria-hidden="true">
+            <AiAssistantIcon :size="22" />
+          </span>
+          <span class="ai-entry-copy">
+            <strong>AI 助手</strong>
+            <small>自然语言记工 · 问答</small>
+          </span>
+          <span class="ai-entry-chevron" aria-hidden="true">›</span>
+        </button>
+      </div>
     </el-aside>
 
     <el-container class="main-wrap">
@@ -475,10 +490,27 @@ onUnmounted(() => {
           </template>
         </el-menu>
       </el-scrollbar>
+      <div class="aside-footer mobile-ai-footer">
+        <button
+          type="button"
+          class="ai-entry"
+          @click="mobileMenuOpen = false; taskAiOpen = true"
+        >
+          <span class="ai-entry-mark" aria-hidden="true">
+            <AiAssistantIcon :size="22" />
+          </span>
+          <span class="ai-entry-copy">
+            <strong>AI 助手</strong>
+            <small>自然语言记工 · 问答</small>
+          </span>
+          <span class="ai-entry-chevron" aria-hidden="true">›</span>
+        </button>
+      </div>
     </el-drawer>
   </el-container>
 
   <TicketSubmitDialog v-model="ticketSubmitOpen" />
+  <TaskAiChatDrawer v-model="taskAiOpen" />
 </template>
 
 <style scoped>
@@ -522,6 +554,107 @@ onUnmounted(() => {
   font-weight: 500;
   line-height: 1.2;
   color: var(--kk-text);
+}
+
+.aside-footer {
+  flex-shrink: 0;
+  padding: 0 20px 20px;
+}
+
+.ai-entry {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 12px;
+  border: 1px solid rgba(24, 24, 27, 0.08);
+  border-radius: 14px;
+  cursor: pointer;
+  color: var(--kk-text, #18181b);
+  background: linear-gradient(180deg, #ffffff 0%, #f7f8f9 100%);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  transition:
+    border-color 0.2s var(--kk-ease, cubic-bezier(0.25, 1, 0.5, 1)),
+    box-shadow 0.2s var(--kk-ease, cubic-bezier(0.25, 1, 0.5, 1)),
+    transform 0.2s var(--kk-ease, cubic-bezier(0.25, 1, 0.5, 1)),
+    background 0.2s var(--kk-ease, cubic-bezier(0.25, 1, 0.5, 1));
+}
+
+.ai-entry-mark {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  color: #fff;
+  background: linear-gradient(145deg, #27272a 0%, #18181b 100%);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.ai-entry-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  text-align: left;
+}
+
+.ai-entry-copy strong {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--kk-text, #18181b);
+}
+
+.ai-entry-copy small {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--kk-text-secondary, #727272);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.ai-entry-chevron {
+  margin-left: auto;
+  font-size: 18px;
+  line-height: 1;
+  color: #a1a1aa;
+  transition: transform 0.2s var(--kk-ease, cubic-bezier(0.25, 1, 0.5, 1)), color 0.2s ease;
+}
+
+.ai-entry:hover {
+  border-color: rgba(6, 182, 212, 0.35);
+  background: linear-gradient(180deg, #ffffff 0%, #f0fbfd 100%);
+  box-shadow: 0 4px 14px rgba(6, 182, 212, 0.1);
+  transform: translateY(-1px);
+}
+
+.ai-entry:hover .ai-entry-mark {
+  background: linear-gradient(145deg, #0e7490 0%, #0f766e 100%);
+}
+
+.ai-entry:hover .ai-entry-chevron {
+  color: #0e7490;
+  transform: translateX(2px);
+}
+
+.ai-entry:active {
+  transform: translateY(0);
+}
+
+.ai-entry:focus-visible {
+  outline: 2px solid rgba(6, 182, 212, 0.4);
+  outline-offset: 2px;
+}
+
+.mobile-ai-footer {
+  padding: 12px 16px 20px;
 }
 
 .menu-scroll {
@@ -998,9 +1131,15 @@ onUnmounted(() => {
   }
 
   .logo,
-  .menu-scroll {
+  .menu-scroll,
+  .aside-footer {
     margin-left: 12px;
     margin-right: 12px;
+  }
+
+  .aside-footer {
+    padding-left: 0;
+    padding-right: 0;
   }
 
   .menu-scroll {
