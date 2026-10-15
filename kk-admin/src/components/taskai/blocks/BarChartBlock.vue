@@ -13,37 +13,49 @@ const props = defineProps<{
   series: { name: string; values: number[] }[]
 }>()
 
+const PALETTE = ['#2563eb', '#0d9488', '#d97706', '#db2777', '#7c3aed', '#0891b2', '#ea580c', '#16a34a']
+
 const el = ref<HTMLDivElement | null>(null)
 let chart: echarts.ECharts | null = null
 
 function render() {
   if (!el.value) return
   if (!chart) chart = echarts.init(el.value)
+  const multiSeries = (props.series || []).length > 1
   chart.setOption({
-    color: ['#2563eb', '#0d9488', '#d97706', '#e11d48', '#7c3aed'],
+    color: PALETTE,
     title: props.title
       ? { text: props.title, left: 0, top: 0, textStyle: { fontSize: 13, fontWeight: 600, color: '#3f3f46' } }
       : undefined,
     tooltip: { trigger: 'axis' },
-    legend: { top: props.title ? 24 : 0, right: 0, textStyle: { fontSize: 11 } },
-    grid: { left: 36, right: 12, top: props.title ? 52 : 28, bottom: 28 },
+    legend: multiSeries
+      ? { top: props.title ? 24 : 0, right: 0, textStyle: { fontSize: 11 } }
+      : { show: false },
+    grid: { left: 36, right: 12, top: props.title ? (multiSeries ? 52 : 36) : 28, bottom: 36 },
     xAxis: {
       type: 'category',
       data: props.categories || [],
-      axisLabel: { fontSize: 11, color: '#71717a', interval: 0, rotate: (props.categories?.length || 0) > 5 ? 28 : 0 },
+      axisLabel: { fontSize: 11, color: '#71717a', interval: 0, rotate: (props.categories?.length || 0) > 4 ? 24 : 0 },
     },
     yAxis: {
       type: 'value',
       splitLine: { lineStyle: { color: 'rgba(24,24,27,0.06)' } },
       axisLabel: { fontSize: 11, color: '#71717a' },
     },
-    series: (props.series || []).map((s) => ({
+    series: (props.series || []).map((s, seriesIdx) => ({
       name: s.name,
       type: 'bar',
       barMaxWidth: 28,
-      data: s.values || [],
+      // 单系列：每个类目不同色；多系列：按系列取色
+      data: (s.values || []).map((v, i) => ({
+        value: v,
+        itemStyle: {
+          color: multiSeries ? PALETTE[seriesIdx % PALETTE.length] : PALETTE[i % PALETTE.length],
+          borderRadius: [6, 6, 2, 2],
+        },
+      })),
     })),
-  })
+  }, true)
 }
 
 function onResize() {

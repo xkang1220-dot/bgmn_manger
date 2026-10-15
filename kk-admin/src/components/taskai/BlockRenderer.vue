@@ -7,6 +7,7 @@ import TaskListBlock from './blocks/TaskListBlock.vue'
 import TimelineBlock from './blocks/TimelineBlock.vue'
 import LineChartBlock from './blocks/LineChartBlock.vue'
 import BarChartBlock from './blocks/BarChartBlock.vue'
+import PieChartBlock from './blocks/PieChartBlock.vue'
 import StatRowBlock from './blocks/StatRowBlock.vue'
 import DoneBlock from './blocks/DoneBlock.vue'
 import UnknownBlock from './blocks/UnknownBlock.vue'
@@ -75,6 +76,11 @@ function asRecord(block: UiBlock): Record<string, unknown> {
         :title="(block as any).title"
         :categories="(block as any).categories || []"
         :series="(block as any).series || []"
+      />
+      <PieChartBlock
+        v-else-if="block.type === 'pie_chart'"
+        :title="(block as any).title"
+        :slices="(block as any).slices || []"
       />
       <StatRowBlock
         v-else-if="block.type === 'stat_row'"

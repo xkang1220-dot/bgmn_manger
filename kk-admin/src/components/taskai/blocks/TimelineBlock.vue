@@ -24,6 +24,9 @@ defineProps<{
             <span v-if="ev.projectName">{{ ev.projectName }}</span>
             <span v-if="ev.userName">{{ ev.userName }}</span>
             <span v-if="ev.statusLabel">{{ ev.statusLabel }}</span>
+            <span v-if="ev.durationLabel && !String(ev.time || '').includes(ev.durationLabel)" class="timeline-duration">
+              {{ ev.durationLabel }}
+            </span>
           </div>
         </div>
       </li>
@@ -105,5 +108,10 @@ defineProps<{
   margin-top: 4px;
   font-size: 12px;
   color: #71717a;
+}
+
+.timeline-duration {
+  color: #3f3f46;
+  font-weight: 550;
 }
 </style>

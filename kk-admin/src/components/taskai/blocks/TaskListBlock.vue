@@ -22,6 +22,7 @@ defineProps<{
           <span v-if="item.projectName">{{ item.projectName }}</span>
           <span v-if="item.userName">{{ item.userName }}</span>
           <span v-if="item.timeLabel">{{ item.timeLabel }}</span>
+          <span v-if="item.durationLabel" class="task-list-duration">{{ item.durationLabel }}</span>
         </div>
       </li>
     </ul>
@@ -95,5 +96,10 @@ defineProps<{
   margin-top: 4px;
   font-size: 12px;
   color: #71717a;
+}
+
+.task-list-duration {
+  color: #3f3f46;
+  font-weight: 550;
 }
 </style>

@@ -57,6 +57,9 @@ public class PmTask extends BaseEntity {
 
     private LocalDate dueDate;
 
+    /** 预估/记工时长（小时）；AI 助手按起止时刻写入 */
+    private BigDecimal estimatedHours;
+
     private LocalDateTime startedAt;
 
     private LocalDateTime completedAt;

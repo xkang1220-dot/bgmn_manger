@@ -118,26 +118,66 @@ function resetConversation() {
  * 后端返回的时间范围、人员范围和空结果解释，因此在没有文本 block 时
  * 将 replyText 作为一条 markdown 放在结构化结果前面。
  */
+function looksLikeMarkdownTable(text: string) {
+  const t = text || ''
+  const pipes = (t.match(/\|/g) || []).length
+  return pipes >= 4 || t.includes('|---') || t.includes('| ---')
+}
+
+function stripMarkdownTables(text: string) {
+  return (text || '')
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim()
+      if (!t) return true
+      if (t.includes('|') && (t.startsWith('|') || /\|/.test(t))) {
+        if (/^:?-{2,}:?(\s*\||:)?/.test(t.replace(/\|/g, '').trim()) || t.split('|').length >= 3) {
+          return false
+        }
+      }
+      return !(t.startsWith('|') && t.endsWith('|'))
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 function resolveAssistantBlocks(res: TaskAiChatResponse): UiBlock[] {
-  const blocks = Array.isArray(res.blocks) ? res.blocks : []
+  const blocks = Array.isArray(res.blocks) ? [...res.blocks] : []
   const replyText = res.replyText?.trim()
 
   if (!blocks.length) {
-    return replyText
-      ? [{ type: 'markdown', content: replyText }]
-      : [{ type: 'markdown', content: '（无内容）' }]
+    if (!replyText) return [{ type: 'markdown', content: '（无内容）' }]
+    const cleaned = stripMarkdownTables(replyText)
+    return [{ type: 'markdown', content: cleaned || '（无内容）' }]
   }
 
-  const hasTextBlock = blocks.some(
+  // 已有结构化列表/图表时，丢掉模型 Markdown 表，避免窄抽屉炸版
+  const hasStructuredQuery = blocks.some((block) =>
+    ['task_list', 'timeline', 'stat_row', 'bar_chart', 'line_chart', 'pie_chart'].includes(block.type),
+  )
+  const cleanedBlocks = hasStructuredQuery
+    ? blocks.filter((block) => {
+        if (block.type !== 'markdown') return true
+        const content = String((block as { content?: string }).content || '')
+        return !looksLikeMarkdownTable(content)
+      })
+    : blocks
+
+  const hasTextBlock = cleanedBlocks.some(
     (block) => block.type === 'markdown' || block.type === 'clarify' || block.type === 'done',
   )
-  const hasConfirm = blocks.some((block) => block.type === 'confirm_card')
+  const hasConfirm = cleanedBlocks.some((block) => block.type === 'confirm_card')
 
   if (replyText && !hasTextBlock && !hasConfirm) {
-    return [{ type: 'markdown', content: replyText }, ...blocks]
+    const cleaned = stripMarkdownTables(replyText)
+    // 结构化查询场景：只补一句短旁白；整段仍是表则不再前置
+    if (cleaned && !(hasStructuredQuery && looksLikeMarkdownTable(cleaned))) {
+      return [{ type: 'markdown', content: cleaned }, ...cleanedBlocks]
+    }
   }
 
-  return blocks
+  return cleanedBlocks.length ? cleanedBlocks : blocks
 }
 
 function startGuideCarousel() {
@@ -371,7 +411,7 @@ async function onRestart() {
     class="task-ai-drawer"
     modal-class="task-ai-drawer-overlay"
     direction="ltr"
-    size="420px"
+    size="500px"
     append-to-body
     :with-header="true"
     title="AI 助手"
@@ -784,7 +824,7 @@ async function onRestart() {
   left: 16px !important;
   bottom: 16px !important;
   height: auto !important;
-  width: min(420px, calc(100vw - 32px)) !important;
+  width: min(500px, calc(100vw - 32px)) !important;
   max-height: calc(100vh - 32px);
   border-radius: var(--kk-radius-lg, 24px) !important;
   border: 1px solid var(--kk-glass-border, rgba(255, 255, 255, 0.72));

@@ -26,6 +26,9 @@ export interface ConfirmTaskItem {
   durationLabel?: string
   status: 0 | 1 | 2 | 3 | 4
   statusLabel: string
+  /** 任务负责人；为空表示当前登录用户 */
+  assigneeId?: number
+  assigneeName?: string
 }
 
 export interface TaskListItem {
@@ -33,7 +36,12 @@ export interface TaskListItem {
   title: string
   projectName?: string
   statusLabel?: string
+  /** 时段展示，如「14:00:00 ~ 16:00:00」 */
   timeLabel?: string
+  /** 时长展示，如「2小时」 */
+  durationLabel?: string
+  startAt?: string
+  endAt?: string
   userName?: string
 }
 
@@ -44,6 +52,7 @@ export interface TimelineEvent {
   projectName?: string
   statusLabel?: string
   userName?: string
+  durationLabel?: string
 }
 
 export type UiBlock =
@@ -69,6 +78,11 @@ export type UiBlock =
       title?: string
       categories: string[]
       series: { name: string; values: number[] }[]
+    }
+  | {
+      type: 'pie_chart'
+      title?: string
+      slices: { name: string; value: number }[]
     }
   | {
       type: 'stat_row'

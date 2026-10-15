@@ -104,6 +104,10 @@ function submit() {
           <span class="meta-value">{{ item.projectName || '—' }}</span>
         </div>
         <div class="meta">
+          <span class="meta-label">负责人</span>
+          <span class="meta-value">{{ item.assigneeName || '我' }}</span>
+        </div>
+        <div class="meta">
           <span class="meta-label">时间</span>
           <span class="meta-value">{{ displayTime(item) }}</span>
         </div>

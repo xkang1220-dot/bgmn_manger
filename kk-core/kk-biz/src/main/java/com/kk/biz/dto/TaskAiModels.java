@@ -16,6 +16,9 @@ public final class TaskAiModels {
         private String tempId; private Long projectId; private String projectName; private String title; private String content;
         private String startAt; private String endAt; private String timeLabel; private String durationLabel;
         private Integer status; private String statusLabel;
+        /** 任务负责人；为空则默认为当前登录用户 */
+        private Long assigneeId;
+        private String assigneeName;
     }
     public record ChatResponse(String sessionId, int protocolVersion, String replyText,
                                List<Map<String, Object>> blocks, boolean pendingConfirm,

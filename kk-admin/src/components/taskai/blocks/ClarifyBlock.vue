@@ -28,6 +28,9 @@ const emit = defineEmits<{
         {{ opt.label }}
       </button>
     </div>
+    <p v-if="field === 'user' && options?.length && !disabled" class="clarify-hint">
+      都不是？可在下方输入框继续输入全名或账号
+    </p>
   </div>
 </template>
 
@@ -70,5 +73,12 @@ const emit = defineEmits<{
 .clarify-chip:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.clarify-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #71717a;
 }
 </style>
