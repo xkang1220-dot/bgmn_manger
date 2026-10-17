@@ -37,6 +37,21 @@ public class TaskAiService {
     /** 项目负责人查询对象不在负责项目内时的固定拒绝文案 */
     private static final String MSG_DENY_OUTSIDE_OWNED_PROJECTS =
             "权限不足：您仅可查询自己负责项目内成员的任务；当前查询对象不在您负责的项目中。";
+    /** 非管理员请求全员查询 */
+    private static final String MSG_DENY_ALL_USERS =
+            "权限不足：全员任务汇总仅管理员可查询。";
+    /** 非管理员、非项目负责人请求查队员 */
+    private static final String MSG_DENY_TEAM =
+            "权限不足：仅管理员或项目负责人可以查询项目成员的任务。";
+    private static final java.util.regex.Pattern ALL_USERS_KEYWORD = java.util.regex.Pattern.compile(
+            "全体员工|全体人员|全员|所有员工|所有人|全部员工|全部人员|everybody|everyone",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+    /** 查队员/项目成员，不要收成当前登录人 */
+    private static final java.util.regex.Pattern TEAM_KEYWORD = java.util.regex.Pattern.compile(
+            "项目成员|队员|团队成员|我的团队|组员|手下|成员们|我的成员|成员都|成员做|成员的任务|成员任务");
+    /** 查队员时是否把本人一并算进去 */
+    private static final java.util.regex.Pattern TEAM_INCLUDE_SELF = java.util.regex.Pattern.compile(
+            "包括我|含我|和我|我和|大家|我们");
     private final AiTaskLogSessionMapper sessionMapper;
     private final PmProjectMapper projectMapper;
     private final PmProjectMemberMapper projectMemberMapper;
@@ -107,7 +122,10 @@ public class TaskAiService {
             task.setHolderId(assigneeId);
             LinkedHashSet<Long> participants = new LinkedHashSet<>();
             participants.add(assigneeId);
-            participants.add(loginUserId);
+            // 管理员代建时创建人未必在项目中，勿强行加入参与人。
+            if (Objects.equals(loginUserId, assigneeId) || isUserInProject(item.getProjectId(), loginUserId)) {
+                participants.add(loginUserId);
+            }
             task.setParticipantIds(new ArrayList<>(participants));
             LocalDateTime startAt = parseDateTime(item.getStartAt());
             LocalDateTime endAt = parseDateTime(item.getEndAt());
@@ -157,8 +175,14 @@ public class TaskAiService {
         List<Map<String, Object>> suggested = new ArrayList<>();
         Set<Long> resolvedUserIds = new LinkedHashSet<>();
         if (preResolvedUserId != null) resolvedUserIds.add(preResolvedUserId);
-        Long inferredFromText = inferAssigneeFromHistory(history, userId);
-        if (inferredFromText != null) resolvedUserIds.add(inferredFromText);
+        // 全员 / 队员：以本轮说法为准，禁止模型把范围收成当前登录人
+        boolean allUsersScope = wantsAllUsers(history);
+        boolean teamScope = !allUsersScope && wantsTeamMembers(history);
+        boolean teamIncludeSelf = teamScope && wantsIncludeSelfWithTeam(history);
+        if (!allUsersScope && !teamScope) {
+            Long inferredFromText = inferAssigneeFromHistory(history, userId);
+            if (inferredFromText != null) resolvedUserIds.add(inferredFromText);
+        }
         Map<String, String> requestedTimeRange = latestUserTimeRange(history);
         String reply = "";
         for (int i = 0; i <= properties.getMaxToolCalls(); i++) {
@@ -182,8 +206,25 @@ public class TaskAiService {
                 try { args = objectMapper.readValue(call.path("function").path("arguments").asText("{}"), new TypeReference<>() {}); }
                 catch (Exception e) { args = Map.of(); }
                 args = new LinkedHashMap<>(args);
+                if (Boolean.TRUE.equals(args.get("allUsers"))) {
+                    allUsersScope = true;
+                    teamScope = false;
+                } else if (Boolean.TRUE.equals(args.get("teamMembers"))) {
+                    teamScope = !allUsersScope;
+                }
                 if (isTaskQuery(name)) {
-                    if (!resolvedUserIds.isEmpty()) args.put("userIds", new ArrayList<>(resolvedUserIds));
+                    if (allUsersScope) {
+                        args.put("allUsers", true);
+                        args.remove("teamMembers");
+                        args.remove("userIds");
+                    } else if (teamScope) {
+                        args.put("teamMembers", true);
+                        args.put("includeSelf", teamIncludeSelf);
+                        args.remove("allUsers");
+                        args.remove("userIds");
+                    } else if (!resolvedUserIds.isEmpty()) {
+                        args.put("userIds", new ArrayList<>(resolvedUserIds));
+                    }
                     if (!requestedTimeRange.isEmpty()) {
                         args.put("start", requestedTimeRange.get("start"));
                         args.put("end", requestedTimeRange.get("end"));
@@ -204,8 +245,12 @@ public class TaskAiService {
                 try { tr = executeTool(name, userId, session, args); }
                 catch (Exception e) { tr = new ToolResult(false, e.getMessage(), Map.of(), List.of()); }
                 if (isUserResolveTool(name) && tr.ok && tr.data instanceof Map<?, ?> data) {
-                    Long resolvedId = number(data.get("id"));
-                    if (resolvedId != null) resolvedUserIds.add(resolvedId);
+                    if (Boolean.TRUE.equals(data.get("allUsers"))) {
+                        allUsersScope = true;
+                    } else {
+                        Long resolvedId = number(data.get("id"));
+                        if (resolvedId != null) resolvedUserIds.add(resolvedId);
+                    }
                 }
                 mergeSuggestedBlocks(suggested, tr.blocks);
                 if (properties.isToolTraceEnabled()) trace.add(Map.of("name", name, "ok", tr.ok));
@@ -475,6 +520,19 @@ public class TaskAiService {
         Set<Long> owned = ownedProjectIds(loginId);
         String rawKw = keyword == null ? "" : keyword.trim();
 
+        if (isAllUsersKeyword(rawKw)) {
+            if (!unrestricted) {
+                return permissionDenied(MSG_DENY_ALL_USERS);
+            }
+            List<Long> ids = listActiveUserIds();
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("allUsers", true);
+            data.put("ids", ids);
+            data.put("count", ids.size());
+            data.put("name", "全体员工");
+            return ok(data);
+        }
+
         List<SysUser> found = List.of();
         if (StringUtils.hasText(rawKw)) {
             found = userMapper.selectList(new LambdaQueryWrapper<SysUser>().eq(SysUser::getStatus, 1)
@@ -626,20 +684,51 @@ public class TaskAiService {
     }
 
     private ToolResult queryTasks(String tool, long loginId, Map<String, Object> args) {
-        List<Long> userIds = longList(args.get("userIds"));
-        if (userIds.isEmpty()) userIds = List.of(loginId);
-        List<Long> requestedProjectIds = longList(args.get("projectIds"));
         boolean unrestricted = isUnrestricted(loginId);
+        boolean allUsers = Boolean.TRUE.equals(args.get("allUsers"))
+                || "all".equalsIgnoreCase(Objects.toString(args.get("scope"), ""));
+        boolean teamMembers = !allUsers && Boolean.TRUE.equals(args.get("teamMembers"));
+        boolean teamIncludeSelf = teamMembers && Boolean.TRUE.equals(args.get("includeSelf"));
+        List<Long> userIds = longList(args.get("userIds"));
+        if (allUsers) {
+            if (!unrestricted) {
+                return permissionDenied(MSG_DENY_ALL_USERS);
+            }
+            userIds = listActiveUserIds();
+            if (userIds.isEmpty()) {
+                return new ToolResult(false, "系统中暂无可用人员", Map.of("count", 0), List.of(
+                        Map.of("type", "markdown", "content", "系统中暂无可用人员。")));
+            }
+        } else if (teamMembers) {
+            if (!unrestricted && ownedProjectIds(loginId).isEmpty()) {
+                return permissionDenied(MSG_DENY_TEAM);
+            }
+            userIds = listTeamMemberIds(loginId, unrestricted, teamIncludeSelf);
+            if (userIds.isEmpty()) {
+                String empty = unrestricted
+                        ? "当前没有可查询的项目成员。"
+                        : "您负责的项目里暂无其他成员。";
+                return new ToolResult(true, empty, Map.of("count", 0, "teamMembers", true),
+                        List.of(Map.of("type", "markdown", "content", empty)));
+            }
+        } else if (userIds.isEmpty()) {
+            userIds = List.of(loginId);
+        }
+        List<Long> requestedProjectIds = longList(args.get("projectIds"));
         Set<Long> owned = ownedProjectIds(loginId);
+        // 项目负责人查队员：默认只看自己负责的项目，不把队员在其他项目的任务算进来
+        if (teamMembers && !unrestricted && requestedProjectIds.isEmpty()) {
+            requestedProjectIds = new ArrayList<>(owned);
+        }
         boolean includesSelf = userIds.contains(loginId);
         List<Long> otherUserIds = userIds.stream().filter(id -> id != loginId).toList();
 
         // 1) 普通员工：禁止查他人，直接固定文案（不是“查不到”）
         // 2) 项目负责人：仅限负责项目 ∩ 对方参与项目，并按项目分别汇报
-        // 3) 管理员/超管（或 task:ai:query-others）：不限制
+        // 3) 管理员/超管（或 task:ai:query-others）：不限制；allUsers 查全员
         List<Long> otherProjectIds = requestedProjectIds;
         boolean ownerScopedOthers = false;
-        if (!otherUserIds.isEmpty() && !unrestricted) {
+        if (!allUsers && !teamMembers && !otherUserIds.isEmpty() && !unrestricted) {
             if (owned.isEmpty()) {
                 return permissionDenied(MSG_DENY_QUERY_OTHERS);
             }
@@ -655,7 +744,7 @@ public class TaskAiService {
         LocalDateTime start = parseDateTime(Objects.toString(args.get("start"), LocalDate.now(ZONE).atStartOfDay().format(DT)));
         LocalDateTime end = parseDateTime(Objects.toString(args.get("end"), LocalDate.now(ZONE).atTime(23, 59, 59).format(DT)));
         LambdaQueryWrapper<PmTask> q = new LambdaQueryWrapper<>();
-        if (otherUserIds.isEmpty() || unrestricted) {
+        if (allUsers || teamMembers || otherUserIds.isEmpty() || unrestricted) {
             q.in(!queryProjectIds.isEmpty(), PmTask::getProjectId, queryProjectIds)
                     .and(w -> w.in(PmTask::getAssigneeId, queryUserIds).or().in(PmTask::getHolderId, queryUserIds));
         } else if (includesSelf) {
@@ -676,7 +765,8 @@ public class TaskAiService {
                         .or().between(PmTask::getDueDate, start.toLocalDate(), end.toLocalDate())
                         .or().between(PmTask::getCompletedAt, start, end)
                         .or().between(PmTask::getCreateTime, start, end))
-                .orderByAsc(PmTask::getStartDate).last("LIMIT 200");
+                .orderByAsc(PmTask::getStartDate)
+                .last(allUsers || teamMembers ? "LIMIT 2000" : "LIMIT 200");
         if (args.get("status") instanceof Number n) q.eq(PmTask::getStatus, n.intValue());
         List<PmTask> tasks = taskMapper.selectList(q);
         Map<Long, String> projectNames = projectNames(tasks);
@@ -684,11 +774,11 @@ public class TaskAiService {
         List<Map<String, Object>> items = tasks.stream().map(t -> taskItem(t, projectNames, userNames)).toList();
         List<Map<String, Object>> blocks = new ArrayList<>();
         String message;
-        boolean multiPerson = queryUserIds.size() >= 2;
+        boolean multiPerson = allUsers || teamMembers || queryUserIds.size() >= 2;
         boolean compareMode = multiPerson && Set.of("list_tasks", "summarize_tasks", "tasks_timeline").contains(tool);
         if (compareMode) {
-            // 多人：侧重按人对比汇总，不堆完整明细
-            message = buildMultiPersonCompareBlocks(tool, tasks, queryUserIds, userNames, projectNames, blocks);
+            // 多人/全员/队员：侧重按人对比汇总，不堆完整明细
+            message = buildMultiPersonCompareBlocks(tool, tasks, queryUserIds, userNames, projectNames, blocks, allUsers, teamMembers);
         } else if (ownerScopedOthers) {
             message = buildOwnerScopedBlocks(tool, tasks, items, otherProjectIds, projectNames, blocks, includesSelf);
             if (("list_tasks".equals(tool) || "summarize_tasks".equals(tool)) && !tasks.isEmpty()) {
@@ -702,7 +792,8 @@ public class TaskAiService {
                 appendQueryVisualBlocks(blocks, tasks, projectNames, items);
             } else if ("summarize_tasks".equals(tool)) {
                 blocks.add(stats(tasks));
-                if (!items.isEmpty()) blocks.add(Map.of("type", "task_list", "title", "任务明细", "items", items));
+                // 与 list_tasks 共用同一标题，合并时只保留一块列表
+                if (!items.isEmpty()) blocks.add(Map.of("type", "task_list", "title", "任务列表", "items", items));
                 appendQueryVisualBlocks(blocks, tasks, projectNames, items);
             } else if ("tasks_timeline".equals(tool)) {
                 blocks.add(timeline(items));
@@ -729,31 +820,47 @@ public class TaskAiService {
     }
 
     /**
-     * 多人查询：按人拆分汇总 + 对比柱图，默认不展开完整任务明细。
+     * 多人/全员查询：按人拆分汇总 + 对比柱图，默认不展开完整任务明细。
      */
     private String buildMultiPersonCompareBlocks(String tool, List<PmTask> tasks, List<Long> userIds,
                                                  Map<Long, String> userNames, Map<Long, String> projectNames,
-                                                 List<Map<String, Object>> blocks) {
-        String names = userIds.stream()
-                .map(id -> "「" + userNames.getOrDefault(id, "用户#" + id) + "」")
-                .collect(Collectors.joining("、"));
-        blocks.add(Map.of("type", "markdown", "content",
-                "以下为 " + userIds.size() + " 人对比汇总（" + names + "），侧重对比而非明细。"));
-        blocks.add(personTaskCountChart(tasks, userIds, userNames));
-        Map<String, Object> hoursChart = personHoursChart(tasks, userIds, userNames);
+                                                 List<Map<String, Object>> blocks, boolean allUsers, boolean teamMembers) {
+        List<Long> orderedIds = orderUserIdsByTaskCount(tasks, userIds);
+        Map<Long, Long> counts = new LinkedHashMap<>();
+        for (Long uid : orderedIds) {
+            counts.put(uid, tasks.stream()
+                    .filter(t -> Objects.equals(t.getAssigneeId(), uid) || Objects.equals(t.getHolderId(), uid))
+                    .count());
+        }
+        List<Long> withTasks = orderedIds.stream().filter(id -> counts.getOrDefault(id, 0L) > 0).toList();
+        List<Long> withoutTasks = orderedIds.stream().filter(id -> counts.getOrDefault(id, 0L) == 0).toList();
+
+        String intro;
+        if (allUsers) {
+            intro = "以下为全员（" + userIds.size() + " 人）在该时段的任务对比汇总：有任务 "
+                    + withTasks.size() + " 人，暂无任务 " + withoutTasks.size() + " 人。侧重按人对比，不展开全量明细。";
+        } else if (teamMembers) {
+            intro = "以下为项目成员（" + userIds.size() + " 人）在该时段的任务对比汇总：有任务 "
+                    + withTasks.size() + " 人，暂无任务 " + withoutTasks.size() + " 人。这是队员数据，不是提问者本人。";
+        } else {
+            String names = orderedIds.stream()
+                    .map(id -> "「" + userNames.getOrDefault(id, "用户#" + id) + "」")
+                    .collect(Collectors.joining("、"));
+            intro = "以下为 " + userIds.size() + " 人对比汇总（" + names + "），侧重对比而非明细。";
+        }
+        blocks.add(Map.of("type", "markdown", "content", intro));
+        blocks.add(stats(tasks, allUsers ? "全员合计" : null));
+        blocks.add(personTaskCountChart(tasks, orderedIds, userNames));
+        Map<String, Object> hoursChart = personHoursChart(tasks, orderedIds, userNames);
         if (hoursChart != null) blocks.add(hoursChart);
 
-        for (Long uid : userIds) {
+        for (Long uid : withTasks) {
             String name = userNames.getOrDefault(uid, "用户#" + uid);
             List<PmTask> personTasks = tasks.stream()
                     .filter(t -> Objects.equals(t.getAssigneeId(), uid) || Objects.equals(t.getHolderId(), uid))
                     .toList();
             blocks.add(Map.of("type", "markdown", "content", "**" + name + "**"));
             blocks.add(stats(personTasks, name));
-            if (personTasks.isEmpty()) {
-                blocks.add(Map.of("type", "markdown", "content", "该时段暂无任务。"));
-                continue;
-            }
             // 每人最多 3 条要点标题，避免变成详情墙
             String highlights = personTasks.stream()
                     .limit(3)
@@ -768,13 +875,98 @@ public class TaskAiService {
             }
             blocks.add(Map.of("type", "markdown", "content", "要点：\n" + highlights));
         }
+        if (!withoutTasks.isEmpty()) {
+            String zeroNames = withoutTasks.stream()
+                    .map(id -> userNames.getOrDefault(id, "用户#" + id))
+                    .collect(Collectors.joining("、"));
+            blocks.add(Map.of("type", "markdown", "content",
+                    "另有 " + withoutTasks.size() + " 人该时段暂无任务：" + zeroNames + "。"));
+        }
 
         if (!tasks.isEmpty()) blocks.add(statusPieChart(tasks));
         // timeline 工具仍可给极简对比旁白，但不附全量时序
         if ("tasks_timeline".equals(tool) && !tasks.isEmpty()) {
             blocks.add(Map.of("type", "markdown", "content", "多人对比已按人汇总；如需某人完整时序，请单独查询该人员。"));
         }
-        return "多人对比汇总（按人拆分统计与要点，已附对比图）";
+        return allUsers
+                ? "全员对比汇总（按人拆分统计与要点，已附对比图）"
+                : teamMembers
+                ? "项目成员对比汇总（按人拆分统计与要点，已附对比图；不是提问者本人）"
+                : "多人对比汇总（按人拆分统计与要点，已附对比图）";
+    }
+
+    /**
+     * 管理员：全部项目的负责人与成员。
+     * 项目负责人：自己负责项目里的成员（默认不含本人，除非明确说包括我/大家）。
+     */
+    private List<Long> listTeamMemberIds(long loginId, boolean unrestricted, boolean includeSelf) {
+        Set<Long> ids = new LinkedHashSet<>();
+        if (unrestricted) {
+            projectMapper.selectList(new LambdaQueryWrapper<PmProject>()
+                            .select(PmProject::getOwnerId)
+                            .isNotNull(PmProject::getOwnerId))
+                    .stream().map(PmProject::getOwnerId).filter(Objects::nonNull).forEach(ids::add);
+            projectMemberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
+                            .select(PmProjectMember::getUserId))
+                    .stream().map(PmProjectMember::getUserId).filter(Objects::nonNull).forEach(ids::add);
+        } else {
+            Set<Long> owned = ownedProjectIds(loginId);
+            if (owned.isEmpty()) return List.of();
+            projectMemberMapper.selectList(new LambdaQueryWrapper<PmProjectMember>()
+                            .in(PmProjectMember::getProjectId, owned)
+                            .select(PmProjectMember::getUserId))
+                    .stream().map(PmProjectMember::getUserId).filter(Objects::nonNull).forEach(ids::add);
+        }
+        if (!includeSelf) ids.remove(loginId);
+        if (ids.isEmpty()) return List.of();
+        return userMapper.selectList(new LambdaQueryWrapper<SysUser>()
+                        .eq(SysUser::getStatus, 1)
+                        .in(SysUser::getId, ids)
+                        .select(SysUser::getId)
+                        .orderByAsc(SysUser::getId))
+                .stream().map(SysUser::getId).filter(Objects::nonNull).distinct().toList();
+    }
+
+    private boolean wantsTeamMembers(List<Map<String, Object>> history) {
+        String text = latestUserText(history);
+        return StringUtils.hasText(text) && TEAM_KEYWORD.matcher(text).find();
+    }
+
+    private boolean wantsIncludeSelfWithTeam(List<Map<String, Object>> history) {
+        String text = latestUserText(history);
+        return StringUtils.hasText(text) && TEAM_INCLUDE_SELF.matcher(text).find();
+    }
+
+    private List<Long> orderUserIdsByTaskCount(List<PmTask> tasks, List<Long> userIds) {
+        return userIds.stream()
+                .sorted(Comparator
+                        .<Long>comparingLong(uid -> tasks.stream()
+                                .filter(t -> Objects.equals(t.getAssigneeId(), uid) || Objects.equals(t.getHolderId(), uid))
+                                .count())
+                        .reversed()
+                        .thenComparing(uid -> uid == null ? 0L : uid))
+                .toList();
+    }
+
+    private List<Long> listActiveUserIds() {
+        return userMapper.selectList(new LambdaQueryWrapper<SysUser>()
+                        .eq(SysUser::getStatus, 1)
+                        .select(SysUser::getId)
+                        .orderByAsc(SysUser::getId))
+                .stream()
+                .map(SysUser::getId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+    }
+
+    private boolean wantsAllUsers(List<Map<String, Object>> history) {
+        return isAllUsersKeyword(latestUserText(history));
+    }
+
+    private boolean isAllUsersKeyword(String text) {
+        if (!StringUtils.hasText(text)) return false;
+        return ALL_USERS_KEYWORD.matcher(text.trim()).find();
     }
 
     private Map<Long, String> enrichUserNames(List<Long> userIds, Map<Long, String> existing) {
@@ -1138,16 +1330,16 @@ public class TaskAiService {
                         Map.of("keyword", Map.of("type", "string"), "assigneeId", Map.of("type", "integer"))),
                 tool("resolve_project","解析项目名称；多命中时返回候选；给他人建任务时传 assigneeId，勿用事项关键词乱搜",
                         Map.of("keyword", Map.of("type", "string"), "assigneeId", Map.of("type", "integer"))),
-                tool("search_users","按姓名/账号搜索用户；无精确命中时返回相近候选供点选；普通员工查他人会权限拒绝", props("keyword","string")),
-                tool("resolve_user","解析用户姓名；支持「徐姐」等称呼模糊匹配，多命中/相近时返回候选点选；普通员工查他人直接权限拒绝", props("keyword","string")),
+                tool("search_users","按姓名/账号搜索用户；「全体员工/全员」仅管理员可解析为 allUsers；无精确命中时返回相近候选供点选", props("keyword","string")),
+                tool("resolve_user","解析用户；「全体员工/全员/所有人」返回 allUsers=true（仅管理员）；单人姓名模糊匹配；普通员工查他人直接权限拒绝", props("keyword","string")),
                 tool("get_server_now","获取服务器当前时间", Map.of()),
                 tool("normalize_time_range","将中文时间表达归一化", props("expression","string")),
                 tool("list_project_members","列出项目负责人和成员", Map.of("projectId",Map.of("type","integer"))),
                 tool("get_task","读取单个任务详情", Map.of("taskId",Map.of("type","integer"))),
                 tool("list_task_flows","读取任务流转时序", Map.of("taskId",Map.of("type","integer"))),
-                taskQueryTool("list_tasks","查询真实任务。单人：统计+列表+图表；多人 userIds：按人对比汇总（不堆详情）"),
-                taskQueryTool("summarize_tasks","汇总真实任务。单人：统计+要点+图表；多人 userIds：按人对比汇总与对比柱图（推荐）"),
-                taskQueryTool("tasks_timeline","生成任务时间线；多人时改为对比汇总提示"),
+                taskQueryTool("list_tasks","查询真实任务。查自己：不传 userIds。查队员：teamMembers=true（不要传自己的 id）。全员：allUsers=true。点名多人：传全部 userIds"),
+                taskQueryTool("summarize_tasks","汇总真实任务。查自己不传 userIds；查项目成员/队员必须 teamMembers=true，禁止只查当前用户；全员 allUsers=true。勿与 list_tasks 同批重复调用"),
+                taskQueryTool("tasks_timeline","生成任务时间线；查队员用 teamMembers=true，全员用 allUsers=true，都改为按人对比"),
                 taskQueryTool("tasks_by_project_chart","仅要图表时使用；若已调 list/summarize 则不必再调"),
                 taskQueryTool("tasks_trend_chart","生成任务趋势折线图"),
                 tool("work_duration_summary","计算单任务有效工时", Map.of("taskId",Map.of("type","integer"))),
@@ -1168,7 +1360,11 @@ public class TaskAiService {
                 tool("clear_draft","清空记工草稿", Map.of()));
     }
     private Map<String,Object> taskQueryTool(String name,String description) { return tool(name,description,Map.of(
-            "userIds",Map.of("type","array","items",Map.of("type","integer")), "projectIds",Map.of("type","array","items",Map.of("type","integer")),
+            "userIds",Map.of("type","array","items",Map.of("type","integer")),
+            "allUsers",Map.of("type","boolean","description","true=全体员工/全员/所有人，仅管理员。与 teamMembers 互斥"),
+            "teamMembers",Map.of("type","boolean","description","true=项目成员/队员/团队，不含提问者本人。管理员查全部项目成员；项目负责人查自己负责项目的成员。不要同时传自己的 userId"),
+            "includeSelf",Map.of("type","boolean","description","仅 teamMembers 时：用户说了包括我/大家/我们才设为 true"),
+            "projectIds",Map.of("type","array","items",Map.of("type","integer")),
             "start",Map.of("type","string"),"end",Map.of("type","string"),"status",Map.of("type","integer"))); }
     private Map<String,Object> tool(String name,String desc,Map<String,Object> properties) { return Map.of("type","function","function",Map.of(
             "name",name,"description",desc,"parameters",Map.of("type","object","properties",properties))); }
@@ -1177,12 +1373,21 @@ public class TaskAiService {
             你是 BGMN 任务助手。所有项目、用户、任务数字必须通过工具获取，禁止编造。记工/建任务必须先解析时间和项目，再调用 draft_log_tasks，绝不能直接写库。
             查询他人或为他人建任务，必须先 resolve_user。工具返回的 task_list / timeline / stat_row / bar_chart / pie_chart / line_chart 是唯一可信展示；禁止用 Markdown 表格罗列任务（窄屏会炸版）。旁白最多一两句，图表与列表交给工具块。
             查询汇总时优先只调 summarize_tasks 或 list_tasks（它们已附带柱图/饼图），不要再额外调用 tasks_by_project_chart，以免图表重复。
+            先判断这轮是查谁，再调工具（管理员和项目负责人必须区分，禁止默认查自己）：
+            A) 查自己：出现「我 / 我的 / 我今天 / 我做了什么」，且没有点名他人、没有「成员/队员/全员」。不传 userIds，不要设 teamMembers 或 allUsers。
+            B) 查队员：出现「项目成员 / 队员 / 团队 / 组员 / 手下 / 成员都做了什么」。必须 summarize_tasks(teamMembers=true)，禁止传当前用户自己的 id，禁止当成查自己。只有用户说「包括我 / 大家 / 我们」时才加 includeSelf=true。管理员=全部项目的成员；项目负责人=自己负责项目里的成员。
+            C) 查全员：出现「全体员工 / 全员 / 所有人 / 全部员工」。管理员用 allUsers=true。不要用 teamMembers 代替。
+            D) 点名：先 resolve_user，再把解析到的 userIds 全部传入。不要只留自己。
+            示例：「查一下项目成员都做了哪些」→ teamMembers=true，结果必须是各成员对比，不能是提问者本人的任务列表。
+            「我今天做了什么」→ 只查自己。
+            「全体员工这个月」→ allUsers=true。
             多人查询（含「分别」「对比」「和/与/跟」多人）：先 resolve 每位人员，再一次 summarize_tasks 传入全部 userIds。工具会按人拆分汇总并给对比图；你只做一句对比旁白，禁止再罗列每人完整任务明细，禁止把多人结果混成一张大表。用户明确要某人详情时，再单独 list_tasks 且只传该人 userId。
+            全员查询：管理员必须 allUsers=true，禁止只查自己。普通员工请求全员会被权限拒绝，原样转述。
             权限（必须遵守，禁止绕过或改写拒绝文案）：
             1) 普通员工只能查自己；一旦查询他人姓名/任务，工具会返回固定拒绝文案，你必须原样转述给用户，不要改成“未查到”。
-            2) 普通员工若是某项目负责人，可查该负责项目内成员；多人对比时保留各人姓名与负责项目范围，不要合并成全公司视角。
-            3) 管理员/超管可查全部人员，不做限制。
-            4) 为他人创建任务：仅项目负责人可在自己负责的项目内，为项目成员创建；须先 resolve_user，再 list_my_projects/resolve_project（传 assigneeId），候选仅为「我负责且对方参与」的项目；禁止用事项里的词（如 AI）去搜无关项目；draft items 必须写 assigneeId。普通员工不能给别人建任务。
+            2) 项目负责人可查自己负责项目内的成员；说「项目成员/队员」时查队员，不要返回负责人本人的任务。不要扩大成全公司。
+            3) 管理员/超管可查全部人员、全部项目成员和全员汇总；说「项目成员」时查成员对比，说「我」时才查自己，不得混用。
+            4) 为他人创建任务：管理员可为任意项目内成员创建；项目负责人可在自己负责的项目内为成员创建。须先 resolve_user，再 list_my_projects/resolve_project（传 assigneeId）；负责人候选为「我负责且对方参与」，管理员候选为「对方参与」的项目；禁止用事项里的词（如 AI）去搜无关项目；draft items 必须写 assigneeId。普通员工不能给别人建任务。
             对用户只给结论，不展示思考、试错、内部规则、草稿机制、工具名、工具错误或异常原文。工具失败时只简短追问缺失信息，或提示稍后重试。
             参数齐全后必须调用 draft_log_tasks；最终确认只能使用工具生成的 confirm_card，禁止用 Markdown 表格或列表代替。缺事项标题时只简短追问，不生成半空确认卡。
             必须结合全部会话历史和下方当前草稿按槽位累加。短回复（项目名、时段、事项、状态、负责人）只更新对应槽，其他已有槽不得丢失；澄清 optionId 选中后也继续合并。
@@ -1324,18 +1529,19 @@ public class TaskAiService {
         item.setStatus(status); item.setStatusLabel(status(status));
     }
 
-    /** 本人可给自己建；项目负责人/管理员可给项目内成员建。 */
+    /** 本人可给自己建；项目负责人可给负责项目内成员建；管理员可给任意项目内成员建。 */
     private void assertCanAssign(long loginId, PmProject project, Long assigneeId) {
         if (assigneeId == null) throw new BusinessException("请指定任务负责人");
         if (Objects.equals(loginId, assigneeId)) return;
+        boolean unrestricted = isUnrestricted(loginId);
         boolean owner = project != null && Objects.equals(project.getOwnerId(), loginId);
-        if (!isUnrestricted(loginId) && !owner) {
+        if (!unrestricted && !owner) {
             throw new BusinessException("权限不足：仅项目负责人可为项目内成员创建任务。");
         }
         if (!isUserInProject(project.getId(), assigneeId)) {
-            throw new BusinessException(owner
-                    ? "只能为自己负责项目内的成员创建任务。"
-                    : "任务负责人必须属于该项目。");
+            throw new BusinessException(unrestricted
+                    ? "任务负责人必须属于该项目。"
+                    : "只能为自己负责项目内的成员创建任务。");
         }
     }
 
@@ -1445,6 +1651,7 @@ public class TaskAiService {
         for (Map<String,Object> i : items) {
             Map<String,Object> ev = new LinkedHashMap<>();
             ev.put("id", String.valueOf(i.get("id")));
+            if (i.get("projectId") != null) ev.put("projectId", i.get("projectId"));
             String time = Objects.toString(i.get("timeLabel"), "");
             String duration = Objects.toString(i.get("durationLabel"), "");
             ev.put("time", StringUtils.hasText(duration) && StringUtils.hasText(time) ? time + " · " + duration : time);
@@ -1503,7 +1710,23 @@ public class TaskAiService {
         if (!Set.of("bar_chart", "pie_chart", "line_chart", "task_list", "timeline").contains(type)) {
             return null;
         }
-        return type + "|" + Objects.toString(block.get("title"), "");
+        String title = Objects.toString(block.get("title"), "");
+        // list_tasks / summarize_tasks 会各出一块同质列表（标题曾为「任务列表」「任务明细」），统一折叠
+        if ("task_list".equals(type) && isGenericQueryListTitle(title)) {
+            return "task_list|query";
+        }
+        if ("timeline".equals(type) && (title.isEmpty() || "任务时序".equals(title))) {
+            return "timeline|query";
+        }
+        return type + "|" + title;
+    }
+
+    private boolean isGenericQueryListTitle(String title) {
+        return !StringUtils.hasText(title)
+                || "任务列表".equals(title)
+                || "任务明细".equals(title)
+                || "项目列表".equals(title)
+                || "项目明细".equals(title);
     }
 
     /** 查询结果结尾附带柱图/饼图；已有同 title 块则不重复。 */

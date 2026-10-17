@@ -33,6 +33,7 @@ export interface ConfirmTaskItem {
 
 export interface TaskListItem {
   id?: number
+  projectId?: number
   title: string
   projectName?: string
   statusLabel?: string
@@ -47,6 +48,7 @@ export interface TaskListItem {
 
 export interface TimelineEvent {
   id?: string | number
+  projectId?: number
   time: string
   title: string
   projectName?: string

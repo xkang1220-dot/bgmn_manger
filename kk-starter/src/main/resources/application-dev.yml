@@ -85,6 +85,6 @@ logging:
 ai:
   base-url: ${AI_BASE_URL:https://api.deepseek.com}
   model: ${AI_MODEL:deepseek-chat}
-  api-key: ${AI_API_KEY:sk-eda57ec2f1ad405f88dd8e481829760e}
+  api-key: ${AI_API_KEY:sk-6afd4454786446858c4071dbccc537ee}
   max-tool-calls: 6
   tool-trace-enabled: true

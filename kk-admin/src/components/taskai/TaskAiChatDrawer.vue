@@ -59,6 +59,10 @@ const open = computed({
   set: (v: boolean) => emit('update:modelValue', v),
 })
 
+function onOpenTask() {
+  open.value = false
+}
+
 const sessionId = ref<string>()
 const input = ref('')
 const sending = ref(false)
@@ -445,6 +449,7 @@ async function onRestart() {
               @confirm="onConfirm"
               @revise="onRevise"
               @cancel-confirm="onCancelConfirm"
+              @open-task="onOpenTask"
             />
           </div>
         </div>

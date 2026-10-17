@@ -3,7 +3,8 @@
 > 协议版本：`protocolVersion = 1`  
 > 适用：macOS App、iOS App（建议 SwiftUI；UIKit 同理）  
 > 目标：与 Web 管理端（`kk-admin`）共用同一套后端接口与 `blocks` 富消息协议，实现记工确认、问答与图表展示。  
-> Web 参考实现：`kk-admin/src/api/taskAi.ts`、`kk-admin/src/components/taskai/*`
+> Web 参考实现：`kk-admin/src/api/taskAi.ts`、`kk-admin/src/components/taskai/*`  
+> **三端增量对齐（2026-10-14 起）**：[BGMN-AI助手-Mac与iOS三端对齐说明.md](./BGMN-AI助手-Mac与iOS三端对齐说明.md)
 
 ---
 

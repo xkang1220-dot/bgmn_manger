@@ -23,6 +23,7 @@ const emit = defineEmits<{
   confirm: [items: ConfirmTaskItem[]]
   revise: []
   cancelConfirm: []
+  openTask: []
 }>()
 
 function asRecord(block: UiBlock): Record<string, unknown> {
@@ -58,11 +59,13 @@ function asRecord(block: UiBlock): Record<string, unknown> {
         :title="(block as any).title"
         :items="(block as any).items || []"
         :empty-text="(block as any).emptyText"
+        @open-task="emit('openTask')"
       />
       <TimelineBlock
         v-else-if="block.type === 'timeline'"
         :title="(block as any).title"
         :events="(block as any).events || []"
+        @open-task="emit('openTask')"
       />
       <LineChartBlock
         v-else-if="block.type === 'line_chart'"

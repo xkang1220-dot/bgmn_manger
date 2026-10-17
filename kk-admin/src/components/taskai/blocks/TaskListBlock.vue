@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useRouter } from 'vue-router'
 import type { TaskListItem } from '@/api/taskAi'
 
 defineProps<{
@@ -6,6 +7,17 @@ defineProps<{
   items: TaskListItem[]
   emptyText?: string
 }>()
+
+const emit = defineEmits<{ openTask: [] }>()
+const router = useRouter()
+
+function openTask(item: TaskListItem) {
+  if (item?.id == null) return
+  const query: Record<string, string> = { taskId: String(item.id) }
+  if (item.projectId != null) query.projectId = String(item.projectId)
+  emit('openTask')
+  router.push({ path: '/project/task', query })
+}
 </script>
 
 <template>
@@ -13,7 +25,17 @@ defineProps<{
     <div v-if="title" class="task-list-title">{{ title }}</div>
     <div v-if="!items?.length" class="task-list-empty">{{ emptyText || '暂无任务' }}</div>
     <ul v-else class="task-list-ul">
-      <li v-for="(item, idx) in items" :key="item.id ?? idx" class="task-list-li">
+      <li
+        v-for="(item, idx) in items"
+        :key="item.id ?? idx"
+        class="task-list-li"
+        :class="{ 'is-clickable': item.id != null }"
+        :role="item.id != null ? 'button' : undefined"
+        :tabindex="item.id != null ? 0 : undefined"
+        @click="openTask(item)"
+        @keydown.enter.prevent="openTask(item)"
+        @keydown.space.prevent="openTask(item)"
+      >
         <div class="task-list-main">
           <span class="task-list-name">{{ item.title }}</span>
           <span v-if="item.statusLabel" class="task-list-status">{{ item.statusLabel }}</span>
@@ -67,6 +89,21 @@ defineProps<{
   border: 1px solid rgba(255, 255, 255, 0.65);
 }
 
+.task-list-li.is-clickable {
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.task-list-li.is-clickable:hover {
+  background: rgba(255, 255, 255, 0.62);
+  border-color: rgba(37, 99, 235, 0.28);
+}
+
+.task-list-li.is-clickable:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.45);
+  outline-offset: 1px;
+}
+
 .task-list-main {
   display: flex;
   align-items: flex-start;
@@ -78,6 +115,10 @@ defineProps<{
   font-size: 14px;
   color: #18181b;
   font-weight: 500;
+}
+
+.task-list-li.is-clickable .task-list-name {
+  color: #1d4ed8;
 }
 
 .task-list-status {

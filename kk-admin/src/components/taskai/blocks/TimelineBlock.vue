@@ -1,10 +1,23 @@
 <script setup lang="ts">
+import { useRouter } from 'vue-router'
 import type { TimelineEvent } from '@/api/taskAi'
 
 defineProps<{
   title?: string
   events: TimelineEvent[]
 }>()
+
+const emit = defineEmits<{ openTask: [] }>()
+const router = useRouter()
+
+function openTask(ev: TimelineEvent) {
+  const id = ev?.id
+  if (id == null || id === '') return
+  const query: Record<string, string> = { taskId: String(id) }
+  if (ev.projectId != null) query.projectId = String(ev.projectId)
+  emit('openTask')
+  router.push({ path: '/project/task', query })
+}
 </script>
 
 <template>
@@ -12,12 +25,24 @@ defineProps<{
     <div v-if="title" class="timeline-title">{{ title }}</div>
     <div v-if="!events?.length" class="timeline-empty">暂无事项</div>
     <ol v-else class="timeline-list">
-      <li v-for="(ev, idx) in events" :key="ev.id ?? idx" class="timeline-item">
+      <li
+        v-for="(ev, idx) in events"
+        :key="ev.id ?? idx"
+        class="timeline-item"
+        :class="{ 'is-clickable': ev.id != null && ev.id !== '' }"
+      >
         <div class="timeline-rail" aria-hidden="true">
           <i class="timeline-dot" />
           <i v-if="idx < events.length - 1" class="timeline-line" />
         </div>
-        <div class="timeline-body">
+        <div
+          class="timeline-body"
+          :role="ev.id != null && ev.id !== '' ? 'button' : undefined"
+          :tabindex="ev.id != null && ev.id !== '' ? 0 : undefined"
+          @click="openTask(ev)"
+          @keydown.enter.prevent="openTask(ev)"
+          @keydown.space.prevent="openTask(ev)"
+        >
           <div class="timeline-time">{{ ev.time }}</div>
           <div class="timeline-event-title">{{ ev.title }}</div>
           <div class="timeline-meta">
@@ -89,6 +114,25 @@ defineProps<{
   background: rgba(37, 99, 235, 0.18);
 }
 
+.timeline-body {
+  border-radius: 10px;
+  padding: 2px 4px 4px;
+  margin: -2px -4px 0;
+}
+
+.timeline-item.is-clickable .timeline-body {
+  cursor: pointer;
+}
+
+.timeline-item.is-clickable .timeline-body:hover {
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.timeline-item.is-clickable .timeline-body:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.45);
+  outline-offset: 1px;
+}
+
 .timeline-time {
   font-size: 12px;
   color: #71717a;
@@ -99,6 +143,10 @@ defineProps<{
   font-weight: 550;
   color: #18181b;
   margin-top: 2px;
+}
+
+.timeline-item.is-clickable .timeline-event-title {
+  color: #1d4ed8;
 }
 
 .timeline-meta {

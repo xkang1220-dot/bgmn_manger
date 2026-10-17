@@ -1010,6 +1010,7 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         validateParentTask(task.getParentTaskId(), project.getId(), null);
         assertCanAccessProject(project);
         long loginId = StpUtil.getLoginIdAsLong();
+        boolean globalAdmin = dataScopeService.isGlobalAdmin(loginId);
         boolean taskManager = StpUtil.hasPermission("project:task:add");
         Set<Long> eligible = eligibleTaskParticipantIds(project.getId());
         if (!taskManager) {
@@ -1018,7 +1019,8 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         } else {
             validateTaskReward(task.getTaskReward());
         }
-        if (!eligible.contains(loginId)) {
+        // 全局管理员可为任意项目建任务；其他人须是项目负责人或成员。
+        if (!globalAdmin && !eligible.contains(loginId)) {
             throw new BusinessException("仅项目负责人或项目参与人可以创建任务");
         }
         task.setCompanyId(project.getCompanyId());
@@ -1028,8 +1030,11 @@ public class PmTaskServiceImpl extends ServiceImpl<PmTaskMapper, PmTask> impleme
         List<Long> participants = task.getParticipantIds() == null
                 ? new ArrayList<>()
                 : new ArrayList<>(task.getParticipantIds());
+        // 本人在项目内则默认加入参与人；管理员代建且本人不在项目中时，勿写入（否则资格校验失败）。
         if (eligible.contains(loginId) && !participants.contains(loginId)) {
             participants.add(loginId);
+        } else if (globalAdmin && !eligible.contains(loginId)) {
+            participants.removeIf(uid -> Objects.equals(uid, loginId));
         }
         Long ownerId = task.getAssigneeId() != null ? task.getAssigneeId() : project.getOwnerId();
         if (ownerId == null && !participants.isEmpty()) ownerId = participants.get(0);
